@@ -1,0 +1,2212 @@
+/* A tool looked at for hours: disciplined, not expressive.
+   The accent is used in two places only — the live status dot and the
+   selected row. */
+
+:root {
+  --bg: #FBFBFA;
+  --surface: #F2F1EE;
+  --border: #E2E0DB;
+  --text: #23262A;
+  --muted: #8A8F94;
+  --accent: #4C9A8A;
+  --radius: 4px;
+  --row: 28px;
+  --ui: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --mono: "JetBrains Mono", ui-monospace, "Cascadia Mono", Consolas, monospace;
+
+  /* The 16-colour ANSI palette for the terminal. Without it xterm.js uses its
+     own, designed for dark backgrounds, and on a light theme neither
+     `ESC[37m` nor `ESC[97m` text is readable.
+
+     On a light background "bright" does not mean paler — the brightest has to
+     be the darkest, so contrast rises instead of disappearing. */
+  --t-black: #2A2E34;
+  --t-red: #C0392B;
+  --t-green: #3F7A2E;
+  --t-yellow: #96690B;
+  --t-blue: #2A5DB0;
+  --t-magenta: #8B3E9E;
+  --t-cyan: #1F7A85;
+  --t-white: #5B6169;
+  --t-bright-black: #6B7280;
+  --t-bright-red: #E04B3C;
+  --t-bright-green: #47913A;
+  --t-bright-yellow: #B07D0A;
+  --t-bright-blue: #3A72CC;
+  --t-bright-magenta: #A24FB5;
+  --t-bright-cyan: #268F9C;
+  --t-bright-white: #3A3F46;
+  --t-selection: rgba(76, 154, 138, 0.30);
+
+  /* The scrim and shadow for floating layers. Deliberately neutral rather than
+     mixed from --bg: on a light theme, dimming with white separates nothing
+     from the page behind it. */
+  --scrim: rgba(18, 20, 24, 0.34);
+  --shadow: 0 16px 40px rgba(18, 20, 24, 0.20), 0 2px 8px rgba(18, 20, 24, 0.10);
+}
+
+/* Three states: follow the system by default, but the user's choice wins in
+   both directions. That is why the dark tokens are written twice — once for
+   the system, once for an explicit choice. */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #0F1113;
+    --surface: #16191C;
+    --border: #24282C;
+    --text: #D6D9DC;
+    --muted: #7C858D;
+
+    --t-black: #3B4048;
+    --t-red: #E06C75;
+    --t-green: #98C379;
+    --t-yellow: #E5C07B;
+    --t-blue: #61AFEF;
+    --t-magenta: #C678DD;
+    --t-cyan: #56B6C2;
+    --t-white: #ABB2BF;
+    --t-bright-black: #5C6370;
+    --t-bright-red: #F07178;
+    --t-bright-green: #B5E890;
+    --t-bright-yellow: #F2D68C;
+    --t-bright-blue: #82C4FF;
+    --t-bright-magenta: #D9A0EA;
+    --t-bright-cyan: #7BD4DE;
+    --t-bright-white: #E6E9EF;
+
+    --scrim: rgba(0, 0, 0, 0.58);
+    --shadow: 0 16px 40px rgba(0, 0, 0, 0.55), 0 2px 8px rgba(0, 0, 0, 0.45);
+  }
+}
+
+:root[data-theme="dark"] {
+  --bg: #0F1113;
+  --surface: #16191C;
+  --border: #24282C;
+  --text: #D6D9DC;
+  --muted: #7C858D;
+
+  --t-black: #3B4048;
+  --t-red: #E06C75;
+  --t-green: #98C379;
+  --t-yellow: #E5C07B;
+  --t-blue: #61AFEF;
+  --t-magenta: #C678DD;
+  --t-cyan: #56B6C2;
+  --t-white: #ABB2BF;
+  --t-bright-black: #5C6370;
+  --t-bright-red: #F07178;
+  --t-bright-green: #B5E890;
+  --t-bright-yellow: #F2D68C;
+  --t-bright-blue: #82C4FF;
+  --t-bright-magenta: #D9A0EA;
+  --t-bright-cyan: #7BD4DE;
+  --t-bright-white: #E6E9EF;
+
+  --scrim: rgba(0, 0, 0, 0.58);
+  --shadow: 0 16px 40px rgba(0, 0, 0, 0.55), 0 2px 8px rgba(0, 0, 0, 0.45);
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  height: 100%;
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--ui);
+  font-size: 13px;
+  /* Nothing on this page scrolls as a page — the terminal and the sidebar do
+     their own scrolling. Without this, a phone reads a downward drag as
+     pull-to-refresh and reloads the app instead of scrolling back through the
+     session, which is the one gesture there is for reading what came before. */
+  overscroll-behavior: none;
+}
+
+#layout { display: flex; height: 100%; }
+
+/* ------------------------------------------------------------------ sidebar */
+
+#sidebar {
+  width: 260px;
+  flex: 0 0 auto;
+  background: var(--surface);
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+#sidebar[hidden] { display: none; }
+
+#sbar {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  height: var(--row);
+  border-bottom: 1px solid var(--border);
+}
+
+#filter {
+  flex: 1 1 auto;
+  min-width: 0;
+  font: inherit;
+  color: var(--text);
+  background: none;
+  border: none;
+  outline: none;
+  padding: 0 8px;
+}
+#filter::placeholder { color: var(--muted); }
+
+#sbar button {
+  flex: 0 0 auto;
+  font: inherit;
+  font-size: 10px;
+  line-height: 1;
+  color: var(--muted);
+  background: none;
+  border: none;
+  border-left: 1px solid var(--border);
+  height: 100%;
+  width: 24px;
+  cursor: pointer;
+}
+#sbar button:hover { color: var(--text); background: color-mix(in srgb, var(--text) 8%, transparent); }
+
+#tree {
+  flex: 1 1 auto;
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding: 6px 0;
+}
+
+.pname b, .stitle b { font-weight: 600; }
+
+#splitter {
+  width: 1px;
+  flex: 0 0 auto;
+  background: var(--border);
+  cursor: col-resize;
+  position: relative;
+}
+#splitter::after {
+  content: "";
+  position: absolute;
+  inset: 0 -3px;
+}
+
+.project > .row,
+.session {
+  height: var(--row);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 8px;
+  cursor: default;
+  user-select: none;
+  white-space: nowrap;
+}
+
+.project > .row { font-weight: 500; cursor: pointer; }
+/* The project whose contents the file panel is showing. A line on the left
+   edge rather than a full background: the selected session row already uses a
+   background, and two markers of the same shape in the same column get
+   mistaken for each other. */
+.project > .row.focused { box-shadow: inset 2px 0 0 var(--accent); }
+.project > .row:hover,
+.session:hover { background: color-mix(in srgb, var(--text) 6%, transparent); }
+
+.twist {
+  width: 14px;
+  height: 18px;
+  line-height: 18px;
+  text-align: center;
+  border-radius: var(--radius);
+  color: var(--muted);
+  font-size: 9px;
+  flex: 0 0 auto;
+  cursor: pointer;
+}
+.project > .row > .twist:hover { background: color-mix(in srgb, var(--text) 14%, transparent); color: var(--text); }
+
+.pname {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  flex: 1 1 auto;
+}
+.project.gone .pname { color: var(--muted); text-decoration: line-through; }
+
+/* The parent folder that made this project show up while filtering. */
+.pvia {
+  flex: 0 0 auto;
+  font-size: 10px;
+  color: var(--muted);
+  background: color-mix(in srgb, var(--text) 8%, transparent);
+  border-radius: var(--radius);
+  padding: 1px 5px;
+  max-width: 40%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.add, .star {
+  flex: 0 0 auto;
+  width: 18px;
+  height: 18px;
+  line-height: 16px;
+  text-align: center;
+  border-radius: var(--radius);
+  color: var(--muted);
+  opacity: 0;
+  cursor: pointer;
+}
+.project > .row:hover .add,
+.project > .row:hover .star { opacity: 1; }
+/* What is already marked stays visible — that is the marker. */
+.star.on { opacity: 1; color: var(--text); }
+.star { display: flex; align-items: center; justify-content: center; }
+.star svg { width: 11px; height: 11px; fill: currentColor; }
+.add:hover, .star:hover { background: color-mix(in srgb, var(--text) 12%, transparent); color: var(--text); }
+
+.session { padding-left: 22px; cursor: pointer; }
+
+.fork {
+  flex: 0 0 auto;
+  width: 18px;
+  height: 18px;
+  line-height: 16px;
+  text-align: center;
+  border-radius: var(--radius);
+  color: var(--muted);
+  opacity: 0;
+  cursor: pointer;
+}
+.session:hover .fork { opacity: 1; }
+.fork:hover { background: color-mix(in srgb, var(--text) 12%, transparent); color: var(--text); }
+.session.selected { background: color-mix(in srgb, var(--accent) 22%, transparent); }
+/* A terminal with no stored session: its title is only a number, so it is
+   kept quiet rather than competing with titles that have content. */
+.session.loose .stitle { color: var(--muted); font-style: italic; }
+
+/* ============================ sidebar: arranged by time */
+
+/* --------------------------------------------------------------- zone label */
+
+.zlabel {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 9px 8px 3px;
+  font-size: 9px;
+  letter-spacing: 0.13em;
+  text-transform: uppercase;
+  color: var(--muted);
+  user-select: none;
+}
+.zcount {
+  letter-spacing: 0;
+  font-family: var(--mono);
+}
+.zsep {
+  height: 1px;
+  background: var(--border);
+  margin: 7px 8px 2px;
+}
+
+/* ------------------------------------------------------- top zone (2 lines) */
+
+.zrow {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  padding: 4px 8px;
+  cursor: pointer;
+  user-select: none;
+}
+.zrow:hover { background: color-mix(in srgb, var(--text) 6%, transparent); }
+.zrow.selected { background: color-mix(in srgb, var(--accent) 22%, transparent); }
+.zrow > .dot { margin-top: 5px; }
+.zrow > .when { margin-top: 1px; }
+
+.zcol {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.zmeta {
+  display: flex;
+  gap: 5px;
+  font-size: 9.5px;
+  color: var(--muted);
+  white-space: nowrap;
+  overflow: hidden;
+}
+.zproj {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  flex: 0 1 auto;
+}
+
+/* --------------------------------------------------------- fixed time column */
+
+/* The width is pinned rather than fitted to its contents: an even column is
+   what makes the dates scannable at a glance, and that is its whole point. */
+.when {
+  width: 58px;
+  flex: 0 0 auto;
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--muted);
+  overflow: hidden;
+  white-space: nowrap;
+}
+.when.on { color: var(--accent); }
+.when.tail {
+  width: auto;
+  text-align: right;
+  font-size: 9.5px;
+}
+
+.stitle {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.stitle.loose { color: var(--muted); font-style: italic; }
+/* A name of your own is not a title that happens to be short — the difference
+   has to show, or an alias merely disguises a session nobody has named. */
+.stitle.alias { color: var(--text); font-weight: 500; }
+.stitle.alias::before {
+  content: "▍";
+  color: var(--accent);
+  margin-right: 4px;
+  font-weight: 400;
+}
+
+/* --------------------------------------------------------- project row */
+
+/* Shrinks before the project name does, and disappears entirely before the
+   name is ever truncated. */
+.project > .row > .pmeta {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  font-family: var(--mono);
+  font-size: 9.5px;
+  color: var(--muted);
+}
+.project > .row > .pname { flex: 1 1 auto; }
+/* Steps back when the row is hovered: that is where ＋ and the bookmark ribbon
+   appear, and two things must not share one column. */
+.project > .row:hover > .pmeta { display: none; }
+
+/* ------------------------------------------------------- day groups */
+
+.bhead {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 8px 3px 16px;
+  font-size: 9.5px;
+  color: var(--muted);
+  cursor: pointer;
+  user-select: none;
+}
+.bhead:hover { background: color-mix(in srgb, var(--text) 6%, transparent); color: var(--text); }
+.barw { font-size: 7px; width: 8px; flex: 0 0 auto; }
+.blabel { flex: 1 1 auto; }
+.bcount { font-family: var(--mono); flex: 0 0 auto; }
+
+.session { padding-left: 22px; }
+
+/* ------------------------------------------------------------ rename */
+
+.srename {
+  flex: 1 1 auto;
+  min-width: 0;
+  font: inherit;
+  color: var(--text);
+  background: var(--bg);
+  border: 1px solid var(--accent);
+  border-radius: var(--radius);
+  padding: 0 4px;
+  height: 20px;
+  outline: none;
+}
+
+/* ------------------------------------------- self-folding explorer */
+
+/* A code column of ±100px is why this panel went almost unused. As soon as a
+   file is opened, the explorer retreats to a strip and the code takes the
+   rest; one click on the strip brings it back. */
+.pexp.folded {
+  width: 26px !important;
+  overflow: hidden;
+}
+.pexp.folded > * { display: none; }
+.pexp.folded > .foldstrip { display: flex; }
+
+.foldstrip {
+  display: none;
+  flex: 1 1 auto;
+  align-items: flex-start;
+  justify-content: center;
+  padding-top: 10px;
+  cursor: pointer;
+  color: var(--muted);
+  font-size: 11px;
+  writing-mode: vertical-rl;
+  letter-spacing: 0.08em;
+  user-select: none;
+}
+.foldstrip:hover { color: var(--text); background: color-mix(in srgb, var(--text) 6%, transparent); }
+
+/* Status dot: filled = live terminal, hollow circle = stored session. */
+.dot {
+  flex: 0 0 auto;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  border: 1px solid var(--muted);
+}
+.dot.live { background: var(--accent); border-color: var(--accent); }
+
+.badge {
+  flex: 0 0 auto;
+  font-size: 9px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.empty-hint {
+  padding: 12px 10px;
+  color: var(--muted);
+  line-height: 1.5;
+}
+.empty-hint code {
+  font-family: var(--mono);
+  font-size: 11px;
+}
+
+/* --------------------------------------------------------------------- main */
+
+#main { flex: 1 1 auto; display: flex; flex-direction: column; min-width: 0; }
+
+#tabs {
+  display: flex;
+  align-items: stretch;
+  height: var(--row);
+  border-bottom: 1px solid var(--border);
+  min-width: 0;
+}
+
+.tabstrip {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  align-items: stretch;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+.tabstrip::-webkit-scrollbar { display: none; }
+
+.tab {
+  /* `flex: 0 0 auto` is the heart of the fix: without it a tab shrinks below
+     its content width and its `nowrap` text spills over the tab beside it. */
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 10px;
+  border-right: 1px solid var(--border);
+  color: var(--muted);
+  cursor: pointer;
+  white-space: nowrap;
+  overflow: hidden;
+  max-width: 320px;
+}
+/* Long titles are cut with an ellipsis rather than left to overflow. */
+.tname { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+
+/* --------------------------------------------------- terminal activity mark */
+
+/* One dot per tab: amber while the program is producing output, green once a
+   real run finished while nobody was looking. Invisible otherwise — a mark
+   that is always there is a mark nobody reads. Takes no space when hidden so
+   quiet tabs keep their exact old layout. */
+.tdot {
+  flex: 0 0 auto;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  display: none;
+}
+.tdot.busy {
+  display: inline-block;
+  background: var(--warn);
+  animation: actpulse 1.6s ease-in-out infinite;
+}
+.tdot.done { display: inline-block; background: var(--t-bright-green); }
+@keyframes actpulse {
+  50% { opacity: 0.35; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .tdot.busy { animation: none; }
+}
+/* The same states on sidebar rows: their existing live dot changes colour
+   rather than a second dot appearing next to it. */
+#tree [data-tid].tbusy .dot {
+  background: var(--warn);
+  border-color: var(--warn);
+  animation: actpulse 1.6s ease-in-out infinite;
+}
+#tree [data-tid].tdone .dot {
+  background: var(--t-bright-green);
+  border-color: var(--t-bright-green);
+}
+@media (prefers-reduced-motion: reduce) {
+  #tree [data-tid].tbusy .dot { animation: none; }
+}
+
+/* The bell is drawn, and the icon must never be what the click lands on. */
+#sound-btn svg { pointer-events: none; display: block; }
+.tab.active { color: var(--text); background: color-mix(in srgb, var(--accent) 22%, transparent); }
+.tab.dead { text-decoration: line-through; }
+.tab .mem { flex: 0 0 auto; font-size: 11px; font-variant-numeric: tabular-nums; }
+.tab .x { flex: 0 0 auto; color: var(--muted); padding: 0 2px; }
+.tab .x:hover { color: var(--text); }
+
+.tools { display: flex; align-items: center; flex: 0 0 auto; }
+.tools button {
+  font: inherit;
+  font-size: 11px;
+  color: var(--muted);
+  background: none;
+  border: none;
+  border-left: 1px solid var(--border);
+  padding: 0 10px;
+  height: 100%;
+  cursor: pointer;
+}
+.tools button:hover { color: var(--text); }
+.tools button.on { color: var(--text); }
+
+#banner {
+  padding: 3px 10px;
+  font-size: 11px;
+  color: var(--bg);
+  background: var(--muted);
+}
+
+/* A column, so the touch key bar can sit below the terminal without covering
+   it. `#terms` is still the positioning anchor for the machine hosts inside. */
+#stage { position: relative; min-height: 0; display: flex; flex-direction: column; }
+#terms { position: relative; flex: 1 1 auto; min-height: 0; }
+/* One host per machine. Only the active machine's is visible; the others stay
+   alive behind it, so coming back does not mean attaching again. */
+#terms .mhost { position: absolute; inset: 0; }
+#terms .mhost[hidden] { display: none; }
+#terms .host { position: absolute; inset: 0; }
+#terms .host[hidden] { display: none; }
+#terms .host { display: flex; flex-direction: column; min-height: 0; }
+.hview { flex: 1 1 auto; min-height: 0; position: relative; }
+
+/* The scrollback control on a touch screen. It sits on the terminal rather than
+   on the key bar: the bar's PgUp/PgDn look like this and mean something else —
+   they are keystrokes for the program, not movement of the view. */
+.spad {
+  position: absolute;
+  right: 8px;
+  /* Vertically centred rather than in a corner. The bottom of a terminal is the
+     busiest part of it — an agent keeps its prompt and its status lines there —
+     while the right-hand end of a line is usually empty, because text is left
+     aligned and rarely fills the last columns. It also happens to be where a
+     thumb already is. */
+  top: 50%;
+  transform: translateY(-50%);
+  z-index: 5;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  align-items: flex-end;
+}
+.spad[hidden] { display: none; }
+.sbtn {
+  min-width: 38px;
+  height: 38px;
+  padding: 0 10px;
+  /* The outline is what makes it findable. Everything behind it is monospaced
+     text of roughly even weight, so a hairline in the panel border colour
+     disappears into it — the ring leans on the accent instead, which belongs to
+     no terminal palette and so reads as a control rather than as output. Both
+     themes get the same one: `--accent` is defined once, and it holds on the
+     light ground and the dark one alike. */
+  /* One pixel, tinted towards the accent. Two was tried and it is too much: on a
+     phone at three device pixels per CSS pixel it becomes a thick coloured frame
+     that shouts over the text it is sitting on. What separates the control from
+     the terminal is the solid fill and the shadow; the edge only has to be
+     defined, and a grey edge is what disappeared into the text before. */
+  border: 1px solid color-mix(in srgb, var(--accent) 45%, var(--border));
+  /* A small radius, not a circle. Everything else in this app is a rectangle
+     with `--radius` corners — tabs, rows, fields — and two floating pills read
+     as something borrowed from another program. */
+  border-radius: var(--radius);
+  /* The icon is centred by the box, not by the font's idea of where a glyph
+     sits. */
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  /* Opaque, not translucent. A see-through control with text crawling underneath
+     is harder to read than either of them alone. */
+  background: var(--surface);
+  color: var(--text);
+  font-family: var(--ui);
+  font-size: 14px;
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
+  cursor: pointer;
+  touch-action: manipulation;
+  user-select: none;
+  /* Slightly held back while you are at the live end — there it is only an
+     offer. It comes forward once you are actually reading back. */
+  opacity: 0.8;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.22);
+}
+.sbtn[hidden] { display: none; }
+/* The icon must not be the thing under the finger: hit-testing would return the
+   `<svg>` rather than the button, and anything asking what is at that point —
+   including a test checking it tapped the right control — gets the wrong
+   answer. */
+.sbtn svg { pointer-events: none; display: block; }
+.sbtn:active {
+  opacity: 1;
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--bg);
+}
+.spad.behind .sbtn { opacity: 1; border-color: var(--accent); }
+.slatest { color: var(--accent); font-weight: 600; }
+/* The panel caption is only useful when everything is shown at once; in tab
+   mode the bar above already says the same thing. */
+.hcap { display: none; }
+
+/* --- touch key bar ------------------------------------------------------- */
+
+/* An on-screen keyboard has no Esc, Tab or arrows. This bar sits directly
+   above it, so the thumb does not have to travel far. */
+#keybar {
+  flex: 0 0 auto;
+  border-top: 1px solid var(--border);
+  background: var(--surface);
+  padding: 4px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  /* On a phone, the system bar at the bottom eats the lower edge. */
+  padding-bottom: max(4px, env(safe-area-inset-bottom));
+}
+#keybar[hidden] { display: none; }
+
+.krow {
+  display: flex;
+  gap: 4px;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+.krow::-webkit-scrollbar { display: none; }
+
+.kkey {
+  /* Shrink as well as grow. Grow-only left the row a few pixels wider than a
+     390 px phone, and what slid off the end was the arrows — the row scrolled,
+     invisibly, with no scrollbar to say so. */
+  flex: 1 1 auto;
+  /* 34px is the lower bound for a touch target that still feels right; smaller
+     than that and the neighbouring key gets pressed too. */
+  min-width: 34px;
+  padding: 0 2px;
+  overflow: hidden;
+  height: 34px;
+  font: inherit;
+  font-size: 13px;
+  font-family: var(--mono);
+  color: var(--text);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  cursor: pointer;
+  user-select: none;
+  -webkit-tap-highlight-color: transparent;
+  touch-action: manipulation;
+}
+.kkey:active { background: color-mix(in srgb, var(--accent) 28%, var(--bg)); }
+/* An armed modifier has to look armed — the next character is about to change
+   meaning, and that must not be a surprise. */
+.kkey.armed {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+  font-weight: 600;
+}
+.kkey.kmore { flex: 0 0 auto; min-width: 34px; color: var(--muted); }
+.kkey.kmore.on { color: var(--text); }
+
+/* --- grid mode ----------------------------------------------------------- */
+
+#terms.grid .mhost {
+  display: grid;
+  grid-template-columns: repeat(var(--cols, 2), 1fr);
+  gap: 1px;
+  background: var(--border); /* the divider lines are the grid gaps showing through */
+}
+#terms.grid .host {
+  position: static;
+  inset: auto;
+  min-width: 0;
+  background: var(--bg);
+  outline: 1px solid transparent;
+}
+/* The panel that is active: this is where app shortcuts go. */
+#terms.grid .host.on { outline-color: var(--accent); }
+#terms.grid .hcap {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: 20px;
+  padding: 0 4px 0 8px;
+  border-bottom: 1px solid var(--border);
+  font-size: 10px;
+  color: var(--muted);
+  white-space: nowrap;
+}
+#terms.grid .host.on .hcap { color: var(--text); }
+.hcname { flex: 1 1 auto; overflow: hidden; text-overflow: ellipsis; }
+.hcx {
+  flex: 0 0 auto;
+  font: inherit;
+  font-size: 9px;
+  line-height: 1;
+  color: var(--muted);
+  background: none;
+  border: none;
+  padding: 2px 4px;
+  border-radius: var(--radius);
+  cursor: pointer;
+}
+.hcx:hover { color: var(--text); background: color-mix(in srgb, var(--text) 14%, transparent); }
+
+@media (max-width: 720px) {
+  /* One column on a phone screen: two terminals side by side at 390px leave no
+     readable width. */
+  #terms.grid .mhost { grid-template-columns: 1fr; }
+}
+
+.dropzone {
+  position: absolute;
+  inset: 0;
+  z-index: 20;
+  display: grid;
+  place-items: center;
+  background: color-mix(in srgb, var(--accent) 14%, var(--bg));
+  border: 2px dashed var(--accent);
+  border-radius: var(--radius);
+  /* The overlay must not catch dragleave from its own children — the flicker
+     makes the zone look like it is blinking as the cursor moves. */
+  pointer-events: none;
+}
+.dropzone[hidden] { display: none; }
+.dropmsg {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--accent);
+  text-align: center;
+  padding: 0 24px;
+}
+.dropmsg span {
+  display: block;
+  margin-top: 6px;
+  font-weight: 400;
+  font-size: 11px;
+  color: var(--muted);
+}
+
+#empty {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  color: var(--muted);
+  padding: 0 24px;
+  text-align: center;
+  line-height: 1.6;
+}
+#empty[hidden] { display: none; }
+
+/* The token box for when the page loads but the token is not in localStorage —
+   the cookie is valid, so a 401 never happens and the 401 page is never seen.
+   Without this, the only way out is typing a URL by hand. */
+#tokenform {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  width: min(92vw, 320px);
+  text-align: left;
+}
+#tokenform input {
+  height: 34px;
+  padding: 0 10px;
+  color: var(--text);
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  font: 13px var(--mono);
+  outline: none;
+}
+#tokenform input:focus { border-color: var(--accent); }
+#tokenform button {
+  height: 34px;
+  border: 0;
+  border-radius: var(--radius);
+  background: var(--accent);
+  color: #fff;
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+}
+#tokenform .thint { font-size: 11.5px; line-height: 1.5; }
+
+/* The way in on an empty stage, on a touch screen. */
+.emsg {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+}
+#empty-open {
+  font: inherit;
+  font-size: 13px;
+  padding: 8px 16px;
+  border-radius: var(--radius);
+  border: 1px solid var(--border);
+  background: var(--bg);
+  color: var(--text);
+  cursor: pointer;
+}
+#empty-open:active { background: color-mix(in srgb, var(--accent) 24%, var(--bg)); }
+
+.term { height: 100%; }
+
+/* ----------------------------------------------------------- small menu */
+
+#menu {
+  position: fixed;
+  /* Above every panel, the picker (32) included: the menu is a transient
+     popover that is always the answer to the most recent click, and the picker
+     footer now opens it. At 20 it opened underneath the picker's scrim. */
+  z-index: 40;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 4px 0;
+  min-width: 168px;
+  box-shadow: var(--shadow);
+}
+#menu[hidden] { display: none; }
+#menu div {
+  padding: 5px 12px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+#menu div:hover { background: color-mix(in srgb, var(--accent) 22%, transparent); }
+
+/* ---------------------------------------------------------- command palette */
+
+#palette {
+  position: fixed;
+  inset: 0;
+  z-index: 30;
+  background: var(--scrim);
+  display: flex;
+  justify-content: center;
+  align-items: flex-start;
+  padding-top: 12vh;
+}
+#palette[hidden] { display: none; }
+
+.pbox {
+  width: min(680px, 92vw);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow: hidden;
+  box-shadow: var(--shadow);
+}
+
+.pbox input {
+  width: 100%;
+  font: inherit;
+  font-size: 14px;
+  color: var(--text);
+  background: none;
+  border: none;
+  border-bottom: 1px solid var(--border);
+  padding: 10px 12px;
+  outline: none;
+}
+
+.plist { max-height: 52vh; overflow-y: auto; }
+
+.prow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: var(--row);
+  padding: 0 12px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.prow.sel { background: color-mix(in srgb, var(--accent) 22%, transparent); }
+
+.pkind {
+  flex: 0 0 auto;
+  width: 62px;
+  font-size: 9px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+.plabel { flex: 1 1 auto; overflow: hidden; text-overflow: ellipsis; }
+.plabel b { font-weight: 600; }
+.phint {
+  flex: 0 0 auto;
+  color: var(--muted);
+  font-size: 11px;
+  max-width: 42%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.pnone { padding: 10px 12px; color: var(--muted); }
+
+/* -------------------------------------------------------------------- dialog */
+
+#ask {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  background: var(--scrim);
+  display: flex;
+  justify-content: center;
+  align-items: flex-start;
+  padding: 18vh 16px;
+}
+#ask[hidden] { display: none; }
+
+.abox {
+  width: min(440px, 100%);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  padding: 14px;
+}
+.atitle { font-weight: 600; margin-bottom: 10px; }
+.abox input {
+  width: 100%;
+  font: inherit;
+  font-size: 14px;
+  color: var(--text);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 6px 8px;
+  outline: none;
+}
+.abox input:focus { outline: 1px solid var(--accent); }
+.anote { color: var(--muted); font-size: 11px; margin-top: 8px; line-height: 1.5; }
+.anote[hidden] { display: none; }
+
+.arow { display: flex; justify-content: flex-end; gap: 8px; margin-top: 12px; }
+.arow button {
+  font: inherit;
+  padding: 5px 14px;
+  border-radius: var(--radius);
+  border: 1px solid var(--border);
+  background: var(--bg);
+  color: var(--text);
+  cursor: pointer;
+}
+.arow button.primary { border-color: var(--accent); }
+.arow button:hover { background: color-mix(in srgb, var(--accent) 18%, var(--bg)); }
+
+/* ------------------------------------------------------------------ setting */
+
+#sfoot {
+  flex: 0 0 auto;
+  border-top: 1px solid var(--border);
+}
+#sfoot button {
+  width: 100%;
+  height: var(--row);
+  font: inherit;
+  text-align: left;
+  padding: 0 8px;
+  color: var(--muted);
+  background: none;
+  border: none;
+  cursor: pointer;
+}
+#sfoot button:hover { color: var(--text); background: color-mix(in srgb, var(--text) 8%, transparent); }
+
+/* Paths and folder trails are trimmed from the left by reversing their
+   container's direction. Only the CONTAINER is reversed: the content has to
+   stay one whole run, or the neutral characters at its ends (`/`, `\`) move
+   with it. `<bdi>` isolates that content; it exists for exactly this. */
+.path bdi,
+.awhere bdi,
+.ecrumb bdi {
+  direction: ltr;
+  unicode-bidi: isolate;
+}
+
+/* ---------------------------------------------------------------- settings
+
+   A left rail plus one pane at a time. Laid out flat this panel is 1040px tall,
+   and what is wanted most (Agents) sits at the very bottom. Every colour comes
+   from the existing tokens — all that was added are three SEMANTIC ones, kept
+   apart from --accent so the accent still means "live/selected", exactly as the
+   head of this file says. */
+
+#settings {
+  --ok: var(--accent);
+  --warn: var(--t-bright-yellow);
+  --bad: var(--t-bright-red);
+  position: fixed;
+  inset: 0;
+  z-index: 30;
+  background: var(--scrim);
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  padding: 5vh 16px;
+}
+#settings[hidden] { display: none; }
+
+.sbox {
+  width: min(860px, 100%);
+  height: min(620px, 90vh);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  display: grid;
+  grid-template-columns: 172px 1fr;
+  grid-template-rows: auto 1fr auto;
+  min-height: 0;
+  overflow: hidden;
+}
+/* Every child of the grid, not just the pane. A grid item defaults to
+   `min-width: auto`, so a single unbreakable line anywhere in the column — the
+   config path in the header was the one — raises the whole track's floor, and
+   on a phone the panel then grew to ~1100 px with its own buttons pushed off
+   the right edge of the screen. */
+.sbox > * { min-width: 0; }
+
+.shead {
+  grid-column: 1 / -1;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--border);
+}
+.shead h2 { font-size: 13px; font-weight: 600; margin: 0; flex: 0 0 auto; }
+
+/* The machine whose settings are being shown. This panel follows the machine
+   tab, and its only hint used to be the config path off to the right — far too
+   subtle for something that edits another machine. */
+.shead .smachine {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11px;
+  color: var(--muted);
+  padding: 2px 7px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--text) 8%, transparent);
+}
+/* A REMOTE machine is marked firmly: editing another computer's config without
+   realising it is an expensive mistake. */
+.shead .smachine.remote {
+  color: var(--text);
+  background: color-mix(in srgb, var(--accent) 18%, transparent);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 45%, transparent);
+}
+.shead .smachine .mdot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--accent);
+}
+.shead .path {
+  flex: 1 1 auto;
+  min-width: 0;
+  text-align: right;
+  color: var(--muted);
+  font-size: 11px;
+  font-family: var(--mono);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  /* Trimmed at its LEFT end — the file name on the right is what matters.
+     The content is wrapped in <bdi> so only the container is reversed; without
+     that, the leading slash of a unix path moves to the back and
+     `/Users/tbs/x` shows as `Users/tbs/x/`. */
+  direction: rtl;
+}
+.shead button {
+  font: inherit;
+  color: var(--muted);
+  background: none;
+  border: none;
+  cursor: pointer;
+  padding: 0 4px;
+  flex: 0 0 auto;
+}
+.shead button:hover { color: var(--text); }
+
+/* ------------------------------------------------------------------- rail */
+
+.srail {
+  border-right: 1px solid var(--border);
+  padding: 8px 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  overflow-y: auto;
+  min-height: 0;
+}
+.sitem {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  font: inherit;
+  text-align: left;
+  padding: 0 10px 0 12px;
+  height: var(--row);
+  color: var(--text);
+  background: none;
+  border: none;
+  border-left: 2px solid transparent;
+  cursor: pointer;
+}
+.sitem:hover { background: color-mix(in srgb, var(--text) 6%, transparent); }
+.sitem.on {
+  border-left-color: var(--accent);
+  background: color-mix(in srgb, var(--text) 8%, transparent);
+  font-weight: 500;
+}
+.sitem:focus-visible { outline: 1px solid var(--accent); outline-offset: -2px; }
+.silabel { flex: 1 1 auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* Each section's state, readable without opening it. */
+.schip {
+  flex: 0 0 auto;
+  font-family: var(--mono);
+  font-size: 9.5px;
+  line-height: 1;
+  padding: 3px 5px;
+  border-radius: var(--radius);
+  font-variant-numeric: tabular-nums;
+}
+.schip.muted { color: var(--muted); background: color-mix(in srgb, var(--text) 8%, transparent); }
+.schip.warn { color: var(--warn); background: color-mix(in srgb, var(--warn) 16%, transparent); }
+.schip.bad { color: var(--bad); background: color-mix(in srgb, var(--bad) 16%, transparent); }
+
+/* ------------------------------------------------------------------ pane */
+
+.spane {
+  overflow-y: auto;
+  min-height: 0;
+  /* A grid item's implied `min-width: auto` lets its content set the floor, and
+     one long line then widens the pane past the screen — on a phone the whole
+     Settings panel silently grew to ~1100 px and pushed its own buttons off the
+     right edge. Zero says: the column decides, the content wraps. */
+  min-width: 0;
+  padding: 14px 16px 18px;
+}
+.sec { display: flex; flex-direction: column; gap: 12px; }
+
+.sechead h3 { margin: 0 0 3px; font-size: 13px; font-weight: 600; }
+.sechead p { margin: 0; font-size: 11.5px; line-height: 1.5; color: var(--muted); max-width: 62ch; }
+.sechint { font-size: 11px; line-height: 1.5; color: var(--muted); max-width: 62ch; }
+.secpath { font-family: var(--mono); font-size: 11px; color: var(--muted); word-break: break-all; }
+
+/* One treatment for every state, not three different shades of red. */
+.sstat {
+  font-size: 11px;
+  line-height: 1.5;
+  padding-left: 9px;
+  border-left: 2px solid var(--muted);
+  color: var(--muted);
+  max-width: 62ch;
+}
+.sstat.ok { border-left-color: var(--ok); color: var(--text); }
+.sstat.warn { border-left-color: var(--warn); color: var(--text); }
+.sstat.bad { border-left-color: var(--bad); color: var(--bad); }
+.sstat.muted { border-left-color: transparent; padding-left: 0; }
+
+/* ----------------------------------------------------------------- switch */
+
+.switchrow { display: flex; align-items: center; }
+.switch {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+  font-size: 11px;
+  color: var(--muted);
+}
+.switch input { position: absolute; opacity: 0; width: 0; height: 0; }
+.switch .track {
+  position: relative;
+  width: 30px;
+  height: 17px;
+  border-radius: 9px;
+  background: color-mix(in srgb, var(--text) 18%, transparent);
+  transition: background 0.12s ease;
+  flex: 0 0 auto;
+}
+.switch .track::after {
+  content: "";
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 13px;
+  height: 13px;
+  border-radius: 50%;
+  background: var(--bg);
+  transition: transform 0.12s ease;
+}
+.switch input:checked + .track { background: var(--accent); }
+.switch input:checked + .track::after { transform: translateX(13px); }
+.switch input:focus-visible + .track { outline: 1px solid var(--accent); outline-offset: 2px; }
+.switch.small .track { width: 26px; height: 15px; }
+.switch.small .track::after { width: 11px; height: 11px; }
+.switch.small input:checked + .track::after { transform: translateX(11px); }
+.switchword { font-variant-numeric: tabular-nums; }
+
+@media (prefers-reduced-motion: reduce) {
+  .switch .track, .switch .track::after { transition: none; }
+}
+
+/* --------------------------------------------------------- secret values */
+
+.secret { display: flex; flex-direction: column; gap: 5px; }
+.seclabel {
+  font-size: 9px;
+  letter-spacing: 0.13em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+.secrow { display: flex; gap: 6px; align-items: stretch; }
+.secval {
+  flex: 1 1 auto;
+  min-width: 0;
+  font: inherit;
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--text);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 5px 7px;
+}
+.secval:focus { outline: 1px solid var(--accent); }
+.secbtn {
+  flex: 0 0 auto;
+  font: inherit;
+  font-size: 11px;
+  padding: 4px 10px;
+  border-radius: var(--radius);
+  border: 1px solid var(--border);
+  background: var(--bg);
+  color: var(--text);
+  cursor: pointer;
+}
+.secbtn:hover:not(:disabled) { background: color-mix(in srgb, var(--accent) 18%, var(--bg)); }
+.secbtn:disabled { opacity: 0.45; cursor: default; }
+.secbtn.primary { border-color: var(--accent); }
+.secbtn:focus-visible { outline: 1px solid var(--accent); outline-offset: 1px; }
+
+/* ---------------------------------------------------------- dropped files */
+
+.usagebar { display: flex; align-items: center; gap: 10px; }
+.usage {
+  flex: 1 1 auto;
+  font-family: var(--mono);
+  font-size: 11.5px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+.dfields { display: flex; flex-wrap: wrap; gap: 10px 20px; }
+.dfield { display: flex; flex-direction: column; gap: 4px; }
+.dcap { font-size: 11px; color: var(--muted); }
+.dline { display: flex; align-items: baseline; gap: 6px; }
+.dfield input {
+  font: inherit;
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--text);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 4px 6px;
+  width: 5.5em;
+  font-variant-numeric: tabular-nums;
+}
+.dfield input:focus { outline: 1px solid var(--accent); }
+.dfield em { font-style: normal; font-size: 11px; color: var(--muted); }
+
+/* ----------------------------------------------------------------- agents */
+
+.alist {
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow: hidden;
+}
+.agent { border-bottom: 1px solid var(--border); }
+.agent:last-child { border-bottom: none; }
+
+.ahead {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 32px;
+  padding: 0 10px;
+  cursor: pointer;
+  user-select: none;
+}
+.ahead:hover { background: color-mix(in srgb, var(--text) 5%, transparent); }
+.atwist { width: 10px; flex: 0 0 auto; font-size: 9px; color: var(--muted); }
+.adot {
+  flex: 0 0 auto;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--ok);
+}
+.adot.bad { background: var(--bad); }
+.adot.off { background: none; border: 1px solid var(--muted); }
+.agent .aname { flex: 0 0 auto; font-weight: 600; }
+.awhere {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-family: var(--mono);
+  font-size: 10.5px;
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  direction: rtl;
+  text-align: left;
+}
+.awhere.bad { color: var(--bad); direction: ltr; }
+.agent.off .aname { color: var(--muted); }
+
+.abody {
+  display: grid;
+  grid-template-columns: 96px 1fr;
+  align-items: center;
+  gap: 7px 10px;
+  padding: 4px 10px 12px 28px;
+}
+.flabel { font-size: 11px; color: var(--muted); }
+.abody input[type="text"],
+.abody select {
+  font: inherit;
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--text);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 4px 6px;
+  min-width: 0;
+}
+.abody select { font-family: var(--ui); }
+.abody input[type="text"]:focus,
+.abody select:focus { outline: 1px solid var(--accent); }
+.abody input::placeholder { color: var(--muted); }
+.span2 { grid-column: 1 / -1; }
+.afoot { display: flex; gap: 8px; }
+
+.agent .del {
+  font: inherit;
+  font-size: 11px;
+  padding: 4px 10px;
+  border-radius: var(--radius);
+  border: 1px solid var(--border);
+  background: var(--bg);
+  color: var(--muted);
+  cursor: pointer;
+}
+.agent .del:hover { color: var(--bad); border-color: var(--bad); }
+.agent .del.armed { color: var(--bad); border-color: var(--bad); font-weight: 600; }
+
+.addbtn {
+  align-self: flex-start;
+  font: inherit;
+  font-size: 12px;
+  padding: 6px 12px;
+  border-radius: var(--radius);
+  border: 1px solid var(--border);
+  background: var(--bg);
+  color: var(--text);
+  cursor: pointer;
+}
+.addbtn:hover { background: color-mix(in srgb, var(--accent) 18%, var(--bg)); }
+.addbtn.primary { border-color: var(--accent); }
+.addrow {
+  border: 1px solid var(--accent);
+  border-radius: var(--radius);
+  background: color-mix(in srgb, var(--accent) 5%, transparent);
+}
+.addrow .ahead { cursor: default; }
+.addrow .ahead:hover { background: none; }
+.addrow .aname { flex: 1 1 auto; }
+
+/* ------------------------------------------------------------------- foot */
+
+.sfootrow {
+  grid-column: 1 / -1;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 12px;
+  border-top: 1px solid var(--border);
+}
+.sfootrow .note { flex: 1 1 auto; color: var(--muted); font-size: 11px; }
+.sfootrow .note.bad { color: var(--bad); }
+
+@media (max-width: 720px) {
+  #settings { padding: 3vh 8px; }
+  .sbox { height: 94vh; grid-template-columns: 1fr; grid-template-rows: auto auto 1fr auto; }
+  .srail {
+    flex-direction: row;
+    border-right: none;
+    border-bottom: 1px solid var(--border);
+    padding: 0;
+    overflow-x: auto;
+  }
+  .sitem { width: auto; border-left: none; border-bottom: 2px solid transparent; }
+  .sitem.on { border-left-color: transparent; border-bottom-color: var(--accent); }
+  .abody { grid-template-columns: 1fr; align-items: stretch; padding-left: 10px; }
+}
+
+/* ------------------------------------------------------------ machine bar */
+
+#mbar {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: stretch;
+  height: 24px;
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+  min-width: 0;
+}
+.mstrip {
+  /* Shrinks, does not stretch: the ＋ button sits beside the last tab rather
+     than being flung to the right edge of the screen. */
+  flex: 0 1 auto;
+  min-width: 0;
+  display: flex;
+  align-items: stretch;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+.mstrip::-webkit-scrollbar { display: none; }
+/* The scrollbar is hidden because on two or three tabs it is only noise. But
+   when there really is more, there has to be a sign — otherwise tab forty is
+   never found. A thin fade at the right edge, set by JS only when something is
+   actually hidden. */
+#mbar.more .mstrip {
+  -webkit-mask-image: linear-gradient(to right, #000 calc(100% - 18px), transparent);
+  mask-image: linear-gradient(to right, #000 calc(100% - 18px), transparent);
+}
+
+.mtab {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 200px;
+  padding: 0 6px 0 9px;
+  border-right: 1px solid var(--border);
+  font-size: 11px;
+  color: var(--muted);
+  cursor: pointer;
+  user-select: none;
+  white-space: nowrap;
+  overflow: hidden;
+}
+/* This machine itself never scrolls away. It is the one tab always needed, and
+   at a hundred machines it would land far off the left of the screen. */
+.mtab:first-child {
+  position: sticky;
+  left: 0;
+  z-index: 1;
+  background: var(--surface);
+}
+.mtab:first-child.on { background: var(--bg); }
+
+.mtab:hover { color: var(--text); background: color-mix(in srgb, var(--text) 6%, transparent); }
+.mtab.on { color: var(--text); background: var(--bg); box-shadow: inset 0 -2px 0 var(--accent); }
+.mname { overflow: hidden; text-overflow: ellipsis; }
+
+/* Status dot: green connected, yellow retrying, red down. The colours are
+   borrowed from the terminal palette so they change with the theme. */
+.mdot {
+  flex: 0 0 auto;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--muted);
+}
+.mdot.ok { background: var(--accent); }
+.mdot.wait { background: var(--t-yellow); }
+.mdot.bad { background: var(--t-bright-red); }
+
+.madd {
+  flex: 0 0 auto;
+  border-right: 1px solid var(--border);
+  font: inherit;
+  font-size: 11px;
+  line-height: 1;
+  color: var(--muted);
+  background: none;
+  border: none;
+  border-left: 1px solid var(--border);
+  width: 26px;
+  cursor: pointer;
+}
+.madd:hover { color: var(--text); background: color-mix(in srgb, var(--text) 10%, transparent); }
+
+/* --------------------------------------------------- pairing dialog */
+
+#pairdlg {
+  position: fixed;
+  inset: 0;
+  z-index: 34;
+  background: var(--scrim);
+  display: flex;
+  justify-content: center;
+  align-items: flex-start;
+  padding: 12vh 16px;
+}
+#pairdlg[hidden] { display: none; }
+
+.pdbox {
+  width: min(560px, 100%);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+}
+.pdbody { padding: 12px; display: flex; flex-direction: column; gap: 8px; }
+.pdhint { margin: 0; font-size: 12px; color: var(--muted); line-height: 1.5; }
+.pdlink {
+  font: inherit;
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--text);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 6px 8px;
+}
+.pdlink:focus { outline: 1px solid var(--accent); }
+.pdnote { min-height: 16px; font-size: 11px; color: var(--muted); }
+.pdnote.ok { color: var(--accent); }
+.pdnote.bad { color: var(--t-bright-red); }
+.pdwarn {
+  margin: 0;
+  font-size: 11px;
+  line-height: 1.45;
+  color: var(--t-bright-red);
+  border-left: 2px solid var(--t-bright-red);
+  padding-left: 8px;
+}
+
+/* ------------------------------------------------------------- file panel */
+
+#work { flex: 1 1 auto; display: flex; min-height: 0; min-width: 0; }
+#work #stage { flex: 1 1 auto; position: relative; min-width: 0; }
+
+#fsplit {
+  width: 1px;
+  flex: 0 0 auto;
+  background: var(--border);
+  cursor: col-resize;
+  position: relative;
+}
+#fsplit::after { content: ""; position: absolute; inset: 0 -3px; }
+#fsplit[hidden] { display: none; }
+
+#side {
+  width: 320px;
+  flex: 0 0 auto;
+  min-width: 0;
+  background: var(--surface);
+  display: flex;
+  flex-direction: column;
+}
+#side[hidden] { display: none; }
+
+/* Two columns: the Explorer stays on the left, the editor fills the rest. */
+.pcols { flex: 1 1 auto; display: flex; min-height: 0; min-width: 0; }
+.pexp {
+  width: 220px;
+  flex: 0 0 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+.psplit {
+  width: 1px;
+  flex: 0 0 auto;
+  background: var(--border);
+  cursor: col-resize;
+  position: relative;
+}
+.psplit::after { content: ""; position: absolute; inset: 0 -3px; }
+.pmain {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+/* The tab bar holds open files only. */
+.ptabs {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: stretch;
+  height: var(--row);
+  border-bottom: 1px solid var(--border);
+}
+.ptabstrip {
+  flex: 1 1 auto;
+  display: flex;
+  align-items: stretch;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+.ptabstrip::-webkit-scrollbar { display: none; }
+
+.ptab {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  max-width: 150px;
+  padding: 0 6px 0 8px;
+  border-right: 1px solid var(--border);
+  font-size: 11px;
+  color: var(--muted);
+  cursor: pointer;
+  user-select: none;
+  white-space: nowrap;
+}
+.ptab:hover { color: var(--text); background: color-mix(in srgb, var(--text) 6%, transparent); }
+.ptab.on {
+  color: var(--text);
+  background: var(--bg);
+  box-shadow: inset 0 -2px 0 var(--accent);
+}
+#side.darkedit .ptab.on { background: #1e1e1e; color: #e8eaed; }
+#side.darkedit .ptabs { border-color: #333; }
+#side.darkedit .pnone { color: #9aa0a6; }
+.ptname { overflow: hidden; text-overflow: ellipsis; }
+/* A dot before the name: the same unsaved marker other editors use. */
+.ptname.dirty::before { content: "CF "; color: var(--accent); }
+.ptx {
+  flex: 0 0 auto;
+  font: inherit;
+  font-size: 9px;
+  line-height: 1;
+  color: var(--muted);
+  background: none;
+  border: none;
+  padding: 2px 3px;
+  border-radius: var(--radius);
+  cursor: pointer;
+  opacity: 0;
+}
+.ptab:hover .ptx, .ptab.on .ptx { opacity: 1; }
+.ptx:hover { color: var(--text); background: color-mix(in srgb, var(--text) 14%, transparent); }
+
+.ptabs > button {
+  flex: 0 0 auto;
+  font: inherit;
+  font-size: 11px;
+  line-height: 1;
+  color: var(--muted);
+  background: none;
+  border: none;
+  border-left: 1px solid var(--border);
+  width: 24px;
+  cursor: pointer;
+}
+.ptabs > button:hover { color: var(--text); background: color-mix(in srgb, var(--text) 10%, transparent); }
+
+.pbody { flex: 1 1 auto; display: flex; min-height: 0; min-width: 0; }
+.pbody > * { flex: 1 1 auto; min-width: 0; }
+
+/* Shown while no file is open. */
+.pnone {
+  flex: 1 1 auto;
+  display: grid;
+  place-items: center;
+  padding: 16px;
+  color: var(--muted);
+  font-size: 12px;
+  text-align: center;
+}
+.pnone[hidden] { display: none; }
+
+#files { flex: 1 1 auto; display: flex; flex-direction: column; min-height: 0; position: relative; }
+#files[hidden] { display: none; }
+
+.fhead {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  height: var(--row);
+  padding: 0 4px 0 10px;
+  border-bottom: 1px solid var(--border);
+}
+.fhead .ftitle {
+  flex: 1 1 auto;
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+.fhead .frefresh,
+.fhead .fpick {
+  flex: 0 0 auto;
+  font: inherit;
+  font-size: 10px;
+  line-height: 1;
+  color: var(--muted);
+  background: none;
+  border: none;
+  padding: 3px 6px;
+  border-radius: var(--radius);
+  cursor: pointer;
+}
+.fhead .frefresh:hover,
+.fhead .fpick:hover { color: var(--text); background: color-mix(in srgb, var(--text) 10%, transparent); }
+
+.fmenu {
+  position: absolute;
+  top: var(--row);
+  right: 6px;
+  z-index: 5;
+  min-width: 160px;
+  max-height: 60vh;
+  overflow-y: auto;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  padding: 3px;
+}
+.fmenu[hidden] { display: none; }
+.fmitem {
+  padding: 4px 8px;
+  border-radius: var(--radius);
+  font-size: 12px;
+  cursor: pointer;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.fmitem:hover { background: color-mix(in srgb, var(--text) 8%, transparent); }
+.fmitem.on { color: var(--text); box-shadow: inset 2px 0 0 var(--accent); }
+.fmitem.off { color: var(--muted); cursor: default; }
+.fmitem.off:hover { background: none; }
+
+.ffilter {
+  flex: 0 0 auto;
+  font: inherit;
+  font-size: 12px;
+  color: var(--text);
+  background: none;
+  border: none;
+  border-bottom: 1px solid var(--border);
+  outline: none;
+  padding: 5px 8px;
+}
+.ffilter::placeholder { color: var(--muted); }
+
+.fscroll {
+  flex: 1 1 auto;
+  overflow-y: auto;
+  overflow-x: hidden;
+  position: relative;
+  contain: strict; /* long scrolls do not trigger layout for the whole page */
+}
+.fspacer { width: 1px; }
+.frows { position: absolute; top: 0; left: 0; right: 0; will-change: transform; }
+
+.frow {
+  height: 22px;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding-right: 8px;
+  cursor: pointer;
+  user-select: none;
+  white-space: nowrap;
+  font-size: 12px;
+}
+.frow:hover { background: color-mix(in srgb, var(--text) 6%, transparent); }
+.frow.on { background: color-mix(in srgb, var(--accent) 22%, transparent); }
+/* The root row is the project name. Small caps set it apart from the folder
+   contents without needing another divider. */
+.frow.root {
+  font-weight: 600;
+  font-size: 11px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+.frow.note { color: var(--muted); font-style: italic; cursor: default; }
+.frow.note:hover { background: none; }
+
+.ftwist { flex: 0 0 auto; width: 9px; font-size: 8px; color: var(--muted); }
+.fico { flex: 0 0 auto; width: 14px; height: 14px; }
+.fname { flex: 1 1 auto; overflow: hidden; text-overflow: ellipsis; }
+
+.fempty { padding: 12px 10px; color: var(--muted); line-height: 1.5; font-size: 12px; }
+.fempty[hidden] { display: none; }
+
+/* --------------------------------------------------------------- editor */
+
+#editor { flex: 1 1 auto; display: flex; flex-direction: column; min-height: 0; min-width: 0; }
+#editor[hidden] { display: none; }
+/* A dark-themed editor inside a light-themed app: its top bar goes dark too,
+   so the seam does not look like two applications taped together. */
+#editor.dark { background: #1e1e1e; }
+#editor.dark .ehead { border-color: #333; }
+#editor.dark .enote { color: #9aa0a6; }
+#editor.dark .ehead button { color: #c8ccd0; }
+#editor.dark .ehead button:hover:not(:disabled) { background: rgba(255,255,255,0.1); }
+#editor.dark .eplace { color: #9aa0a6; }
+
+.ehead {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: var(--row);
+  padding: 0 4px 0 8px;
+  border-bottom: 1px solid var(--border);
+}
+/* The folder trail, like the breadcrumb bar in other editors: `src › render.h`. */
+.ehead .ecrumb {
+  flex: 1 1 auto;
+  font-size: 11px;
+  color: var(--muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  direction: rtl; /* trimmed at its left end, not at the file name */
+  text-align: left;
+}
+.ehead .enote { flex: 0 0 auto; font-size: 10px; color: var(--muted); white-space: nowrap; }
+#editor.dark .ehead .ecrumb { color: #9aa0a6; }
+.ehead button {
+  flex: 0 0 auto;
+  font: inherit;
+  font-size: 11px;
+  color: var(--muted);
+  background: none;
+  border: 1px solid transparent;
+  padding: 2px 7px;
+  border-radius: var(--radius);
+  cursor: pointer;
+}
+.ehead button:hover:not(:disabled) { color: var(--text); background: color-mix(in srgb, var(--text) 10%, transparent); }
+.ehead button:disabled { opacity: 0.4; cursor: default; }
+.ehead .esave.on { color: var(--text); border-color: var(--accent); }
+.ehead .etheme { font-size: 10px; min-width: 40px; }
+.ehead .etheme.on { border-color: var(--accent); }
+#editor.dark .ehead .esave.on,
+#editor.dark .ehead .etheme.on { color: #e8eaed; border-color: var(--accent); }
+
+.ebody { flex: 1 1 auto; min-height: 0; }
+.ebody[hidden] { display: none; }
+
+/* Images are fitted to the panel and never scaled past their real size —
+   blowing a 16px PNG up to panel width only turns it to mush. */
+.eimg {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+  display: grid;
+  place-items: center;
+  padding: 12px;
+  /* A chequerboard: without it a transparent PNG cannot be told from one with a
+     white background. */
+  background-image:
+    linear-gradient(45deg, color-mix(in srgb, var(--text) 8%, transparent) 25%, transparent 25%),
+    linear-gradient(-45deg, color-mix(in srgb, var(--text) 8%, transparent) 25%, transparent 25%),
+    linear-gradient(45deg, transparent 75%, color-mix(in srgb, var(--text) 8%, transparent) 75%),
+    linear-gradient(-45deg, transparent 75%, color-mix(in srgb, var(--text) 8%, transparent) 75%);
+  background-size: 16px 16px;
+  background-position: 0 0, 0 8px, 8px -8px, -8px 0;
+}
+.eimg[hidden] { display: none; }
+.eimg img {
+  max-width: 100%;
+  max-height: 100%;
+  /* Small icons stay sharp when the browser zooms in. */
+  image-rendering: -webkit-optimize-contrast;
+}
+.eplace { padding: 12px 10px; color: var(--muted); font-size: 12px; line-height: 1.5; }
+.eplace[hidden] { display: none; }
+
+/* --------------------------------------------------------- folder picker */
+
+#picker {
+  position: fixed;
+  inset: 0;
+  z-index: 32;
+  background: var(--scrim);
+  display: flex;
+  justify-content: center;
+  align-items: flex-start;
+  padding: 8vh 16px;
+}
+#picker[hidden] { display: none; }
+
+.pbox {
+  width: min(620px, 100%);
+  max-height: 84vh;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.ptop {
+  display: flex;
+  gap: 6px;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--border);
+}
+.ptop input {
+  flex: 1 1 auto;
+  min-width: 0;
+  font: inherit;
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--text);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 4px 6px;
+}
+.ptop input:focus { outline: 1px solid var(--accent); }
+.ptop button, .pmk button, .pfoot button {
+  flex: 0 0 auto;
+  font: inherit;
+  font-size: 12px;
+  padding: 4px 10px;
+  border-radius: var(--radius);
+  border: 1px solid var(--border);
+  background: var(--bg);
+  color: var(--text);
+  cursor: pointer;
+}
+.ptop button:hover:not(:disabled),
+.pmk button:hover,
+.pfoot button:hover:not(:disabled) { background: color-mix(in srgb, var(--accent) 18%, var(--bg)); }
+.ptop button:disabled, .pfoot button:disabled { opacity: 0.45; cursor: default; }
+
+.proots {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border);
+}
+.proots .root {
+  font: inherit;
+  font-size: 11px;
+  padding: 2px 8px;
+  border-radius: var(--radius);
+  border: 1px solid var(--border);
+  background: none;
+  color: var(--muted);
+  cursor: pointer;
+}
+.proots .root:hover { color: var(--text); }
+.proots .root.on { color: var(--text); border-color: var(--accent); }
+
+.plist {
+  flex: 1 1 auto;
+  overflow-y: auto;
+  min-height: 120px;
+  padding: 4px 0;
+}
+.pentry {
+  height: var(--row);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 12px;
+  cursor: pointer;
+  user-select: none;
+  white-space: nowrap;
+}
+.pentry:hover, .pentry:focus { background: color-mix(in srgb, var(--text) 6%, transparent); outline: none; }
+.pentry:focus { box-shadow: inset 2px 0 0 var(--accent); }
+.pentry .pico { flex: 0 0 auto; width: 10px; color: var(--muted); font-size: 10px; }
+.pentry .pname { flex: 1 1 auto; overflow: hidden; text-overflow: ellipsis; }
+.pentry.taken .pname { color: var(--muted); }
+.pentry .ptag {
+  flex: 0 0 auto;
+  font-size: 9px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+.pempty { padding: 14px 12px; color: var(--muted); line-height: 1.5; }
+
+.pmk {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  padding: 8px 12px;
+  border-top: 1px solid var(--border);
+}
+.pmk input {
+  flex: 1 1 auto;
+  min-width: 0;
+  font: inherit;
+  font-size: 12px;
+  color: var(--text);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 4px 6px;
+}
+.pmk input:focus { outline: 1px solid var(--accent); }
+
+.pfoot {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  border-top: 1px solid var(--border);
+}
+.pfoot .pnote { flex: 1 1 auto; color: var(--muted); font-size: 11px; }
+.pfoot .pnote.bad { color: var(--t-bright-red); }
+.pfoot .use { border-color: var(--accent); }
+/* The quiet path: mark the folder without opening anything. */
+.pfoot .addonly { color: var(--muted); }
+.pfoot .addonly[hidden] { display: none; }
+.pfoot .drop { color: var(--muted); }
+.pfoot .drop:hover { color: var(--t-bright-red); border-color: var(--t-bright-red); background: none; }
+
+#new-project-empty {
+  display: block;
+  margin-top: 10px;
+  font: inherit;
+  font-size: 12px;
+  padding: 4px 10px;
+  border-radius: var(--radius);
+  border: 1px solid var(--accent);
+  background: var(--bg);
+  color: var(--text);
+  cursor: pointer;
+}
+#new-project-empty:hover { background: color-mix(in srgb, var(--accent) 18%, var(--bg)); }
+
+@media (max-width: 720px) {
+  #picker { padding: 3vh 8px; }
+  .pbox { max-height: 92vh; }
+}
+
+/* ------------------------------------------------------------------- mobile */
+
+#backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 24;
+  background: var(--scrim);
+}
+#backdrop[hidden] { display: none; }
+
+#menu-btn { display: none; }
+
+@media (max-width: 720px) {
+  /* The sidebar becomes a drawer that covers the screen: at this width, sharing
+     it with the terminal leaves both of them unusable. */
+  #sidebar {
+    position: fixed;
+    inset: 0 auto 0 0;
+    width: min(86vw, 330px);
+    z-index: 25;
+    border-right: 1px solid var(--border);
+    box-shadow: var(--shadow);
+  }
+  #splitter { display: none; }
+  #menu-btn { display: block; }
+
+  /* At phone width the file panel covers the terminal instead of sharing with
+     it — two columns at 390px leave neither readable. */
+  #side {
+    position: fixed;
+    inset: var(--row) 0 0 0;
+    width: auto;
+    z-index: 26;
+    border-left: none;
+  }
+  #fsplit { display: none; }
+  /* Two columns at 390px leave neither readable; the Explorer is narrowed as
+     far as needed, and its drag handle is switched off. */
+  .pexp { width: 44vw; max-width: 190px; }
+  .psplit { display: none; }
+
+  /* iOS zooms the page in when focusing an input whose font is under 16px. */
+  #filter, .pbox input { font-size: 16px; }
+
+  .tab { max-width: 62vw; }
+  #palette { padding-top: 6vh; }
+  .phint { display: none; }
+  .prow { height: 34px; }
+  .session, .project > .row { height: 34px; }
+
+  /* Touch targets need more room than cursor targets. */
+  .add, .star, .fork { opacity: 1; width: 26px; height: 26px; line-height: 24px; }
+  .tab .x { padding: 0 6px; }
+}
+
+@media (max-width: 720px) and (orientation: landscape) {
+  /* A short screen: put the density back so the rows do not eat the height
+     that is left. */
+  .session, .project > .row, .prow { height: 28px; }
+}

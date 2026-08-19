@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>sessionhub</title>
+<link rel="stylesheet" href="/vendor/xterm.css">
+<link rel="stylesheet" href="/app.css">
+</head>
+<body>
+  <div id="layout">
+    <aside id="sidebar">
+      <div id="sbar">
+        <input id="filter" type="text" spellcheck="false" autocomplete="off"
+               placeholder="Search projects and sessions…" aria-label="Filter list">
+        <button id="new-project" title="New project — pick or create a folder" aria-label="New project">＋</button>
+        <button id="collapse-all" title="Collapse all projects" aria-label="Collapse all">▸</button>
+        <button id="expand-all" title="Expand all projects" aria-label="Expand all">▾</button>
+      </div>
+      <div id="tree" role="tree" aria-label="Project dan session"></div>
+      <div id="sfoot">
+        <button id="settings-btn" title="Agent settings">⚙ Settings</button>
+      </div>
+    </aside>
+    <div id="splitter" role="separator" aria-orientation="vertical" title="Drag to resize"></div>
+    <main id="main">
+      <div id="tabs" role="tablist"></div>
+      <div id="banner" hidden></div>
+      <div id="work">
+        <div id="stage">
+          <div id="empty">Pick a session on the left, or press <span id="modk">Ctrl+K</span>.</div>
+          <div id="terms"></div>
+        </div>
+        <div id="fsplit" role="separator" aria-orientation="vertical" title="Drag to resize" hidden></div>
+        <div id="side" hidden></div>
+      </div>
+    </main>
+  </div>
+
+  <div id="backdrop" hidden></div>
+  <div id="menu" hidden></div>
+
+  <script src="/vendor/xterm.js"></script>
+  <script src="/vendor/addon-fit.js"></script>
+  <script src="/vendor/addon-web-links.js"></script>
+  <script type="module" src="/app.js"></script>
+</body>
+</html>

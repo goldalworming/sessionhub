@@ -1,0 +1,3 @@
+# One repo, two OSes (this source also lives on a Mac): store LF, let each
+# checkout do what its platform likes.
+* text=auto

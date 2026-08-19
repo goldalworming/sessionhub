@@ -1,0 +1,63 @@
+# Build output. 1.7 GB here, and every byte of it is reproducible from source.
+/target/
+
+# Layout backups taken by hand before a redesign. Useful locally, meaningless
+# to anyone else, and they go stale the moment `web/` moves on.
+web-backup-*/
+
+# Screenshots written into the working directory by the browser tests. They are
+# evidence for one run, not artefacts of the project.
+#
+# The names come from the tests themselves: `fork.png`, `menu-baru.png`,
+# `setting.png`, `shellpick.png`, `agent-<theme>.png`, `warna-<theme>.png` —
+# plus whatever a one-off debugging script happens to write. Ignoring `*.png`
+# at the repository root covers all of them, and `web/` keeps its own assets
+# because this rule is anchored to the root.
+/*.png
+/*.jpg
+/*.gif
+
+# Left behind by the Python helper scripts used for large mechanical edits.
+__pycache__/
+*.pyc
+
+# Editor and OS noise.
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
+
+# Never commit a daemon home. It holds `config.toml`, and `config.toml` holds
+# the token — anyone with that token gets a shell on the machine. The real one
+# lives in `~/.sessionhub/`, outside this tree, but a copy dragged in here for
+# testing must not follow it to a remote.
+.sessionhub/
+**/fakehome/
+**/farhome/
+
+# Same reasoning, for anything holding credentials in the open. `.env-ssh` —
+# the SSH details for the Mac — lives outside this tree today, and this line is
+# what keeps a stray copy from following the project to a remote.
+.env
+.env.*
+.env-*
+*.pem
+id_rsa*
+
+# Logs.
+*.log
+
+# A personal notification sound, if one was dropped in (web/notify.mp3|wav|ogg
+# — chime.js picks it up by name). It is the user's own file, often ripped from
+# somewhere with its own licence, and must not travel with the repo.
+/web/notify.mp3
+/web/notify.wav
+/web/notify.ogg
+
+# SSH credentials for the test Mac live one folder above this repo; this line
+# is the fence in case a copy ever strays inside.
+.ssh-mac
+
+# Screenshots some tests drop next to themselves rather than at the root.
+tests/manual/*.png
