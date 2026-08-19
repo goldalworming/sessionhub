@@ -157,7 +157,7 @@ if (!token) {
 // These names stay as bare as before, but their contents now belong to the
 // active machine. Switching machines swaps the references rather than copying
 // the contents — that is what keeps the rest of this file unchanged.
-let state = { projects: [], terminals: [], agents: [], scanning: true };
+let state = { projects: [], terminals: [], agents: [], saved: [], scanning: true };
 const collapsed = new Set(JSON.parse(localStorage.getItem(LS.collapsed) || '[]'));
 /// Projects marked as focus, lifted to the top of the sidebar.
 const bookmarks = new Set(JSON.parse(localStorage.getItem(LS.bookmarks) || '[]'));
@@ -234,7 +234,7 @@ function makeMachine({ id, label, via }) {
     id,
     label,
     via, // '' for this machine itself
-    state: { projects: [], terminals: [], agents: [], scanning: true },
+    state: { projects: [], terminals: [], agents: [], saved: [], scanning: true },
     terms: new Map(),
     activeId: null,
     pinnedProject: null,
@@ -605,7 +605,40 @@ function spawn(project, agent, resume) {
 
 // ------------------------------------------------------------------- render
 
+/// The colours a tab can be tagged with. Kept in step with `config::TAB_COLORS`
+/// on the daemon, which refuses anything else — so a stale client cannot push an
+/// unknown value into the page.
+const TAB_COLORS = ['red', 'green', 'yellow', 'blue', 'magenta', 'cyan'];
+
+/// The menu behind a right-click, or a long press, on a tab.
+function tabMenu(t) {
+  const items = TAB_COLORS.map((c) => ({
+    label: c,
+    swatch: c,
+    on: t.color === c,
+    run: () => setColor(t.id, t.color === c ? '' : c),
+  }));
+  // Only offered when there is something to clear — a permanently greyed-out
+  // row teaches nothing.
+  if (t.color) items.push({ label: 'No colour', swatch: '', run: () => setColor(t.id, '') });
+  items.push({ label: 'Kill terminal…', run: () => killTerminal(t.id) });
+  return items;
+}
+
+/// Tag a tab. Sent to the daemon rather than kept in this browser: the same
+/// terminal is looked at from the phone and the laptop, and a mark that only one
+/// of them can see is not a mark. On a named terminal it is stored with the name
+/// and survives a restart.
+function setColor(id, color) {
+  conn.send({ t: 'set_color', id, color });
+}
+
 function terminalLabel(t) {
+  // A name you gave it wins over anything derived. It is the most specific thing
+  // known about this terminal, and a tab reading `mcp · terminal` beside three
+  // others reading `mcp · terminal` is the exact problem naming was meant to
+  // solve — the sidebar showed the name while the tab still did not.
+  if (t.name) return `${basename(t.project)} · ${t.name}`;
   const session = state.projects
     .flatMap((p) => p.sessions)
     .find((s) => s.session_id && s.session_id === t.session_id);
@@ -637,6 +670,9 @@ function renderTabs() {
 
   const ids = new Set([...terms.keys()]);
   const list = state.terminals.filter((t) => ids.has(t.id) || t.alive);
+  // Set when a panel gained or lost its colour bar, which changes how much room
+  // the terminal has and so needs a fresh measurement.
+  let recolored = false;
 
   for (const t of list) {
     const tab = document.createElement('div');
@@ -679,13 +715,57 @@ function renderTabs() {
     };
     tab.appendChild(x);
 
+    if (t.color) tab.dataset.color = t.color;
+
+    // The panel wears the same mark as its tab. Without it the colour answers
+    // "which tab" but not "which of these am I looking at", which is the harder
+    // question in grid mode and the only question in tab mode.
+    //
+    // The bar takes its own 3px rather than being drawn over the terminal: at
+    // this font a column is about 8px wide, so an overlay would clip the left
+    // edge of every glyph in column one. That makes it a layout change, so the
+    // terminal is measured again — but only when the colour actually changed,
+    // not on every state update.
+    const entry = terms.get(t.id);
+    if (entry) {
+      const had = entry.host.dataset.color || '';
+      if (had !== (t.color || '')) {
+        if (t.color) entry.host.dataset.color = t.color;
+        else delete entry.host.dataset.color;
+        recolored = true;
+      }
+    }
+
     tab.onclick = () => (terms.has(t.id) ? show(t.id) : attach(t.id));
+    const menuFor = (x, y) => openMenu(x, y, tabMenu(t));
     tab.oncontextmenu = (e) => {
       e.preventDefault();
-      openMenu(e.clientX, e.clientY, [{ label: 'Kill terminal…', run: () => killTerminal(t.id) }]);
+      menuFor(e.clientX, e.clientY);
     };
+    // A phone has no right-click. A long press on the tab opens the same menu,
+    // and a press that turns into a scroll of the strip does not.
+    let hold = null;
+    let held = false;
+    tab.addEventListener('touchstart', (e) => {
+      held = false;
+      const p = e.touches[0];
+      hold = setTimeout(() => {
+        held = true;
+        menuFor(p.clientX, p.clientY);
+      }, 500);
+    }, { passive: true });
+    const drop = () => clearTimeout(hold);
+    tab.addEventListener('touchmove', drop, { passive: true });
+    tab.addEventListener('touchend', (e) => {
+      drop();
+      // The menu is already open; letting the tap through would also switch tabs.
+      if (held) e.preventDefault();
+    });
     strip.appendChild(tab);
   }
+
+  // After the loop, so several panels changing at once cost one measurement.
+  if (recolored) relayout();
 
   const tools = document.createElement('div');
   tools.className = 'tools';
@@ -823,9 +903,18 @@ function filterTree(query) {
     // projects are often grouped per client or per platform, and "metro" or
     // "telkom" is the folder's name, not the project's.
     const folder = parentMatch(p, q, common);
-    // A project with a matching loose terminal still shows, even when neither its
-    // own name nor a session title matches.
-    if (!pm && !hits.length && !folder && !looseTerminals(p.path).length) continue;
+    // A project with a matching loose or saved terminal still shows, even when
+    // neither its own name nor a session title matches. Searching for the name
+    // you gave a terminal has to find it — that is what naming it was for.
+    if (
+      !pm &&
+      !hits.length &&
+      !folder &&
+      !looseTerminals(p.path).length &&
+      !savedTerminals(p.path).length
+    ) {
+      continue;
+    }
     out.push({
       // A matching project name is stronger than a session title inside it; a
       // match through a parent folder is the weakest — what you typed is not the
@@ -908,6 +997,10 @@ function sidebarCtx() {
     mark,
     filterTree,
     looseTerminals,
+    savedTerminals,
+    saveTerminal,
+    openSaved,
+    forgetSaved,
     explorerRoot,
     saveCollapsed,
     saveBookmarks,
@@ -938,8 +1031,98 @@ function looseTerminals(project) {
       t.project === project &&
       // While filtering, this row follows the same rule: it shows when the agent
       // name or the terminal number matches.
-      (!q || t.agent.toLowerCase().includes(q) || `terminal ${t.id}`.includes(q)),
+      (!q ||
+        t.agent.toLowerCase().includes(q) ||
+        `terminal ${t.id}`.includes(q) ||
+        (t.name || '').toLowerCase().includes(q)),
   );
+}
+
+// ------------------------------------------------------------ saved terminals
+
+/// Saved terminals in a project that are NOT running. A running one already has
+/// a row of its own among the live terminals, under the same name, and two rows
+/// for one thing is how you end up starting the same bot twice.
+function savedTerminals(project) {
+  const q = el.filter.value.trim().toLowerCase();
+  return state.saved.filter(
+    (s) =>
+      samePath(s.project, project) &&
+      s.live_terminal_id === null &&
+      (!q || s.name.toLowerCase().includes(q) || s.command.toLowerCase().includes(q)),
+  );
+}
+
+/// Path comparison has to follow the daemon's rule, not the browser's: on
+/// Windows and macOS `C:\Data` and `c:\data` are one folder.
+const CASE_BLIND = /win|mac/i.test(navigator.platform || '');
+function samePath(a, b) {
+  const norm = (p) => {
+    const s = String(p || '').replace(/[\\/]+$/, '');
+    return CASE_BLIND ? s.toLowerCase().replace(/\//g, '\\') : s;
+  };
+  return norm(a) === norm(b);
+}
+
+/// The last command the daemon saw typed in this terminal, so naming it does not
+/// mean typing the command out a second time. Empty when the daemon cannot say
+/// honestly — a command recalled with ↑ never passed through it.
+function lastCommand(id) {
+  return new Promise((resolve) => {
+    let done = false;
+    const finish = (v) => {
+      if (done) return;
+      done = true;
+      pendingLastCommand.delete(id);
+      resolve(v);
+    };
+    pendingLastCommand.set(id, finish);
+    conn.send({ t: 'last_command', id });
+    // A daemon too old to know this message would never answer, and the dialog
+    // must still open.
+    setTimeout(() => finish(''), 1500);
+  });
+}
+const pendingLastCommand = new Map();
+
+/// Name a live terminal so it outlives the daemon, and say what to run when it
+/// is opened again.
+async function saveTerminal(id) {
+  const t = state.terminals.find((x) => x.id === id);
+  if (!t) return;
+  const already = state.saved.find(
+    (s) => samePath(s.project, t.project) && s.name === t.name,
+  );
+  const suggested = already ? already.command : await lastCommand(id);
+
+  const answer = await ask.showPair({
+    title: already ? `Rename ${already.name}` : `Save terminal ${id}`,
+    label1: 'Name',
+    value1: t.name || '',
+    label2: 'Run when opened',
+    value2: suggested,
+    hint2: 'leave empty to just open a shell',
+    ok: 'Save',
+    note:
+      `Kept in ${basename(t.project)}, and it comes back after a restart. ` +
+      'Opening it starts the shell in that folder and runs this line.',
+  });
+  if (answer === null) return;
+  conn.send({ t: 'save_terminal', id, name: answer.first, command: answer.second });
+}
+
+/// Open a saved terminal — its shell, its folder, its command.
+function openSaved(project, name) {
+  const active = terms.get(activeId);
+  const size = (active && proposed(active)) || { cols: 100, rows: 30 };
+  conn.send({ t: 'open_saved', project, name, cols: size.cols, rows: size.rows });
+  closeDrawerIfNarrow();
+}
+
+/// Forget the note. Anything running under that name keeps running — this
+/// deletes a line in config.toml, not a process.
+function forgetSaved(project, name) {
+  conn.send({ t: 'forget_terminal', project, name });
 }
 
 // ---------------------------------------------------------------------- menu
@@ -948,7 +1131,20 @@ function openMenu(x, y, items) {
   el.menu.textContent = '';
   for (const it of items) {
     const d = document.createElement('div');
-    d.textContent = it.label;
+    // A colour is easier to recognise than its name, so the swatch leads and the
+    // word follows. `data-color` rather than an inline style: the palette lives
+    // in the stylesheet, where it can differ between the light and dark themes.
+    if (it.swatch !== undefined) {
+      d.className = 'mcolor';
+      const sw = document.createElement('span');
+      sw.className = 'mswatch';
+      if (it.swatch) sw.dataset.color = it.swatch;
+      d.appendChild(sw);
+      d.appendChild(document.createTextNode(it.label));
+    } else {
+      d.textContent = it.label;
+    }
+    if (it.on) d.classList.add('mon');
     d.onclick = () => {
       closeMenu();
       it.run();
@@ -1203,9 +1399,14 @@ const settings = new Settings(
   // Forgetting a machine always goes to the LOCAL daemon: the paired list is its
   // own, not that of the machine being looked at.
   (name) => local.conn.send({ t: 'forget', name }),
+  // Updating goes to the machine whose settings are on screen, through the
+  // facade — so the Update section of a remote's panel updates that remote.
+  (what) => conn.send({ t: what === 'apply' ? 'update_apply' : 'update_check' }),
 );
 
 document.getElementById('settings-btn').onclick = () => {
+  // What an update would cost, counted fresh each time the panel opens.
+  settings.liveTerminals = state.terminals.filter((t) => t.alive).length;
   settings.setMachine(current);
   settings.show();
   conn.send({ t: 'config' });
@@ -1554,6 +1755,11 @@ function reattachAll() {
   el.empty.hidden = terms.size > 0;
 }
 
+conn.on.onLastCommand = (msg) => {
+  const waiting = pendingLastCommand.get(msg.id);
+  if (waiting) waiting(msg.command || '');
+};
+
 conn.on.onState = (msg, m) => {
   // Background machines still get their data updated — so switching to one does
   // not show a second of stale state — but nothing is drawn.
@@ -1561,6 +1767,7 @@ conn.on.onState = (msg, m) => {
   st.projects = msg.projects || [];
   st.terminals = msg.terminals || [];
   st.agents = msg.agents || [];
+  st.saved = msg.saved || [];
   st.scanning = msg.scanning === true;
   if (m !== current) return;
   if (pendingReattach) {
@@ -1695,6 +1902,13 @@ conn.on.onError = (msg, m) => {
 };
 
 conn.on.onConfig = (msg) => settings.update(msg);
+
+conn.on.onUpdate = (msg, m) => {
+  // Only for the machine being looked at: a check answered by a background
+  // machine must not overwrite what the open panel is showing.
+  if (m !== current) return;
+  settings.setRelease(msg);
+};
 
 conn.on.onMem = (msg) => {
   memById.clear();

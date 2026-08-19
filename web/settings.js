@@ -44,6 +44,7 @@ const SECTIONS = [
   // by the LOCAL daemon, and remotes are never chained. Showing it while looking
   // at a remote machine would promise something that is not there.
   { key: 'machines', label: 'Machines', localOnly: true },
+  { key: 'update', label: 'Update' },
 ];
 
 export class Settings {
@@ -51,7 +52,10 @@ export class Settings {
   /// `onRemove(name)` deletes it. `onLan(enabled)` opens or closes network
   /// access. `onDrops(limits|null)` stores the drop folder limits; null = sweep
   /// now.
-  constructor(root, onSave, onLan, onDrops, onRemove, onForget) {
+  constructor(root, onSave, onLan, onDrops, onRemove, onForget, onUpdate) {
+    /// `onUpdate('check'|'apply')` asks the daemon to look for a release, or
+    /// to install it and restart into it.
+    this.onUpdate = onUpdate || (() => {});
     this.onSave = onSave;
     this.onLan = onLan;
     this.onDrops = onDrops;
@@ -70,6 +74,12 @@ export class Settings {
     /// machine tab, and that has to be readable — not inferred from a config path.
     this.machine = { label: 'This machine', via: '' };
     this.remotes = [];
+    /// The last answer to a release check: null until one is asked for.
+    /// NOT called `update` — that is the method the daemon's config arrives
+    /// through, and a field of the same name would shadow it into silence.
+    this.release = null;
+    /// How many terminals would die with the daemon, set by app.js.
+    this.liveTerminals = 0;
 
     this.el = document.createElement('div');
     this.el.id = 'settings';
@@ -172,6 +182,7 @@ export class Settings {
     if (this.section === 'network') this.pane.appendChild(this.networkPane());
     else if (this.section === 'files') this.pane.appendChild(this.filesPane());
     else if (this.section === 'machines') this.pane.appendChild(this.machinesPane());
+    else if (this.section === 'update') this.pane.appendChild(this.updatePane());
     else this.pane.appendChild(this.agentsPane());
 
     const missing = this.brokenAgents();
@@ -461,6 +472,117 @@ export class Settings {
     };
     row.appendChild(btn);
     return row;
+  }
+
+  // ------------------------------------------------------------------ update
+
+  /// The answer to a release check, from the daemon.
+  setRelease(msg) {
+    this.release = msg;
+    if (this.open) this.paint();
+  }
+
+  updatePane() {
+    const pane = document.createElement('div');
+    pane.className = 'sec update';
+    const who = this.machine.via ? this.machine.label : 'this computer';
+    pane.appendChild(
+      this.head('Update', `Install a newer sessionhub on ${who}, straight from its releases.`),
+    );
+
+    const now = document.createElement('div');
+    now.className = 'usagebar';
+    const ver = document.createElement('span');
+    ver.className = 'usage';
+    const r = this.release;
+    ver.textContent = r ? `Running ${r.current}` : 'Running this build';
+    now.appendChild(ver);
+
+    const check = document.createElement('button');
+    check.type = 'button';
+    check.id = 'update-check';
+    check.className = 'secbtn';
+    check.textContent = 'Check for updates';
+    check.onclick = () => {
+      check.disabled = true;
+      check.textContent = 'Checking…';
+      this.onUpdate('check');
+    };
+    now.appendChild(check);
+    pane.appendChild(now);
+
+    if (!r) return pane;
+
+    if (r.applying) {
+      pane.appendChild(
+        Settings.stat('muted', `Installing ${r.latest} — the daemon restarts and this page reconnects itself.`),
+      );
+      return pane;
+    }
+    if (!r.newer) {
+      pane.appendChild(Settings.stat('ok', `${r.current} is the newest release.`));
+      return pane;
+    }
+    if (!r.installable) {
+      // Never offer a button that would install the wrong architecture: the
+      // daemon would be replaced by something that cannot start, and the UI
+      // that could undo it is gone with it.
+      pane.appendChild(
+        Settings.stat('warn', `${r.latest} is out, but it has no build for this machine's platform.`),
+      );
+      return pane;
+    }
+
+    pane.appendChild(Settings.stat('warn', `${r.latest} is available.`));
+
+    if (r.notes) {
+      const notes = document.createElement('div');
+      notes.className = 'unotes';
+      notes.textContent = r.notes;
+      pane.appendChild(notes);
+    }
+
+    // The cost, before the button rather than after it.
+    const live = this.liveTerminals;
+    pane.appendChild(
+      Settings.stat(
+        live ? 'bad' : 'muted',
+        live
+          ? `Updating restarts the daemon, and ${live} live terminal${live > 1 ? 's' : ''} will be `
+            + 'killed with it. Agent sessions can be resumed afterwards; a plain shell cannot.'
+          : 'Updating restarts the daemon. Nothing is running right now, so nothing is lost.',
+      ),
+    );
+
+    const bar = document.createElement('div');
+    bar.className = 'usagebar';
+    const go = document.createElement('button');
+    go.type = 'button';
+    go.id = 'update-apply';
+    go.className = 'secbtn primary';
+    go.textContent = `Update to ${r.latest}`;
+    // Two clicks, like removing an agent or forgetting a machine — every
+    // irreversible thing in this panel asks twice.
+    go.onclick = () => {
+      if (go.dataset.armed) {
+        go.disabled = true;
+        go.textContent = 'Downloading…';
+        this.onUpdate('apply');
+        return;
+      }
+      go.dataset.armed = '1';
+      go.classList.add('armed');
+      go.textContent = live ? `Click again — ${live} terminal${live > 1 ? 's' : ''} will close` : 'Click again to install';
+      setTimeout(() => {
+        if (!go.isConnected) return;
+        delete go.dataset.armed;
+        go.classList.remove('armed');
+        go.textContent = `Update to ${r.latest}`;
+      }, 5000);
+    };
+    bar.appendChild(go);
+    pane.appendChild(bar);
+    return pane;
   }
 
   // ------------------------------------------------------------------- files

@@ -100,6 +100,11 @@ pub enum ClientMsg {
     },
     /// Open or close access from the local network. Takes effect at once;
     /// loopback is untouched, so no terminal is disconnected.
+    /// Ask GitHub what the newest release is. Answered with `Update`.
+    UpdateCheck,
+    /// Install that release: download it, then restart into it. Every live
+    /// terminal dies with the daemon, so the UI asks twice before sending this.
+    UpdateApply,
     SetLanAccess {
         enabled: bool,
     },
@@ -124,6 +129,44 @@ pub enum ClientMsg {
     Forget {
         name: String,
     },
+    /// Remember a live terminal under a name, so it outlives the daemon. Saving
+    /// the same name in the same project again updates it — that is how the
+    /// command gets changed.
+    SaveTerminal {
+        /// The live terminal being named; its folder and agent come from it.
+        id: u32,
+        name: String,
+        /// Run when it is opened later. Empty just opens the shell.
+        #[serde(default)]
+        command: String,
+    },
+    /// Stop remembering one. A terminal running under that name right now is
+    /// left alone — this forgets the note, not the process.
+    ForgetTerminal {
+        project: String,
+        name: String,
+    },
+    /// Open a saved terminal: its shell, in its folder, running its command.
+    OpenSaved {
+        project: String,
+        name: String,
+        cols: u16,
+        rows: u16,
+    },
+    /// What was last run in this terminal, to offer as the command when naming
+    /// it. Asked for only when that dialog opens — typed input has no business
+    /// riding along in every state broadcast.
+    LastCommand {
+        id: u32,
+    },
+    /// Tag this terminal's tab with a colour, so it can be picked out of a strip
+    /// of tabs that otherwise read alike. Empty clears the tag. On a saved
+    /// terminal the colour is stored with it and comes back on the next open.
+    SetColor {
+        id: u32,
+        #[serde(default)]
+        color: String,
+    },
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -137,10 +180,21 @@ pub enum ServerMsg {
         /// Fork capability is included so the button only shows on sessions that
         /// can actually be forked.
         agents: Vec<AgentBrief>,
+        /// Terminals that were given a name. Unlike sessions these are the
+        /// daemon's own record — a plain shell leaves nothing on disk to read
+        /// back — so they are listed here rather than under a project's
+        /// sessions.
+        saved: Vec<SavedInfo>,
         /// `true` until the first registry scan finishes. Without it the UI
         /// cannot tell "not scanned yet" from "there really are no projects" and
         /// would give the wrong guidance for a few seconds.
         scanning: bool,
+    },
+    /// The answer to `LastCommand`. Empty when nothing could be read honestly —
+    /// a command recalled from shell history never passed through the daemon.
+    LastCommand {
+        id: u32,
+        command: String,
     },
     Attached {
         id: u32,
@@ -159,6 +213,24 @@ pub enum ServerMsg {
     Error {
         code: String,
         message: String,
+    },
+    /// What a release check found. Sent whenever the panel asks, and again
+    /// right before the daemon restarts into a new build.
+    Update {
+        /// The version running right now.
+        current: String,
+        /// The newest tag published, or empty when the check failed.
+        latest: String,
+        /// Is `latest` actually newer than `current`?
+        newer: bool,
+        /// False when that release carries no build for this platform — an
+        /// update that cannot be installed must not offer a button.
+        installable: bool,
+        /// The release notes, shown so nobody installs blind.
+        notes: String,
+        /// Set once the download is done and the swap is about to happen.
+        #[serde(default)]
+        applying: bool,
     },
     Mem {
         terminals: Vec<MemInfo>,
@@ -366,6 +438,27 @@ pub struct TerminalInfo {
     pub cols: u16,
     pub rows: u16,
     pub session_id: Option<String>,
+    /// The saved name this terminal is running under, when it has one. Without
+    /// it the sidebar would show a saved terminal twice: once as the name, once
+    /// as "terminal 7".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// The colour its tab is tagged with, one of `config::TAB_COLORS`. Absent
+    /// when untagged.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub color: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct SavedInfo {
+    pub name: String,
+    pub project: String,
+    pub agent: String,
+    pub command: String,
+    pub color: String,
+    /// Set when this saved terminal is running right now — the difference
+    /// between attaching to it and starting it again.
+    pub live_terminal_id: Option<u32>,
 }
 
 /// Wrap a terminal payload into a binary frame: `id` (u32 LE) + raw bytes.

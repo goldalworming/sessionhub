@@ -15,15 +15,17 @@ I run coding agents all day. I mostly use Claude Code, sometimes opencode. Two t
 
 sessionhub is the smallest thing that fixes both: a daemon that owns the PTYs, and a plain browser page that only *looks at* them. Everything else in this repo follows from that split.
 
-### Why not T3 Code
+### How it differs from T3 Code
 
-[T3 Code](https://betterstack.com/community/guides/ai/t3-code/) is a good control plane. But it is a **chat/task UI first**, with the terminal as a drawer at the bottom. That shape has three costs I did not want to pay:
+[T3 Code](https://betterstack.com/community/guides/ai/t3-code/) is a good control plane, and a fuller product than this one. It is a **chat/task UI first**, with the terminal as a drawer at the bottom — a coherent shape, and the right one if you want your agent work organised as tasks. sessionhub takes the opposite bet, so three things come out differently:
 
-- **It is not the terminal.** The agent's own TUI — its prompts, its modes, its Shift+Tab cycling — is the interface I already know. sessionhub passes PTY bytes through unchanged. There is no second UI to learn and no place for the two UIs to disagree about what the agent is doing.
-- **An orchestration layer spends tokens.** A task harness that wraps every thread in its own scaffolding pays for that scaffolding on every request. sessionhub injects **nothing**: what the agent reads is exactly what you typed. The token bill is the agent's own and nothing more.
-- **Your existing sessions stay stranded.** T3 Code keeps its own task history. The hundreds of sessions your CLI already wrote to disk — `~/.claude`, `~/.pi`, the opencode store — are not what it resumes. sessionhub's sidebar *is* that on-disk registry: every session your agents ever made is one click from `--resume`, with its full context, whether or not it was born inside sessionhub.
+- **The terminal is the whole surface.** The agent's own TUI — its prompts, its modes, its Shift+Tab cycling — is the interface I already know, so sessionhub passes PTY bytes through unchanged and shows nothing of its own. T3 Code gives you a curated view instead, which is what lets it surface task state that a raw PTY cannot.
+- **Nothing sits between you and the agent.** A task harness earns its features by wrapping each thread in its own scaffolding, and that scaffolding travels with every request. sessionhub injects **nothing** — what the agent reads is exactly what you typed — which is the same reason it can offer none of what that scaffolding buys.
+- **A different session registry.** T3 Code keeps its own task history, consistent with its task model. sessionhub's sidebar *is* the CLI's on-disk registry — `~/.claude`, `~/.pi`, the opencode store — so every session your agents ever made is one click from `--resume`, with its full context, whether or not it was born inside sessionhub.
 
-### Why not herdr
+If you want tasks, structure, and a history the app manages for you, T3 Code is the more complete answer. sessionhub only makes sense if the agent's raw terminal is the thing you actually want to reach.
+
+### How it differs from herdr
 
 [herdr](https://herdr.dev/) is the closest cousin. It also keeps agent sessions alive behind a client. Its agent-state sidebar is excellent. This repo borrowed the idea: busy/finished colours and a finish chime are built in. The difference is **where you can be when you use it**:
 
@@ -90,6 +92,114 @@ Run `sessionhubd restart --force` to go ahead anyway.
 Close the launching terminal whenever you like. The daemon does not die with it. That is the whole reason this project exists.
 
 For development, `sessionhubd start --foreground` keeps the process in the terminal, so its log is visible right away.
+
+## Updating
+
+**⚙ Settings → Update**. It asks this repo's releases for the newest version,
+shows the notes, and installs it on the machine whose tab you are looking at —
+including a remote one.
+
+What it does not do is hide the cost. Installing restarts the daemon, and every
+live terminal is a child of it, so the panel counts them before you commit and
+asks twice. Agent sessions come back from the sidebar with their context; a
+plain shell does not.
+
+The swap itself cannot happen from inside a running process — Windows locks a
+running `.exe`, and unix refuses to write a busy one. So the new build is
+downloaded next to the old binary and a small script does the exchange once the
+daemon has exited, then starts it again. The binary it replaced is kept beside
+it as `sessionhubd.old`, so an update that will not run can be undone by hand.
+If the daemon somehow has not exited, the script leaves everything untouched
+rather than installing something that cannot take the port.
+
+Releases carry a build per platform. A release with nothing for your platform is
+reported as such, and no button is offered.
+
+## Saved terminals
+
+An agent session comes back on its own after a restart, because the agent wrote
+it to its own store and sessionhub reads it back. A plain shell writes nothing.
+So the terminal running your bot, your dev server, or a long `tail -f` is simply
+gone once the daemon stops — and the only record of what it was running is in
+your head.
+
+Naming one fixes that. Press the save icon on a running terminal's row, give it
+a name and the line to run:
+
+```
+telegram bot     .\@run-telegram-bot.bat
+dev server       npm run dev -- --host 0.0.0.0
+```
+
+It is written to `config.toml`, so it survives a daemon restart, a reboot, and a
+machine crash. Afterwards the sidebar keeps a row for it under its project: a
+hollow dot and the command it will run. One click opens the shell in the right
+folder and runs that line.
+
+The command box arrives already filled in with what you last typed in that
+terminal, so naming it does not mean typing the command out a second time. It
+comes back empty when sessionhub cannot answer honestly — a command recalled
+with the up arrow or finished with Tab never passed through the daemon, and
+guessing there would put a line you never ran into something that runs on every
+open. Type it yourself in that case; the box is editable either way.
+
+Details worth knowing:
+
+- **A name belongs to one terminal at a time.** Saving a second terminal under a
+  name already in use takes the name off the first one.
+- **Opening one that is already running attaches to it** rather than starting a
+  second copy — which matters when the thing holds a port.
+- **Forgetting takes two clicks** on the ✕, so a mis-tap on a phone does not
+  delete the one note saying how a service is started. It removes the note only;
+  anything running under that name keeps running.
+- They live in `config.toml` under `[[saved]]` and can be written by hand:
+
+  ```toml
+  [[saved]]
+  name = "telegram bot"
+  project = 'C:\data\code\firefox-ext\mcp'
+  agent = "terminal"
+  command = '.\@run-telegram-bot.bat'
+  ```
+
+This is a note about how to start something, not a supervisor: sessionhub does
+not restart a saved terminal by itself, and does not start one when the daemon
+boots. It makes starting it one click instead of a folder hunt and a
+half-remembered filename.
+
+## Tab colours
+
+Four terminals in one project give you four tabs reading `mcp · terminal`.
+Right-click a tab (long-press on a phone) and pick a colour, and that one is
+findable at a glance.
+
+The palette is six colours, not a colour picker: red, green, yellow, blue,
+magenta, cyan. They are the theme's own terminal palette, defined separately for
+light and dark, so a tag stays readable when the theme flips — a stored hex
+would have been right in one theme and muddy in the other. The daemon refuses
+anything outside that list.
+
+The tag lives on the daemon, not in one browser's storage. That is the point:
+the same terminal is looked at from the phone and from the laptop, and a mark
+only one of them can see is not a mark. Tag it on the laptop and the phone shows
+it on the next update, and so does a paired machine's tab.
+
+It shows everywhere the terminal appears: on its tab, on its sidebar row, and
+as a bar down the left edge of the terminal panel itself — because a mark that
+exists in only some of those places is one you stop trusting. The panel bar
+matters most in grid mode, where there is no active tab to read at all.
+
+The bar takes its own three pixels rather than being drawn over the terminal. An
+overlay would sit on the leftmost pixels of column one, which is exactly where
+box-drawing characters live.
+
+On a [saved terminal](#saved-terminals) the colour is stored with the name and
+comes back the next time you open it. On an unnamed one it lasts as long as the
+terminal does, which is exactly as long as the terminal itself is worth
+identifying.
+
+Picking the colour a tab already has takes the tag off, and `No colour` does the
+same; it only appears once there is something to clear.
 
 ## Coming back after a reboot
 

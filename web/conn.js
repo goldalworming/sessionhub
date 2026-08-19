@@ -61,7 +61,9 @@ export class Conn {
         tree: 'onTree',
         file: 'onFile',
         saved: 'onSaved',
+        last_command: 'onLastCommand',
         remotes: 'onRemotes',
+        update: 'onUpdate',
       };
       const fn = map[msg.t];
       if (fn) this.emit(fn, msg);

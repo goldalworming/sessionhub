@@ -19,6 +19,8 @@ mod ring;
 mod service;
 mod state;
 mod tunnel;
+mod typed;
+mod update;
 
 use std::fs::{File, OpenOptions};
 use std::io::Write;

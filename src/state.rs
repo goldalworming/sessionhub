@@ -12,12 +12,13 @@ use tracing::{info, warn};
 
 use crate::config::Config;
 use crate::proto::{
-    encode_frame, AgentBrief, AgentInfo, ClientMsg, MemInfo, ProjectInfo, ServerMsg, SessionInfo,
-    TerminalInfo,
+    encode_frame, AgentBrief, AgentInfo, ClientMsg, MemInfo, ProjectInfo, SavedInfo, ServerMsg,
+    SessionInfo, TerminalInfo,
 };
 use crate::pty::{Pty, PtyEvent};
 use crate::registry;
 use crate::ring::Ring;
+use crate::typed::TypedLine;
 
 pub type ClientId = u64;
 
@@ -84,6 +85,17 @@ struct Terminal {
     /// reader thread finishes too. The terminal entry itself stays, with
     /// `alive: false`.
     pty: Option<Pty>,
+    /// The saved name this terminal runs under, when it has one.
+    name: Option<String>,
+    /// The colour its tab is tagged with, one of `config::TAB_COLORS`.
+    color: Option<String>,
+    /// What is being typed at the prompt, so naming this terminal can offer the
+    /// command it is running.
+    typed: TypedLine,
+    /// A command to run once the shell is up. Held rather than written at spawn
+    /// time: the shell has not opened its input yet, and what is sent before it
+    /// does is echoed into the banner or lost outright.
+    pending_run: Option<String>,
 }
 
 pub fn run(cfg: Config, rx: Receiver<Cmd>, tx: Sender<Cmd>, registry_cfg: Sender<Config>) {
@@ -107,7 +119,7 @@ pub fn run(cfg: Config, rx: Receiver<Cmd>, tx: Sender<Cmd>, registry_cfg: Sender
             Cmd::ClientUp { id, tx, rx } => {
                 clients.insert(id, Client { tx, rx });
                 info!(client = id, "client connected");
-                send_state(&projects, &agent_names, scanned, &clients, &terminals, Some(id));
+                send_state(&cfg, &projects, &agent_names, scanned, &clients, &terminals, Some(id));
             }
 
             Cmd::ClientDown { id } => {
@@ -121,7 +133,7 @@ pub fn run(cfg: Config, rx: Receiver<Cmd>, tx: Sender<Cmd>, registry_cfg: Sender
             }
 
             Cmd::ClientMsg { id, msg } => match msg {
-                ClientMsg::List => send_state(&projects, &agent_names, scanned, &clients, &terminals, Some(id)),
+                ClientMsg::List => send_state(&cfg, &projects, &agent_names, scanned, &clients, &terminals, Some(id)),
 
                 ClientMsg::Spawn { project, agent, resume, cols, rows } => {
                     let (cols, rows) = sane_size(cols, rows);
@@ -133,7 +145,7 @@ pub fn run(cfg: Config, rx: Receiver<Cmd>, tx: Sender<Cmd>, registry_cfg: Sender
                             terminals.insert(tid, term);
                             next_term += 1;
                             info!(terminal = tid, %project, %agent, "terminal created");
-                            send_state(&projects, &agent_names, scanned, &clients, &terminals, None);
+                            send_state(&cfg, &projects, &agent_names, scanned, &clients, &terminals, None);
                             send_to(&clients, id, json(&ServerMsg::Attached { id: tid, cols, rows }));
                         }
                         Err((code, message)) => {
@@ -154,7 +166,7 @@ pub fn run(cfg: Config, rx: Receiver<Cmd>, tx: Sender<Cmd>, registry_cfg: Sender
                             terminals.insert(tid, term);
                             next_term += 1;
                             info!(terminal = tid, %project, %agent, %session_id, "session forked");
-                            send_state(&projects, &agent_names, scanned, &clients, &terminals, None);
+                            send_state(&cfg, &projects, &agent_names, scanned, &clients, &terminals, None);
                             send_to(&clients, id, json(&ServerMsg::Attached { id: tid, cols, rows }));
                         }
                         Err((code, message)) => {
@@ -397,7 +409,7 @@ pub fn run(cfg: Config, rx: Receiver<Cmd>, tx: Sender<Cmd>, registry_cfg: Sender
                     agent_names = enabled_agents(&cfg);
                     // The registry needs to know which agents are still scanned.
                     let _ = registry_cfg.try_send(cfg.clone());
-                    send_state(&projects, &agent_names, scanned, &clients, &terminals, None);
+                    send_state(&cfg, &projects, &agent_names, scanned, &clients, &terminals, None);
                     // Answer with the latest contents so the settings panel never
                     // has to guess what was actually stored.
                     if tx.send(Cmd::ClientMsg { id, msg: ClientMsg::Config }).is_err() {
@@ -453,7 +465,7 @@ pub fn run(cfg: Config, rx: Receiver<Cmd>, tx: Sender<Cmd>, registry_cfg: Sender
                     info!(agent = %name, "agent removed");
                     agent_names = enabled_agents(&cfg);
                     let _ = registry_cfg.try_send(cfg.clone());
-                    send_state(&projects, &agent_names, scanned, &clients, &terminals, None);
+                    send_state(&cfg, &projects, &agent_names, scanned, &clients, &terminals, None);
                     if tx.send(Cmd::ClientMsg { id, msg: ClientMsg::Config }).is_err() {
                         return;
                     }
@@ -567,7 +579,7 @@ pub fn run(cfg: Config, rx: Receiver<Cmd>, tx: Sender<Cmd>, registry_cfg: Sender
                         });
                     }
                     let _ = registry_cfg.try_send(cfg.clone());
-                    send_state(&projects, &agent_names, scanned, &clients, &terminals, None);
+                    send_state(&cfg, &projects, &agent_names, scanned, &clients, &terminals, None);
                 }
 
                 // The file panel. All three touch the disk, so none of them run
@@ -655,7 +667,7 @@ pub fn run(cfg: Config, rx: Receiver<Cmd>, tx: Sender<Cmd>, registry_cfg: Sender
                     // moment would only look like a flicker.
                     projects.retain(|p| !p.path.eq_ignore_ascii_case(&path) || !p.sessions.is_empty());
                     let _ = registry_cfg.try_send(cfg.clone());
-                    send_state(&projects, &agent_names, scanned, &clients, &terminals, None);
+                    send_state(&cfg, &projects, &agent_names, scanned, &clients, &terminals, None);
                 }
 
                 ClientMsg::SetDrops { max_age_hours, max_total_mb, max_file_mb } => {
@@ -771,6 +783,89 @@ pub fn run(cfg: Config, rx: Receiver<Cmd>, tx: Sender<Cmd>, registry_cfg: Sender
                     send_to(&clients, id, json(&remotes_msg(&cfg)));
                 }
 
+                ClientMsg::UpdateCheck => {
+                    // Straight on this thread: one HTTPS request, only when a
+                    // person clicks Check, and the panel is waiting for it.
+                    let msg = match crate::update::check() {
+                        Ok(rel) => ServerMsg::Update {
+                            current: crate::update::current().to_string(),
+                            newer: crate::update::is_newer(&rel.version, crate::update::current()),
+                            installable: rel.asset_url.is_some(),
+                            latest: rel.version,
+                            notes: rel.notes,
+                            applying: false,
+                        },
+                        Err(why) => {
+                            warn!(error = %why, "update check failed");
+                            ServerMsg::Error { code: "update_check".into(), message: why }
+                        }
+                    };
+                    send_to(&clients, id, json(&msg));
+                }
+
+                ClientMsg::UpdateApply => {
+                    let rel = match crate::update::check() {
+                        Ok(r) => r,
+                        Err(why) => {
+                            send_to(
+                                &clients,
+                                id,
+                                json(&ServerMsg::Error { code: "update_check".into(), message: why }),
+                            );
+                            continue;
+                        }
+                    };
+                    if !crate::update::is_newer(&rel.version, crate::update::current()) {
+                        send_to(
+                            &clients,
+                            id,
+                            json(&ServerMsg::Error {
+                                code: "update_none".into(),
+                                message: format!("{} is already the newest release.", rel.tag),
+                            }),
+                        );
+                        continue;
+                    }
+                    if let Err(why) = crate::update::apply(&rel) {
+                        warn!(error = %why, "update failed");
+                        send_to(
+                            &clients,
+                            id,
+                            json(&ServerMsg::Error { code: "update_failed".into(), message: why }),
+                        );
+                        continue;
+                    }
+                    // Told before the lights go out: the socket dies with the
+                    // daemon, so a message sent afterwards would never arrive.
+                    send_to(
+                        &clients,
+                        id,
+                        json(&ServerMsg::Update {
+                            current: crate::update::current().to_string(),
+                            latest: rel.version,
+                            newer: true,
+                            installable: true,
+                            notes: rel.notes,
+                            applying: true,
+                        }),
+                    );
+                    // Exactly the road `sessionhubd stop` takes, and for a
+                    // reason learned the hard way: `Cmd::Shutdown` alone ends
+                    // the terminals but leaves this process alive holding the
+                    // port, so the swapped-in binary came back and died on
+                    // "address already in use" while the old one kept running.
+                    // The swapper is waiting on this pid to disappear.
+                    info!("restarting into the new build");
+                    let tx = tx.clone();
+                    std::thread::spawn(move || {
+                        let _ = tx.send(Cmd::Shutdown);
+                        std::thread::sleep(std::time::Duration::from_millis(400));
+                        crate::daemon::remove_pid_file();
+                        std::process::exit(0);
+                    });
+                    continue;
+                }
+
                 ClientMsg::SweepDrops => {
                     crate::drops::sweep(&cfg.drops);
                     if tx.send(Cmd::ClientMsg { id, msg: ClientMsg::Config }).is_err() {
@@ -843,12 +938,258 @@ pub fn run(cfg: Config, rx: Receiver<Cmd>, tx: Sender<Cmd>, registry_cfg: Sender
                         }
                     }
                 }
+
+                ClientMsg::LastCommand { id: tid } => {
+                    let command =
+                        terminals.get(&tid).map(|t| t.typed.last().to_string()).unwrap_or_default();
+                    send_to(&clients, id, json(&ServerMsg::LastCommand { id: tid, command }));
+                }
+
+                ClientMsg::SetColor { id: tid, color } => {
+                    if let Err(message) = crate::config::check_color(&color) {
+                        send_to(
+                            &clients,
+                            id,
+                            json(&ServerMsg::Error { code: "bad_color".into(), message }),
+                        );
+                        continue;
+                    }
+                    let Some(t) = terminals.get_mut(&tid) else { continue };
+                    t.color = if color.is_empty() { None } else { Some(color.clone()) };
+
+                    // On a named terminal the tag belongs with the name, so it is
+                    // there again the next time it is opened — and on every other
+                    // device, which is the point of keeping it here rather than
+                    // in one browser's storage.
+                    if let Some(name) = t.name.clone() {
+                        let project = t.project.clone();
+                        if let Some(entry) = cfg
+                            .saved
+                            .iter_mut()
+                            .find(|s| s.name == name && same_path(&s.project, &project))
+                        {
+                            entry.color = color.clone();
+                            if let Err(e) = crate::config::save(&cfg) {
+                                warn!(error = %e, "could not save config");
+                            }
+                        }
+                    }
+                    info!(terminal = tid, %color, "tab colour set");
+                    send_state(&cfg, &projects, &agent_names, scanned, &clients, &terminals, None);
+                }
+
+                ClientMsg::SaveTerminal { id: tid, name, command } => {
+                    let name = name.trim().to_string();
+                    if let Err(message) = crate::config::check_saved_name(&name) {
+                        send_to(
+                            &clients,
+                            id,
+                            json(&ServerMsg::Error { code: "bad_name".into(), message }),
+                        );
+                        continue;
+                    }
+                    let Some(t) = terminals.get(&tid) else {
+                        send_to(
+                            &clients,
+                            id,
+                            json(&ServerMsg::Error {
+                                code: "no_such_terminal".into(),
+                                message: format!("Terminal {tid} does not exist."),
+                            }),
+                        );
+                        continue;
+                    };
+                    let entry = crate::config::SavedTerminal {
+                        name: name.clone(),
+                        project: t.project.clone(),
+                        agent: t.agent.clone(),
+                        command: crate::typed::clean_command(&command),
+                        // Naming a terminal never changes its tag.
+                        color: t.color.clone().unwrap_or_default(),
+                    };
+
+                    let before = cfg.saved.clone();
+                    // A terminal can only be under one name at a time, so an
+                    // earlier name for this same one is replaced rather than
+                    // left behind as a second row nobody meant to keep.
+                    if let Some(old) = t.name.clone() {
+                        cfg.saved.retain(|s| !(same_path(&s.project, &t.project) && s.name == old));
+                    }
+                    // Saving a name that already exists in this project updates
+                    // it. That is how the command gets changed.
+                    cfg.saved
+                        .retain(|s| !(same_path(&s.project, &entry.project) && s.name == entry.name));
+                    cfg.saved.push(entry.clone());
+
+                    if let Err(e) = crate::config::save(&cfg) {
+                        cfg.saved = before;
+                        warn!(error = %e, "could not save config");
+                        send_to(
+                            &clients,
+                            id,
+                            json(&ServerMsg::Error {
+                                code: "config_write_failed".into(),
+                                message: format!("Could not write config.toml: {e}"),
+                            }),
+                        );
+                        continue;
+                    }
+
+                    // Its project has to be a project, or the row would be saved
+                    // into a folder the sidebar never draws.
+                    if !cfg.projects.iter().any(|p| same_path(p, &entry.project)) {
+                        cfg.projects.push(entry.project.clone());
+                        if let Err(e) = crate::config::save(&cfg) {
+                            warn!(error = %e, "could not save config");
+                        }
+                        if !projects.iter().any(|p| same_path(&p.path, &entry.project)) {
+                            projects.push(ProjectInfo {
+                                name: crate::registry::project_name(&entry.project),
+                                path: entry.project.clone(),
+                                exists: true,
+                                sessions: Vec::new(),
+                            });
+                        }
+                        let _ = registry_cfg.try_send(cfg.clone());
+                    }
+
+                    // A name belongs to one terminal at a time. Without this,
+                    // saving a second terminal under a name an older one already
+                    // wears leaves both claiming it: the sidebar draws the same
+                    // row twice and `live_terminal_id` picks whichever the map
+                    // happens to yield first.
+                    for t in terminals.values_mut() {
+                        if t.id != tid
+                            && t.name.as_deref() == Some(name.as_str())
+                            && same_path(&t.project, &entry.project)
+                        {
+                            t.name = None;
+                        }
+                    }
+                    if let Some(t) = terminals.get_mut(&tid) {
+                        t.name = Some(name.clone());
+                    }
+                    info!(terminal = tid, %name, "terminal saved");
+                    send_state(&cfg, &projects, &agent_names, scanned, &clients, &terminals, None);
+                }
+
+                ClientMsg::ForgetTerminal { project, name } => {
+                    let before = cfg.saved.len();
+                    cfg.saved.retain(|s| !(same_path(&s.project, &project) && s.name == name));
+                    if cfg.saved.len() == before {
+                        continue;
+                    }
+                    if let Err(e) = crate::config::save(&cfg) {
+                        warn!(error = %e, "could not save config");
+                        send_to(
+                            &clients,
+                            id,
+                            json(&ServerMsg::Error {
+                                code: "config_write_failed".into(),
+                                message: format!("Could not write config.toml: {e}"),
+                            }),
+                        );
+                        continue;
+                    }
+                    // A terminal running under that name keeps running; only the
+                    // note is gone, so its row goes back to being a plain one.
+                    for t in terminals.values_mut() {
+                        if t.name.as_deref() == Some(name.as_str()) && same_path(&t.project, &project)
+                        {
+                            t.name = None;
+                        }
+                    }
+                    info!(%project, %name, "saved terminal forgotten");
+                    send_state(&cfg, &projects, &agent_names, scanned, &clients, &terminals, None);
+                }
+
+                ClientMsg::OpenSaved { project, name, cols, rows } => {
+                    let (cols, rows) = sane_size(cols, rows);
+                    let Some(saved) = cfg
+                        .saved
+                        .iter()
+                        .find(|s| same_path(&s.project, &project) && s.name == name)
+                        .cloned()
+                    else {
+                        send_to(
+                            &clients,
+                            id,
+                            json(&ServerMsg::Error {
+                                code: "no_such_saved".into(),
+                                message: format!("`{name}` is not a saved terminal any more."),
+                            }),
+                        );
+                        continue;
+                    };
+
+                    // Already running: show that one rather than starting the
+                    // same bot a second time on the same port.
+                    if let Some(t) = terminals
+                        .values()
+                        .find(|t| t.alive && t.name.as_deref() == Some(name.as_str())
+                            && same_path(&t.project, &saved.project))
+                    {
+                        let tid = t.id;
+                        if let Some(t) = terminals.get_mut(&tid) {
+                            t.viewers.insert(id, (cols, rows));
+                            let resized = renegotiate(t);
+                            if !t.ring.is_empty() {
+                                let snap = t.ring.snapshot();
+                                send_to(&clients, id, Out::Binary(encode_frame(tid, &snap)));
+                            }
+                            let (c, r) = (t.cols, t.rows);
+                            send_to(
+                                &clients,
+                                id,
+                                json(&ServerMsg::Attached { id: tid, cols: c, rows: r }),
+                            );
+                            if resized {
+                                let t = &terminals[&tid];
+                                broadcast_size(&clients, t);
+                            }
+                        }
+                        continue;
+                    }
+
+                    match spawn_terminal(
+                        &cfg, next_term, &saved.project, &saved.agent, None, cols, rows, &tx,
+                    ) {
+                        Ok(mut term) => {
+                            let tid = term.id;
+                            term.viewers.insert(id, (cols, rows));
+                            term.name = Some(saved.name.clone());
+                            if !saved.color.is_empty() {
+                                term.color = Some(saved.color.clone());
+                            }
+                            if !saved.command.is_empty() {
+                                term.pending_run = Some(saved.command.clone());
+                            }
+                            terminals.insert(tid, term);
+                            next_term += 1;
+                            info!(terminal = tid, name = %saved.name, "saved terminal opened");
+                            send_state(
+                                &cfg, &projects, &agent_names, scanned, &clients, &terminals, None,
+                            );
+                            send_to(&clients, id, json(&ServerMsg::Attached { id: tid, cols, rows }));
+                        }
+                        Err((code, message)) => {
+                            warn!(name = %saved.name, %message, "opening saved terminal failed");
+                            send_to(&clients, id, json(&ServerMsg::Error { code, message }));
+                        }
+                    }
+                }
             },
 
             Cmd::ClientInput { term, data } => {
-                if let Some(t) = terminals.get(&term) {
+                if let Some(t) = terminals.get_mut(&term) {
                     if let Some(p) = t.pty.as_ref() {
                         p.write_input(&data);
+                    }
+                    // Only for a plain shell. An agent's TUI reads keys for its
+                    // own prompt, and "the last line typed into claude" is a
+                    // sentence of English, not a command worth saving.
+                    if t.agent == crate::config::TERMINAL_AGENT {
+                        t.typed.feed(&data);
                     }
                 }
             }
@@ -889,6 +1230,22 @@ pub fn run(cfg: Config, rx: Receiver<Cmd>, tx: Sender<Cmd>, registry_cfg: Sender
                         for cid in t.viewers.keys() {
                             send_to(&clients, *cid, Out::Binary(frame.clone()));
                         }
+                        // The shell has spoken, so it is running and reading.
+                        // This is the signal a fixed delay could only guess at:
+                        // a PowerShell profile can take a second to load, and a
+                        // command sent before that is swallowed.
+                        if let Some(cmd) = t.pending_run.take() {
+                            let tx = tx.clone();
+                            std::thread::spawn(move || {
+                                // A breath more, so the prompt is drawn before
+                                // the command lands on it. Typing into a
+                                // half-drawn prompt works but reads as a mess.
+                                std::thread::sleep(std::time::Duration::from_millis(400));
+                                let mut data = cmd.into_bytes();
+                                data.push(b'\r');
+                                let _ = tx.send(Cmd::ClientInput { term, data });
+                            });
+                        }
                     }
                 }
                 PtyEvent::Eof { code } => {
@@ -903,7 +1260,7 @@ pub fn run(cfg: Config, rx: Receiver<Cmd>, tx: Sender<Cmd>, registry_cfg: Sender
                             send_to(&clients, cid, msg.clone());
                         }
                     }
-                    send_state(&projects, &agent_names, scanned, &clients, &terminals, None);
+                    send_state(&cfg, &projects, &agent_names, scanned, &clients, &terminals, None);
                 }
             },
 
@@ -932,7 +1289,7 @@ pub fn run(cfg: Config, rx: Receiver<Cmd>, tx: Sender<Cmd>, registry_cfg: Sender
                         t.session_id = Some(sid);
                     }
                 }
-                send_state(&projects, &agent_names, scanned, &clients, &terminals, None);
+                send_state(&cfg, &projects, &agent_names, scanned, &clients, &terminals, None);
             }
 
             Cmd::Remote { name, reply } => {
@@ -1085,6 +1442,12 @@ fn build_terminal(
         viewers: HashMap::new(),
         ring: Ring::new(RING_CAP),
         pty: Some(pty),
+        // Both are set by the caller when this terminal is a saved one; an
+        // ordinary spawn leaves them alone.
+        name: None,
+        color: None,
+        typed: TypedLine::default(),
+        pending_run: None,
     })
 }
 
@@ -1214,7 +1577,14 @@ fn broadcast_size(clients: &HashMap<ClientId, Client>, t: &Terminal) {
     }
 }
 
+/// Two paths naming the same folder, by the rule of this system: Windows and
+/// macOS ignore case, Linux does not.
+fn same_path(a: &str, b: &str) -> bool {
+    registry::path_key(a) == registry::path_key(b)
+}
+
 fn send_state(
+    cfg: &Config,
     registry: &[ProjectInfo],
     agents: &[AgentBrief],
     scanned: bool,
@@ -1254,14 +1624,37 @@ fn send_state(
             cols: t.cols,
             rows: t.rows,
             session_id: t.session_id.clone(),
+            name: t.name.clone(),
+            color: t.color.clone(),
         })
         .collect();
     list.sort_by_key(|t| t.id);
+
+    let saved: Vec<SavedInfo> = cfg
+        .saved
+        .iter()
+        .map(|s| SavedInfo {
+            name: s.name.clone(),
+            project: s.project.clone(),
+            agent: s.agent.clone(),
+            command: s.command.clone(),
+            color: s.color.clone(),
+            live_terminal_id: terminals
+                .values()
+                .find(|t| {
+                    t.alive
+                        && t.name.as_deref() == Some(s.name.as_str())
+                        && same_path(&t.project, &s.project)
+                })
+                .map(|t| t.id),
+        })
+        .collect();
 
     let msg = json(&ServerMsg::State {
         projects,
         terminals: list,
         agents: agents.to_vec(),
+        saved,
         scanning: !scanned,
     });
     match only {
@@ -1322,6 +1715,10 @@ mod tests {
             viewers: viewers(entries),
             ring: Ring::new(RING_CAP),
             pty: None,
+            name: None,
+            color: None,
+            typed: TypedLine::default(),
+            pending_run: None,
         }
     }
 

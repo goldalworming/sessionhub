@@ -38,6 +38,74 @@ pub struct Config {
     /// sent to the browser — the browser only ever names them.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub remotes: Vec<Remote>,
+    /// Terminals given a name, so they outlive the daemon.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub saved: Vec<SavedTerminal>,
+}
+
+/// A terminal you named, and the command it runs.
+///
+/// An agent session comes back after a restart because the agent wrote it to
+/// its own store and the registry reads it back. A plain shell writes nothing:
+/// when the daemon stops, a terminal that was running a bot or a dev server is
+/// gone, and the only record of what it was is in your head. Naming one puts it
+/// here instead — the folder, the shell, and the line to run.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SavedTerminal {
+    /// Yours to choose, and unique within its project — saving the same name
+    /// twice updates the entry rather than making a second one, which is how
+    /// you change the command.
+    pub name: String,
+    pub project: String,
+    /// Which agent to open it with — usually `terminal`, but a named `claude`
+    /// shell must come back as claude rather than a bare prompt.
+    #[serde(default = "terminal_agent")]
+    pub agent: String,
+    /// Run when it opens. Empty simply opens the shell in the right folder.
+    #[serde(default)]
+    pub command: String,
+    /// The colour its tab is tagged with. Empty means untagged.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub color: String,
+}
+
+/// The colours a terminal's tab can be tagged with.
+///
+/// A fixed set rather than a free-form colour, for two reasons. It is stored in
+/// `config.toml` and handed to the browser, so anything accepted here ends up in
+/// the page — a whitelist keeps that from being a way to push arbitrary CSS into
+/// it. And these six are the theme's own terminal palette, defined separately
+/// for light and dark, so a tag stays readable when the theme flips; a stored
+/// hex would be right in one theme and wrong in the other.
+pub const TAB_COLORS: [&str; 6] = ["red", "green", "yellow", "blue", "magenta", "cyan"];
+
+/// `Ok` for one of the known colours, or for empty — which means "no tag".
+pub fn check_color(color: &str) -> Result<(), String> {
+    if color.is_empty() || TAB_COLORS.contains(&color) {
+        Ok(())
+    } else {
+        Err(format!("`{color}` is not one of: {}.", TAB_COLORS.join(", ")))
+    }
+}
+
+fn terminal_agent() -> String {
+    TERMINAL_AGENT.to_string()
+}
+
+/// A saved name is shown in a sidebar row and stored in `config.toml`, so the
+/// characters that would break either are refused.
+pub fn check_saved_name(name: &str) -> Result<(), String> {
+    let name = name.trim();
+    if name.is_empty() {
+        return Err("Give the terminal a name.".into());
+    }
+    if name.chars().count() > 40 {
+        return Err("Keep the name under 40 characters.".into());
+    }
+    if name.chars().any(|c| c.is_control()) {
+        return Err("The name cannot contain control characters.".into());
+    }
+    Ok(())
 }
 
 /// One machine this daemon can reach.
@@ -328,6 +396,7 @@ impl Default for Config {
             agents: default_agents(),
             drops: Drops::default(),
             remotes: Vec::new(),
+            saved: Vec::new(),
         }
     }
 }
@@ -665,6 +734,82 @@ mod tests {
         )
         .unwrap();
         assert!(cfg.agents["claude"].enabled);
+    }
+
+    #[test]
+    fn a_saved_terminal_survives_a_save_load_cycle() {
+        let mut cfg = Config::default();
+        cfg.token = "x".into();
+        cfg.saved.push(SavedTerminal {
+            name: "telegram bot".into(),
+            project: "C:\\data\\code\\firefox-ext\\mcp".into(),
+            agent: TERMINAL_AGENT.into(),
+            command: ".\\@run-telegram-bot.bat".into(),
+            color: "cyan".into(),
+        });
+        let back: Config = toml::from_str(&toml::to_string_pretty(&cfg).unwrap()).unwrap();
+        assert_eq!(back.saved, cfg.saved);
+    }
+
+    #[test]
+    fn an_old_config_has_no_saved_terminals_and_still_reads() {
+        let cfg: Config = toml::from_str("token = \"x\"\n").unwrap();
+        assert!(cfg.saved.is_empty());
+        // And an empty list is not written back, so nobody gets a stray heading.
+        assert!(!toml::to_string_pretty(&cfg).unwrap().contains("saved"));
+    }
+
+    #[test]
+    fn a_saved_terminal_written_by_hand_defaults_to_a_plain_shell() {
+        // The point of storing this in config.toml is that it can be edited
+        // there; the agent line is the one a person would leave out.
+        let cfg: Config = toml::from_str(
+            "token = \"x\"\n[[saved]]\nname = \"bot\"\nproject = \"C:\\\\p\"\n",
+        )
+        .unwrap();
+        assert_eq!(cfg.saved[0].agent, TERMINAL_AGENT);
+        assert_eq!(cfg.saved[0].command, "");
+    }
+
+    #[test]
+    fn only_known_tab_colours_are_accepted() {
+        // The value reaches the page as an attribute; anything not on this list
+        // has no business getting there.
+        for c in TAB_COLORS {
+            assert!(check_color(c).is_ok(), "{c}");
+        }
+        assert!(check_color("").is_ok(), "kosong berarti tanpa tanda");
+        for bad in ["#ff0000", "red; background:url(x)", "chartreuse", "RED", "blue "] {
+            assert!(check_color(bad).is_err(), "{bad:?} seharusnya ditolak");
+        }
+    }
+
+    #[test]
+    fn an_untagged_saved_terminal_writes_no_colour_line() {
+        let mut cfg = Config::default();
+        cfg.token = "x".into();
+        cfg.saved.push(SavedTerminal {
+            name: "bot".into(),
+            project: "C:\\p".into(),
+            agent: TERMINAL_AGENT.into(),
+            command: String::new(),
+            color: String::new(),
+        });
+        let text = toml::to_string_pretty(&cfg).unwrap();
+        assert!(!text.contains("color"), "{text}");
+        let back: Config = toml::from_str(&text).unwrap();
+        assert_eq!(back.saved[0].color, "");
+    }
+
+    #[test]
+    fn saved_names_that_would_break_a_row_or_the_file_are_refused() {
+        assert!(check_saved_name("telegram bot").is_ok());
+        assert!(check_saved_name("bot #2 — jalan").is_ok());
+        assert!(check_saved_name("").is_err());
+        assert!(check_saved_name("   ").is_err());
+        assert!(check_saved_name("a\nb").is_err());
+        assert!(check_saved_name(&"a".repeat(41)).is_err());
+        assert!(check_saved_name(&"a".repeat(40)).is_ok());
     }
 
     #[test]

@@ -286,6 +286,33 @@ html, body {
    kept quiet rather than competing with titles that have content. */
 .session.loose .stitle { color: var(--muted); font-style: italic; }
 
+/* The save icon is a drawing, not a glyph, so it needs the same centring the
+   star does — and the svg must not swallow the click meant for the span. */
+.act-save { display: flex; align-items: center; justify-content: center; }
+.act-save svg { width: 12px; height: 12px; pointer-events: none; }
+
+/* A saved terminal that is not running. Its own row rather than a variant of a
+   live one: nothing is running, so a live dot here would be a lie. */
+.session.saved .stitle { flex: 0 0 auto; }
+.scmd {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: 10px;
+  opacity: 0.8;
+}
+/* Armed to forget. Red only in this second state, so the resting row carries no
+   warning colour it has not earned. */
+.act-forget.armed {
+  opacity: 1;
+  color: #fff;
+  background: var(--t-red);
+}
+
 /* ============================ sidebar: arranged by time */
 
 /* --------------------------------------------------------------- zone label */
@@ -573,6 +600,93 @@ html, body {
 #sound-btn svg { pointer-events: none; display: block; }
 .tab.active { color: var(--text); background: color-mix(in srgb, var(--accent) 22%, transparent); }
 .tab.dead { text-decoration: line-through; }
+
+/* ------------------------------------------------------ tab colour tags */
+
+/* A colour you put on a tab yourself, to find one terminal in a strip where
+   every label starts with the same project name.
+
+   The hues come from the theme's own terminal palette, which is defined twice —
+   once for light, once for dark. A stored hex would have been right in one
+   theme and muddy in the other, and these are the colours the eye is already
+   trained on from the terminal itself.
+
+   The tag is a bar down the leading edge plus a wash of the same hue, rather
+   than a filled tab: the label still has to be readable, and `active` already
+   owns the tab's background. */
+.tab[data-color] {
+  box-shadow: inset 3px 0 0 var(--tag);
+  background: color-mix(in srgb, var(--tag) 10%, transparent);
+}
+.tab[data-color].active {
+  color: var(--text);
+  background: color-mix(in srgb, var(--tag) 26%, transparent);
+}
+.tab[data-color="red"], .zrow[data-color="red"], .session[data-color="red"],
+.mswatch[data-color="red"] { --tag: var(--t-red); }
+.tab[data-color="green"], .zrow[data-color="green"], .session[data-color="green"],
+.mswatch[data-color="green"] { --tag: var(--t-green); }
+.tab[data-color="yellow"], .zrow[data-color="yellow"], .session[data-color="yellow"],
+.mswatch[data-color="yellow"] { --tag: var(--t-yellow); }
+.tab[data-color="blue"], .zrow[data-color="blue"], .session[data-color="blue"],
+.mswatch[data-color="blue"] { --tag: var(--t-blue); }
+.tab[data-color="magenta"], .zrow[data-color="magenta"], .session[data-color="magenta"],
+.mswatch[data-color="magenta"] { --tag: var(--t-magenta); }
+.tab[data-color="cyan"], .zrow[data-color="cyan"], .session[data-color="cyan"],
+.mswatch[data-color="cyan"] { --tag: var(--t-cyan); }
+
+/* The same terminal in the sidebar wears the same tag — a mark that only exists
+   in one of the two places it appears is one you stop trusting. Narrower here,
+   because these rows are already indented and a 3px bar would read as a nesting
+   line. */
+.zrow[data-color], .session[data-color] { box-shadow: inset 2px 0 0 var(--tag); }
+
+/* And down the side of the terminal itself, so the panel you are looking at
+   says which one it is — the tab only answers that when the tab strip is in
+   view, and in grid mode there is no active tab at all.
+
+   The bar takes its own 3px of the panel instead of being painted over the
+   terminal. An overlay would sit on top of the leftmost pixels of column one,
+   and box-drawing characters live exactly there. */
+/* The bar is a pseudo-element in that padding rather than a background on the
+   whole panel: `fit` rounds the row count down, so a panel is usually a few
+   pixels taller than its rows, and a background would show through there as a
+   stray band along the bottom. */
+.host[data-color] .hview { padding-left: 3px; }
+.host[data-color] .hview::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 3px;
+  background: var(--tag);
+  pointer-events: none;
+}
+.host[data-color="red"] { --tag: var(--t-red); }
+.host[data-color="green"] { --tag: var(--t-green); }
+.host[data-color="yellow"] { --tag: var(--t-yellow); }
+.host[data-color="blue"] { --tag: var(--t-blue); }
+.host[data-color="magenta"] { --tag: var(--t-magenta); }
+.host[data-color="cyan"] { --tag: var(--t-cyan); }
+
+/* --------------------------------------------------------- colour menu */
+
+.mcolor { display: flex; align-items: center; gap: 8px; }
+.mswatch {
+  flex: 0 0 auto;
+  width: 11px;
+  height: 11px;
+  border-radius: 2px;
+  background: var(--tag, transparent);
+  /* "No colour" is an empty swatch, which needs an outline to look like a
+     choice rather than a gap. */
+  border: 1px solid color-mix(in srgb, var(--text) 25%, transparent);
+}
+/* The one already in use is marked, so the menu says what is set as well as
+   what can be set. */
+.mon { font-weight: 600; color: var(--text); }
+.mon::after { content: '✓'; margin-left: auto; padding-left: 10px; }
 .tab .mem { flex: 0 0 auto; font-size: 11px; font-variant-numeric: tabular-nums; }
 .tab .x { flex: 0 0 auto; color: var(--muted); padding: 0 2px; }
 .tab .x:hover { color: var(--text); }
@@ -1022,6 +1136,19 @@ html, body {
   outline: none;
 }
 .abox input:focus { outline: 1px solid var(--accent); }
+/* Only present when the dialog asks two things; one unlabelled box needs no
+   heading above it. */
+.alab {
+  display: block;
+  font-size: 11px;
+  color: var(--muted);
+  margin-bottom: 4px;
+}
+.alab.lab2 { margin-top: 10px; }
+.alab[hidden] { display: none; }
+/* The command is code, and reads as code. */
+.abox input.second { font-family: var(--mono); font-size: 13px; }
+.abox input.second[hidden] { display: none; }
 .anote { color: var(--muted); font-size: 11px; margin-top: 8px; line-height: 1.5; }
 .anote[hidden] { display: none; }
 

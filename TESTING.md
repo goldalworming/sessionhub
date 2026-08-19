@@ -3,13 +3,15 @@
 Environment: Windows 11 Pro 26200, no WSL. Rust 1.96.0, Node 24.19 (only for the
 test scripts), Chrome 151 headless over the DevTools Protocol.
 
-**163 unit tests** on Windows and **165 on unix** (`cargo test`; two of them test the PATH merging, which only exists on unix) cover the ring buffer, size
+**207 unit tests** on Windows and **209 on unix** (`cargo test`; two of them test the PATH merging, which only exists on unix) cover the ring buffer, size
 negotiation, backpressure, JSONL parsing, cwd resolution, time formatting, process
 tree summation, HTTP and token parsing, cloudflared URL extraction, agent name
 filtering, dropped-file sweeping, folder-picker path cleanup, file tree reading,
 truncation of large files, percent decoding in HTTP queries, pairing link parsing
 along with machine name filtering, the login page shown when no token is present
-yet, and the path comparison rules that differ per system.
+yet, the path comparison rules that differ per system, release version comparison
+and asset picking for self-update, and the shell-input tracker that decides when
+it can honestly name the command a terminal is running.
 
 Everything is green on **macOS 26.5.2 (arm64)** too — see
 [Cross-platform](#cross-platform).
@@ -348,6 +350,138 @@ a notch is three rows, about 63 px, so the first 63 px of every drag did nothing
 and the screen then jumped three rows at once. Per-frame batching matters for the
 other half of it — the agent redraws its whole screen for every wheel report it
 receives, and a raw touchmove stream is 120 a second.
+
+### 8c. Updating itself
+
+`updateui.mjs` — **7/7**. The Update section asks the real releases API for this
+repo and reports what it found. The assertion that matters is a negative one: a
+daemon already on the newest release must NOT be offered an install button,
+because pressing it restarts the daemon and kills every live terminal for
+nothing.
+
+The half that actually replaces the binary cannot be tested from inside the
+suite — it ends the daemon the test is talking to. It was verified separately,
+end to end, with a throwaway daemon built as **0.0.0** in its own folder and its
+own home on port 7725:
+
+```
+[ok] the test daemon starts as 0.0.0
+[ok] an older daemon is offered the newer release
+[ok] the first click only arms it ("Click again to install")
+[ok] and nothing has been installed yet
+[ok] it restarts into the release: 0.0.0 -> 0.0.1
+[ok] the binary it replaced is kept alongside, so a bad update can be undone
+[ok] and the updater script cleans itself up
+```
+
+Nothing there is mocked: it downloaded the published 0.0.1 asset from GitHub,
+swapped its own binary and came back answering as 0.0.1.
+
+That run is also what caught the real bug. The first attempt swapped the binary
+correctly and then failed to come back, with `error 10048` in the log: sending
+`Cmd::Shutdown` ends the terminals but leaves the process alive holding the
+port, so the new binary could not bind it. The handler now takes the same road
+`sessionhubd stop` does — shutdown, remove the pid file, exit — and the swapper
+script refuses to touch anything if the old pid is somehow still alive, rather
+than installing a binary that cannot start.
+
+> Note: `pty::resolving_is_fast_enough_to_run_on_every_panel_open` is a timing
+> test and fails when the machine is busy — it went red once during this work
+> while a release build was running in parallel, and passed alone immediately
+> after. It measures load as much as code.
+
+### 8d. Terminals that outlive the daemon
+
+`savedterm.mjs` — **29/29**. The feature is entirely about what survives a
+restart, so the test restarts the daemon rather than approximating it: a real
+shell is opened in a project, a real batch file typed into it by dispatching
+keystrokes, the terminal named, the daemon stopped and started again, and then
+the saved row is clicked and the script has to actually run — proven by the file
+it writes on disk, not by what the screen says.
+
+```
+[ok] it already holds the command that was typed (".\@run-bot.bat")
+[ok] it is written to config.toml, not just held in the page
+[ok] only one terminal wears the name (1)
+[ok] the daemon is stopped — every terminal in it dies
+[ok] the saved terminal is still listed after the restart
+[ok] clicking it opens the shell and runs the command by itself
+[ok] the script really ran — it left its mark on disk
+[ok] opening it again attaches instead of starting a second copy (1)
+[ok] one click on ✕ forgets nothing — it only arms
+```
+
+Two things this run caught that unit tests could not.
+
+**Focus reports poisoned the command capture.** The daemon watches PTY input so
+that naming a terminal can offer the command it is running, and any escape
+sequence marks the tracked line untrustworthy — an arrow key edits the line
+where the daemon cannot see it. But xterm also sends `ESC[I` / `ESC[O` whenever
+the browser tab gains or loses focus, so in a real browser the capture was
+almost never trusted, and the command box kept arriving empty. The parser now
+separates the terminal *reporting about itself* (focus, mouse, cursor position,
+device attributes — ignored) from the user *editing the line* (arrows, Tab,
+Delete — still poisons it). No unit test would have found this: they fed the
+tracker exactly the bytes I believed a keyboard sends.
+
+**A name stuck to two terminals at once.** Saving terminal B under a name
+terminal A already wore left both claiming it, so the sidebar drew the same row
+three times and `live_terminal_id` picked whichever the map yielded first. Found
+by looking at a screenshot of the sidebar, not by a failing assertion — which is
+why the test now asserts it.
+
+The test also measures the row on a 390 px phone. A saved row carries more than
+any other (name, agent badge, command), and the command is the part that grows
+without limit; a settings panel once reached 1100 px inside a 420 px viewport
+while every DOM-level assertion still passed, so this one checks geometry rather
+than trusting a click.
+
+One deliberate non-feature, worth stating so nobody looks for it: a saved
+terminal is a note about how to start something, not a supervisor. Nothing
+restarts it by itself and nothing starts it when the daemon boots.
+
+### 8e. Colouring a tab
+
+`tabcolor.mjs` — **24/24**. The test opens two terminals in the *same* project so
+their tabs read identically, and asserts that they do before touching anything —
+otherwise it would be proving a colour works on tabs that were already
+distinguishable, which is not the case the feature exists for.
+
+Four things beyond "the attribute is set":
+
+```
+[ok] the colour is actually painted, not just recorded in an attribute
+[ok] a coloured bar is drawn down the panel's side (3px, rgb(31, 122, 133))
+[ok] and the terminal starts after it, so column one is not clipped (3px)
+[ok] the same terminal wears the tag in the sidebar too
+[ok] a second client is told about it — so the phone and the laptop agree
+[ok] a colour outside the palette is refused
+[ok] the saved terminal still wears its colour after the restart
+```
+
+The paint check reads `getComputedStyle` rather than the attribute: the tag is
+drawn through a `--tag` custom property that resolves per theme, and a typo in
+the palette selectors would leave `data-color` set and nothing visible. The
+second-client check opens its own WebSocket, which is what proves the tag lives
+on the daemon rather than in one browser's `localStorage`.
+
+The refusal test sends `red; background:url(x)`. The value is handed to the page
+as an attribute, so the daemon whitelists it — `config::TAB_COLORS` — instead of
+storing whatever arrives.
+
+Two things this found:
+
+**Named terminals still showed as `savedproj · terminal` on their tabs.** The
+sidebar had been showing the name since saved terminals were added; the tab label
+was still derived from project and agent alone. Caught by looking at a screenshot
+of the tab strip — four tabs, two of them named, all four reading alike. The
+label now prefers the name, and the test asserts it.
+
+**A stray NUL byte in `sidebar.js`.** A scripted edit put `\0` where a space
+belonged, inside `bucketKey` — which builds the key for remembering which day
+groups are folded. Every key would have changed, silently resetting everyone's
+folds. `grep` reporting the file as binary is what gave it away; the file is now
+checked for control bytes after scripted edits.
 
 ### 9. Windows without WSL
 
