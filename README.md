@@ -49,6 +49,37 @@ As I found them in **August 2026**. All three projects move fast, so file an iss
 | Agent activity signal | busy/finished colours + finish chime | task status in UI | blocked/working/done/idle sidebar |
 | Install | one binary, no npm, no build step | desktop/web app | one Rust binary |
 
+## Features
+
+- **Sessions outlive the UI** — the daemon owns the PTY, so a closed tab, a shut lid, or a crashed browser leaves the agent running.
+- **Resume what your CLI already has** — the sidebar *is* the agent's own on-disk registry (`~/.claude`, `~/.pi`, opencode), so any session you ever made is one click from `--resume`.
+- **Raw passthrough** — PTY bytes go through unchanged, so the agent's own TUI is the interface and nothing is injected into your prompts.
+- **Saved terminals** — give a plain shell a name and the line it runs, and it comes back after a restart as a one-click row instead of a half-remembered filename.
+- **Tab colours** — right-click a tab (long-press on a phone) to tag it from the theme's six terminal colours, stored on the daemon so every device sees the same mark.
+- **Many machines, one window** — a tab per paired machine, relayed by your local daemon so the remote token never reaches the browser.
+- **Made for a phone** — a key bar with Esc, Tab, ⇧Tab, sticky Ctrl/Alt and arrows, plus **Paste** and **Img** buttons and touch scrollback.
+- **Tabs or grid** — one terminal at full size, or every live terminal at once in a grid that stays as square as it can.
+- **File panel** — a folder tree per project with Monaco beside the terminal, for the edits too small to ask an agent for.
+- **Drop or paste a file** — it uploads to the machine where the agent runs, not the one you are holding, and its path is typed at the prompt without pressing Enter.
+- **Fork a session** — continue an old conversation into a new one and leave the original untouched.
+- **Activity at a glance** — each terminal shows busy or finished, with a chime when a run ends while you were looking elsewhere.
+- **RAM per terminal** — measured across each terminal's whole process tree, not just its root process.
+- **Self-update** — **⚙ Settings → Update** fetches the newest release and restarts into it, after saying how many live terminals that will cost.
+- **Search that includes parent folders** — typing `telkom` finds projects inside `…\telkom\…` even when no project is named that.
+- **One binary** — no npm, no build step, no runtime to install.
+
+| Shortcut | Action |
+|---|---|
+| `Ctrl/Cmd+K` | command palette |
+| `Ctrl/Cmd+B` | hide/show the sidebar |
+| `Ctrl/Cmd+1..9` | switch to the nth terminal |
+| `Ctrl/Cmd+W` | close the terminal view (not kill it) |
+| `Ctrl/Cmd+Shift+W` | kill the terminal, with confirmation |
+
+Every other key goes to the agent untouched; `Ctrl+C`, `Ctrl+D`, `Ctrl+P` and `Ctrl+R` are never hijacked. Chrome keeps `Ctrl+W` and `Ctrl+1..9` for itself, so those reach the app only in an installed window (PWA).
+
+Two things sessionhub deliberately does not do: it is **not a supervisor** — nothing restarts a saved terminal for you, and nothing starts one when the daemon boots — and it adds **no chat, diff or task UI**, because the agent already has one.
+
 ## Install
 
 Needs stable Rust. The frontend has no build step — no npm, no bundler.
@@ -92,121 +123,6 @@ Run `sessionhubd restart --force` to go ahead anyway.
 Close the launching terminal whenever you like. The daemon does not die with it. That is the whole reason this project exists.
 
 For development, `sessionhubd start --foreground` keeps the process in the terminal, so its log is visible right away.
-
-## Updating
-
-**⚙ Settings → Update**. It asks this repo's releases for the newest version,
-shows the notes, and installs it on the machine whose tab you are looking at —
-including a remote one.
-
-What it does not do is hide the cost. Installing restarts the daemon, and every
-live terminal is a child of it, so the panel counts them before you commit and
-asks twice. Agent sessions come back from the sidebar with their context; a
-plain shell does not.
-
-The swap itself cannot happen from inside a running process — Windows locks a
-running `.exe`, and unix refuses to write a busy one. So the new build is
-downloaded next to the old binary and a small script does the exchange once the
-daemon has exited, then starts it again. The binary it replaced is kept beside
-it as `sessionhubd.old`, so an update that will not run can be undone by hand.
-If the daemon somehow has not exited, the script leaves everything untouched
-rather than installing something that cannot take the port.
-
-Releases carry a build per platform. A release with nothing for your platform is
-reported as such, and no button is offered.
-
-## Saved terminals
-
-An agent session comes back on its own after a restart, because the agent wrote
-it to its own store and sessionhub reads it back. A plain shell writes nothing.
-So the terminal running your bot, your dev server, or a long `tail -f` is simply
-gone once the daemon stops — and the only record of what it was running is in
-your head.
-
-Naming one fixes that. Press the save icon on a running terminal's row, give it
-a name and the line to run:
-
-```
-telegram bot     .\@run-telegram-bot.bat
-dev server       npm run dev -- --host 0.0.0.0
-```
-
-It is written to `config.toml`, so it survives a daemon restart, a reboot, and a
-machine crash. Afterwards the sidebar keeps a row for it under its project: a
-hollow dot and the command it will run. One click opens the shell in the right
-folder and runs that line.
-
-The command box arrives already filled in with what you last typed in that
-terminal, so naming it does not mean typing the command out a second time. It
-comes back empty when sessionhub cannot answer honestly — a command recalled
-with the up arrow or finished with Tab never passed through the daemon, and
-guessing there would put a line you never ran into something that runs on every
-open. Type it yourself in that case; the box is editable either way.
-
-Details worth knowing:
-
-- **A name belongs to one terminal at a time.** Saving a second terminal under a
-  name already in use takes the name off the first one.
-- **Opening one that is already running attaches to it** rather than starting a
-  second copy — which matters when the thing holds a port.
-- **Forgetting takes two clicks** on the ✕, so a mis-tap on a phone does not
-  delete the one note saying how a service is started. It removes the note only;
-  anything running under that name keeps running.
-- They live in `config.toml` under `[[saved]]` and can be written by hand:
-
-  ```toml
-  [[saved]]
-  name = "telegram bot"
-  project = 'C:\data\code\firefox-ext\mcp'
-  agent = "terminal"
-  command = '.\@run-telegram-bot.bat'
-  ```
-
-A folder you are working in rises to the top of the project list. The list is
-ordered by the newest agent session, and a plain shell is not a session — so a
-folder with no agent history used to sink to the bottom the moment you opened a
-terminal in it. What is running there counts as the most recent thing that
-happened there; a saved-but-idle terminal keeps it above folders with nothing
-set up in them.
-
-This is a note about how to start something, not a supervisor: sessionhub does
-not restart a saved terminal by itself, and does not start one when the daemon
-boots. It makes starting it one click instead of a folder hunt and a
-half-remembered filename.
-
-## Tab colours
-
-Four terminals in one project give you four tabs reading `mcp · terminal`.
-Right-click a tab (long-press on a phone) and pick a colour, and that one is
-findable at a glance.
-
-The palette is six colours, not a colour picker: red, green, yellow, blue,
-magenta, cyan. They are the theme's own terminal palette, defined separately for
-light and dark, so a tag stays readable when the theme flips — a stored hex
-would have been right in one theme and muddy in the other. The daemon refuses
-anything outside that list.
-
-The tag lives on the daemon, not in one browser's storage. That is the point:
-the same terminal is looked at from the phone and from the laptop, and a mark
-only one of them can see is not a mark. Tag it on the laptop and the phone shows
-it on the next update, and so does a paired machine's tab.
-
-It shows everywhere the terminal appears: on its tab, on its sidebar row, and
-as a bar down the left edge of the terminal panel itself — because a mark that
-exists in only some of those places is one you stop trusting. The panel bar
-matters most in grid mode, where there is no active tab to read at all.
-
-The bar sits in the small gap every panel leaves on its left, so it never paints
-over the terminal. An overlay would sit on the leftmost pixels of column one,
-which is exactly where box-drawing characters live.
-
-On a [saved terminal](#saved-terminals) the colour is stored with the name and
-comes back the next time you open it. On an unnamed one it lasts as long as the
-terminal does, which is exactly as long as the terminal itself is worth
-identifying.
-
-Picking the colour a tab already has takes the tag off, and `No colour` does the
-same; it only appears once there is something to clear.
 
 ## Coming back after a reboot
 
@@ -293,21 +209,45 @@ Removing takes two clicks on the **Remove** button in the agent's row. Terminals
 
 Built-in agents you do not use — `pi`, for instance — can simply be removed. The only one that cannot be removed is `terminal`. It is rebuilt every time the daemon starts. So the panel offers to disable it instead of removing it.
 
+### Saved terminals
+
+A terminal you named is stored here, so it survives a restart. Written by the
+save icon on a terminal's row, and editable by hand:
+
+```toml
+[[saved]]
+name = "telegram bot"
+project = 'C:\data\code\firefox-ext\mcp'
+agent = "terminal"
+command = '.\@run-telegram-bot.bat'
+color = "cyan"
+```
+
+`command` is run when the terminal is opened. A bare filename that exists in
+`project` is run the way the shell needs it (`.\name`) — neither PowerShell nor
+`sh` will run a file from the current directory otherwise, and stored as-is it
+fails silently into a panel nobody has open. Anything else is left exactly as
+written, because a name that is not a file there is meant for the PATH.
+
+A name belongs to one terminal at a time, opening one that is already running
+attaches to it rather than starting a second copy, and forgetting one takes two
+clicks so a mis-tap on a phone does not delete the note. `color` is one of red,
+green, yellow, blue, magenta, cyan.
+
 ### Fork session
 
-`fork_args` decides how an agent continues a conversation into a new session. Its contents are verified against each agent's `--help` and filled in automatically on first run:
+`fork_args` is filled in on first run for the agents known to support it, and is
+editable in **⚙ Settings**. `{session_id}` and `{name}` are substituted.
 
 ```toml
 [agents.claude]
 fork_args = ["--resume", "{session_id}", "--fork-session", "--name", "{name}"]
 
 [agents.opencode]
-fork_args = ["-s", "{session_id}", "--fork"]
+fork_args = ["-s", "{session_id}", "--fork"]   # takes no name
 ```
 
-Both can be edited in **Settings**, in each agent's row. An empty list means that agent cannot fork, and the button is not offered. The `{name}` placeholder is only used by agents that accept a session name from the CLI. opencode has `--fork` but no name flag, and the dialog says so instead of promising a name that would be ignored.
-
-A note about Claude Code: a forked session **is only written to disk after the first message**. Until that happens, the fork lives in a terminal tab but does not yet have a row in the sidebar. That is agent behaviour, not a failed fork.
+An empty list means the agent cannot fork, and the `⑂` button is not offered.
 
 ### Agent environment
 
@@ -345,20 +285,19 @@ Files larger than `max_file_mb` are rejected up front with a message that names 
 
 ### New project
 
-The **＋** button in the sidebar toolbar opens a folder picker. The flow is a single path:
+`projects` is filled in by the **＋** folder picker in the sidebar, and can still
+be edited by hand. Everything else is discovered from existing agent sessions by
+reading `cwd` **out of the session file** — not by guessing it from an encoded
+directory name.
 
-1. Start from the folder you opened last — including after closing the browser. If there is no such folder yet, start from the home directory. Jump around with the drive shortcuts (`Home`, `C:`, `D:`…), or paste a path straight into the box at the top and press Enter.
-2. Click a folder to enter it, `↑` to go up. Folders containing `.git` are marked with ◆ — usually that is what you are looking for.
-3. **New folder** if the project does not exist yet. As soon as it is created, the picker moves into it.
-4. **Use this folder** makes it a project. It appears in the sidebar immediately, with no reload and no daemon restart.
+What you browse is the disk of **the machine the daemon runs on**, not the device
+holding the browser; that is where the agent works, so even from a phone you are
+picking a folder on your computer. It opens up nothing new — anyone who can talk
+to the daemon already has a shell there.
 
-What you browse is the disk of **the machine the daemon runs on**, not the device running the browser. That is exactly right, because that is where the agent works. Even from a phone you are picking a folder on your computer.
-
-This does not open up any new capability. Anyone who can talk to the daemon already has a full shell on that machine. Listing directories is just a shorter route than typing `ls`.
-
-Folders that are already projects are marked in the list, and the button changes to **Remove from sidebar**. Only the ones you added yourself can be removed. Projects discovered from agent sessions are not recorded in `config.toml`, so they will come back on their own — and the panel says so instead of failing silently.
-
-`projects` in the config is filled in by this flow, and can still be edited by hand. Everything else is discovered on its own from existing agent sessions, by reading `cwd` **from the contents of the session file** — not by guessing it from an encoded directory name.
+Only projects you added yourself can be removed. Ones discovered from agent
+sessions are not in `config.toml` and come back on their own, and the panel says
+so rather than appearing to fail.
 
 ## Token
 
@@ -451,9 +390,9 @@ refetches every file past the cache and reloads.
 
 ## Many machines in one window
 
-The tab bar above the terminal has one tab per machine: **This machine**, then each machine you have paired. Switching tabs swaps **all the contents of the window** — sidebar, terminals, file panel, settings — so nothing gets mixed up.
-
-Terminals on a machine that is not currently shown are **not closed**, only hidden. Going back to its tab is instant, with no re-connect and no replay.
+One tab per paired machine. Switching tabs swaps the whole window — sidebar,
+terminals, file panel, settings — and terminals on a machine that is not shown
+are hidden, not closed, so going back is instant.
 
 ### Pairing
 
@@ -490,132 +429,6 @@ version = "0.1.0"
 > The traffic is **not encrypted**, exactly as with Network access. The token proves who is calling; it does not hide what is being said. A paired machine means **full access** to that machine — that daemon does hand out a shell. Use it only on networks you trust, or over a VPN — the pairing link accepts a VPN address just as it accepts a LAN address.
 >
 > **`https://` connections are not supported**: pairing speaks plain HTTP and requires `host:port`, so a `sessionhubd tunnel` URL cannot be paired. To cross the internet, run it over a VPN.
-
-## Usage
-
-- **＋** above the sidebar opens the folder picker. You can look through the daemon machine's disk. You can create a new folder if you need one. Then **Use this folder** makes it a project. The new project shows up in the sidebar right away. You do not need to reload. See [New project](#new-project).
-- The **Files** button at the top right opens the file panel. It sits to the right of the terminal. It has a folder tree for each project. It has Monaco for opening files. See [File panel](#file-panel).
-- The **Tabs / Grid** button in the top bar swaps the stage layout. One terminal fills the screen. Or all terminals show at once in a grid. See [Tabs or grid](#tabs-or-grid).
-- Clicking a **project name** moves the file panel to that project. To collapse or expand its session list, use the **arrow on the left**. These are two different actions on two different targets. So they never fight over each other.
-- Click a session in the sidebar. If its terminal is alive, it attaches. If not, it respawns with the resume flag. One click. No dialog.
-- Filled dot means live terminal. Empty circle means stored session.
-- Some terminals have no stored session yet. This includes a plain shell. It also includes agents whose session has not been written to disk. These still get their own row under their project. They stay there as long as they live. The row is labelled with the agent name and terminal number. Without this, both would only exist in the tab bar at the top. The row disappears on its own when the terminal dies.
-- `+` in a project row creates a new terminal. You pick the agent.
-- The `⑂` button in a session row **forks** it. The old conversation continues into a **new** session. The original is left untouched. You are asked for the name first. The button only shows for agents that have a fork command.
-- **Drag a file onto the terminal** to upload it. You can also paste an image with `Ctrl/Cmd+V`. The file lands in `~/.sessionhub/dropped/` **on the machine where the agent runs**. Then its path is typed into the prompt. No Enter is pressed. You can still write a sentence in front of it. You can also delete it. This is useful from a phone. The image reaches the computer where the agent works. It does not stop at the phone.
-- The **key bar** shows on its own on narrow screens. It appears as soon as a terminal is open. It sticks to the bottom just above the on-screen keyboard. Phone keyboards have no Esc, no Tab, and no arrows. These are the three keys used most in a terminal. See [From a phone](#from-a-phone).
-- The bookmark marker in a project row marks it as a focus. Marked ones move up into the top group. Ones already marked are filled in and always visible. Unmarked ones are only an outline. They appear when the cursor touches their row.
-- The search box above the sidebar filters projects and session titles. It also filters **their parent folders**. Typing `telkom` surfaces projects inside `…\telkom\…`. This works even if the project name itself does not contain the word. The full path is never shown. All that appears is the folder name that caused the row to match. So there are no results without a reason.
-
-  Folders are matched as a **substring**. Names are matched as a subsequence. If folders were matched as a subsequence, a path as long as `C:\Users\…\data\code\…` would make almost every project match. The filter would stop filtering anything. Folders that *every* project passes through are also excluded. They do not distinguish anything.
-
-| Shortcut | Action |
-|---|---|
-| `Ctrl/Cmd+K` | command palette |
-| `Ctrl/Cmd+B` | hide/show the sidebar |
-| `Ctrl/Cmd+1..9` | switch to the nth terminal |
-| `Ctrl/Cmd+W` | close the terminal view (not kill it) |
-| `Ctrl/Cmd+Shift+W` | kill the terminal, with confirmation |
-
-Every other key is sent raw to the agent. `Ctrl+C`, `Ctrl+D`, `Ctrl+P`, and `Ctrl+R` are never hijacked.
-
-Note: Chrome uses `Ctrl+W` and `Ctrl+1..9` to close and switch tabs at the browser level. A page cannot prevent this. Those three shortcuts only reach the application in an installed window (PWA) or in a browser that hands them over. `Ctrl+K` and `Ctrl+B` always work.
-
-The `RAM` button at the top right shows the memory usage of each terminal. It is computed for **its entire process tree**. An agent's root process is usually the smallest one of all.
-
-Narrow screens are handled. The sidebar becomes a drawer that overlays the screen. It is opened with the ☰ button.
-
-## From a phone
-
-The key bar's **Paste** button puts the clipboard wherever the cursor is. With a
-dialog open — naming a terminal, say — that is the field you are typing in, not
-the terminal behind it. On a phone this button is the only way to paste at all,
-so aiming it at the terminal made those fields unfillable.
-
-Narrow screens hide the sidebar into a drawer and show a **key bar** below the stage.
-
-The bar is there because on-screen keyboards lack Esc, Tab, and arrow keys. In a terminal, those keys are used the most.
-
-```
-Esc  Tab  Ctrl  Alt  ←  ↑  ↓  →  ⋯
-```
-
-`⋯` opens a second row:
-
-```
-^C  ^D  ^Z  ^R  ^L  ⇧Tab  Home  End  PgUp  PgDn  Del  ⏎
-```
-
-The list is **not a copy** of the bar in a remote desktop app. `Win`, `PrtScr`, `ScrollLock`, and `Menu` mean nothing to a PTY. The daemon sends bytes, and those keys make no bytes that reach the shell.
-
-Instead, the bar has what such bars lack and what people use daily: interrupt, EOF, suspend, history search, clear, and the `⇧Tab` that Claude Code uses to switch modes.
-
-**Ctrl and Alt are sticky.** Pressing one sends nothing. It waits for the next keystroke — from a bar key **or from the on-screen keyboard** — then turns it into a control code and releases itself.
-
-While sticky, the key is lit. The next letter changing meaning must not surprise you.
-
-The `⌨` button in the top bar turns the bar on or off, even on wide screens. The choice is saved. If no choice is made, the default follows the screen width.
-
-From a phone, you can also: **paste an image with `Ctrl/Cmd+V`**, or drag a file onto the terminal. It uploads to the machine where the agent runs, not to the phone — see [Dropped files](#dropped-files).
-
-## Tabs or grid
-
-The **Tabs / Grid** button is in the top bar. Tab mode gives one terminal the whole screen. Grid mode shows every live terminal at once. The number of columns follows the number of terminals — two side by side, four as 2×2, nine as 3×3. Each panel stays as square as possible, instead of becoming a thin, unreadable ribbon.
-
-Switching to grid also opens live terminals that have never been opened. Swapping the layout and then seeing only one panel is not what "grid" means. The limit is 9 panels. Beyond that, each panel is too small to read. Each panel also means one attach plus a replay of its ring buffer.
-
-Each panel has a small header with the project and agent name, plus `✕` to close its view. The process keeps running. The active panel gets an accent line. That is where the application shortcuts are aimed.
-
-The PTY size is still negotiated per terminal. So each panel reports the size of its own cell, not one size forced on all of them.
-
-The layout choice is stored in the browser.
-
-## File panel
-
-The **Files** button is in the top bar.
-
-**Only one project is shown: the one you are working on.** The explorer follows the active terminal. Switching terminal tabs to another project moves its contents too. The contents of other projects are not shown alongside. If you are in one project, the rest only lengthen the list without ever being opened. To move it by hand: click the **project name in the left sidebar**, or the `▾` button in the **Explorer** title. The last action wins. Picking a project beats the active terminal, and switching terminal tabs brings it back again. The project currently in focus is marked with an accent line at the left edge of its row.
-
-The project root is open from the start. Making you click one level just to see the contents of the project you are working on is a step with no purpose. Open files use a folder trail relative to the project (`src › main.rs`), not the full path. A prefix that is the same on every row tells you nothing.
-
-The panel is two columns: **Explorer** stays on the left, the editor to its right. Explorer is not a tab. It is always visible, so the tree and the file never hide each other. The tab bar above the editor holds only the files that are open. `✕` closes just that file. The boundary between the two can be dragged, and its width is remembered.
-
-`Ctrl/Cmd+S` or the **Save** button writes it back to disk. Files with unsaved changes are marked with a dot on their tab.
-
-**The editor theme is separate from the application theme**, and its default is dark. Code is read for long stretches, and that is a different preference from the preference for the rest of the interface. The theme button in the editor bar cycles `dark → light → auto`. `auto` follows the application theme.
-
-**Images are displayed, not merely called a "binary file".** PNG, JPEG, GIF, WebP, AVIF, BMP, and ICO are drawn as they are on top of a checkerboard. That way transparent ones can be told apart from ones with a white background. They show their pixel size too. The bytes are fetched over `GET /api/file`, not over the WebSocket. The browser can cache them, and there is no one-third bloat from base64 inside JSON. SVG is deliberately still opened as text. In a tool like this it is more often something you want to edit than to look at.
-
-A tree like this is usually heavy. Three things keep this one from being so:
-
-**One folder per request.** A folder's contents are only read when that folder is opened. There is no whole-repo index built up front. An index like that scans tens of thousands of files just to draw the twenty rows that are visible, and has to be rebuilt every time something changes.
-
-**Virtualisation.** Only the rows inside the viewport plus a small reserve become DOM elements. Opening a folder with 2,000 files produces ~50 elements, not 2,000. Scrolling it stays at ~50.
-
-**Monaco is loaded lazily.** Those 4.9 MB are only requested when the first file is opened. As long as you only use the terminal, not a single byte is downloaded. What is bundled has been trimmed too: `editor` + `basic-languages`, without `language/` (7 MB of TypeScript/HTML/CSS language services along with their workers). Syntax highlighting is still complete — that comes from `basic-languages`, not from `language/`.
-
-The limits that apply:
-
-| | |
-|---|---|
-| Files per folder | 5,000; the rest is noted on the last row |
-| File size | 2 MB; above that only the head, cut at a line boundary, and the editor becomes read-only |
-| Binary files | contents are not sent at all — the panel only states the size |
-| Images via `/api/file` | 25 MB |
-
-**Save** only overwrites files that already exist. Saving to a mistyped name is rejected, not quietly turned into a new file. This panel is an editor, not a file manager.
-
-The **Filter** box filters the files in the folder that is open. Folders are not filtered along with them. Hiding them would cut off the route to matching files inside.
-
-## Multiple terminals, one session
-
-Several browsers may open the same terminal. Their screen contents are the same,  
-and typing in one shows up in all of them.
-
-The PTY size used is the **smallest cols and the smallest rows** across all  
-attached clients, worked out per axis — the same way as tmux. Opening a terminal  
-from a phone will make its view narrower on the desktop while the phone is still  
-attached. Close the view (do not kill it) when you are done.
 
 ## Known limits
 

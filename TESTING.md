@@ -385,14 +385,15 @@ port, so the new binary could not bind it. The handler now takes the same road
 script refuses to touch anything if the old pid is somehow still alive, rather
 than installing a binary that cannot start.
 
-> Note: `pty::resolving_never_shells_out` used to be
-> `resolving_is_fast_enough_to_run_on_every_panel_open`, and measured the TOTAL
-> time of twenty calls — which made it a measurement of the machine as much as of
-> the code. It went red three times during unrelated work, always while a build
-> ran in parallel, and always passed alone a moment later. It now takes the
-> FASTEST of the twenty: load can make any single call slow, but it cannot make a
-> call that spawns a process finish in microseconds, so the best case is the
-> honest signal. Verified red-free with four busy cores.
+> Note: `pty::resolving_never_shells_out` guards against a subprocess coming
+> back — it used to call `where.exe` per agent. Two earlier shapes measured
+> wall-clock against a fixed number and both were really measuring the machine:
+> "20 calls under 200ms" went red three times while a build ran in parallel, and
+> "fastest of 20 under 5ms" went red too, because a PATH scan reads real
+> directories and a cold cache costs milliseconds. It now measures what a process
+> spawn actually costs on this machine, right now, and requires the resolve to be
+> at least 5x faster — so a slow or busy machine inflates both sides together.
+> Green three times idle and three times with four cores pegged.
 
 ### 8c2. Updating from one published release to the next
 

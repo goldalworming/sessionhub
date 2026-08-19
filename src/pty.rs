@@ -533,24 +533,49 @@ mod tests {
         // This used to call `where.exe` per agent: hundreds of milliseconds and a
         // flashing console window. What must not come back is the subprocess.
         //
-        // Measured as the FASTEST of many calls, not the total. The total is a
-        // measurement of the machine as much as of this function — it went red
-        // three times during unrelated work, always while a build was running in
-        // parallel, and always passed on its own a moment later. A busy machine
-        // can make any single call slow; what it cannot do is make a call that
-        // spawns a process finish in microseconds. So the best case is the
-        // honest signal, and the threshold sits far below any process spawn
-        // (milliseconds) and far above a directory scan (microseconds).
+        // Two earlier shapes of this test measured wall-clock against a fixed
+        // number, and both were really measuring the machine. The total of 20
+        // calls under 200ms went red three times while a build ran in parallel.
+        // The fastest of 20 under 5ms went red too: a PATH scan reads real
+        // directories, and on a cold cache the best case is milliseconds.
+        //
+        // So the number to compare against is measured here, now, on this
+        // machine: what a process spawn actually costs. A slow or busy machine
+        // inflates both sides together, which is exactly what a fixed threshold
+        // could not do.
         let name = if cfg!(windows) { "cmd" } else { "sh" };
+
+        // Warm the PATH cache first — the question is whether a spawn happens,
+        // not whether the first directory read hits the disk.
+        let _ = resolve_command(name);
         let mut best = std::time::Duration::MAX;
         for _ in 0..20 {
             let t0 = std::time::Instant::now();
             let _ = resolve_command(name);
             best = best.min(t0.elapsed());
         }
+
+        let mut spawn = std::time::Duration::MAX;
+        for _ in 0..3 {
+            let t0 = std::time::Instant::now();
+            let out = if cfg!(windows) {
+                std::process::Command::new("cmd").args(["/c", "exit"]).output()
+            } else {
+                std::process::Command::new("/bin/sh").args(["-c", ":"]).output()
+            };
+            if out.is_ok() {
+                spawn = spawn.min(t0.elapsed());
+            }
+        }
+        // If a process could not be started at all there is nothing to compare
+        // against, and failing here would say nothing about `resolve_command`.
+        if spawn == std::time::Duration::MAX {
+            return;
+        }
+
         assert!(
-            best < std::time::Duration::from_millis(5),
-            "resolusi tercepat memakan {best:?} — sepertinya ada proses yang dijalankan"
+            best * 5 < spawn,
+            "resolusi tercepat {best:?} vs biaya spawn {spawn:?} — sepertinya ada proses yang dijalankan"
         );
     }
 }
