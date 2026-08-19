@@ -162,6 +162,13 @@ Details worth knowing:
   command = '.\@run-telegram-bot.bat'
   ```
 
+A folder you are working in rises to the top of the project list. The list is
+ordered by the newest agent session, and a plain shell is not a session — so a
+folder with no agent history used to sink to the bottom the moment you opened a
+terminal in it. What is running there counts as the most recent thing that
+happened there; a saved-but-idle terminal keeps it above folders with nothing
+set up in them.
+
 This is a note about how to start something, not a supervisor: sessionhub does
 not restart a saved terminal by itself, and does not start one when the daemon
 boots. It makes starting it one click instead of a folder hunt and a
@@ -189,9 +196,9 @@ as a bar down the left edge of the terminal panel itself — because a mark that
 exists in only some of those places is one you stop trusting. The panel bar
 matters most in grid mode, where there is no active tab to read at all.
 
-The bar takes its own three pixels rather than being drawn over the terminal. An
-overlay would sit on the leftmost pixels of column one, which is exactly where
-box-drawing characters live.
+The bar sits in the small gap every panel leaves on its left, so it never paints
+over the terminal. An overlay would sit on the leftmost pixels of column one,
+which is exactly where box-drawing characters live.
 
 On a [saved terminal](#saved-terminals) the colour is stored with the name and
 comes back the next time you open it. On an unnamed one it lasts as long as the
@@ -519,6 +526,11 @@ The `RAM` button at the top right shows the memory usage of each terminal. It is
 Narrow screens are handled. The sidebar becomes a drawer that overlays the screen. It is opened with the ☰ button.
 
 ## From a phone
+
+The key bar's **Paste** button puts the clipboard wherever the cursor is. With a
+dialog open — naming a terminal, say — that is the field you are typing in, not
+the terminal behind it. On a phone this button is the only way to paste at all,
+so aiming it at the terminal made those fields unfillable.
 
 Narrow screens hide the sidebar into a drawer and show a **key bar** below the stage.
 

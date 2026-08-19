@@ -3,7 +3,7 @@
 Environment: Windows 11 Pro 26200, no WSL. Rust 1.96.0, Node 24.19 (only for the
 test scripts), Chrome 151 headless over the DevTools Protocol.
 
-**207 unit tests** on Windows and **209 on unix** (`cargo test`; two of them test the PATH merging, which only exists on unix) cover the ring buffer, size
+**211 unit tests** on Windows and **213 on unix** (`cargo test`; two of them test the PATH merging, which only exists on unix) cover the ring buffer, size
 negotiation, backpressure, JSONL parsing, cwd resolution, time formatting, process
 tree summation, HTTP and token parsing, cloudflared URL extraction, agent name
 filtering, dropped-file sweeping, folder-picker path cleanup, file tree reading,
@@ -385,10 +385,14 @@ port, so the new binary could not bind it. The handler now takes the same road
 script refuses to touch anything if the old pid is somehow still alive, rather
 than installing a binary that cannot start.
 
-> Note: `pty::resolving_is_fast_enough_to_run_on_every_panel_open` is a timing
-> test and fails when the machine is busy — it went red once during this work
-> while a release build was running in parallel, and passed alone immediately
-> after. It measures load as much as code.
+> Note: `pty::resolving_never_shells_out` used to be
+> `resolving_is_fast_enough_to_run_on_every_panel_open`, and measured the TOTAL
+> time of twenty calls — which made it a measurement of the machine as much as of
+> the code. It went red three times during unrelated work, always while a build
+> ran in parallel, and always passed alone a moment later. It now takes the
+> FASTEST of the twenty: load can make any single call slow, but it cannot make a
+> call that spawns a process finish in microseconds, so the best case is the
+> honest signal. Verified red-free with four busy cores.
 
 ### 8d. Terminals that outlive the daemon
 
@@ -482,6 +486,63 @@ belonged, inside `bucketKey` — which builds the key for remembering which day
 groups are folded. Every key would have changed, silently resetting everyone's
 folds. `grep` reporting the file as binary is what gave it away; the file is now
 checked for control bytes after scripted edits.
+
+### 8f. Pasting into a dialog, and where a working folder sits
+
+Both of these came from the author using the features the day they were built,
+not from a test suite.
+
+`dialogpaste.mjs` — **11/11**. The Save-terminal dialog asks for a command, which
+is exactly the kind of thing you paste rather than retype. The key bar's Paste
+button always targeted the active terminal, so with the dialog open the clipboard
+went into the shell behind it: invisible, and typed into a terminal nobody was
+looking at. On a phone that button is the only way to paste at all, which made
+the field unfillable.
+
+```
+[ok] nothing in the app swallows a paste aimed at the dialog
+[ok] pressing it fills the focused field, not the terminal behind the dialog
+[ok] and nothing was typed into the terminal behind it
+[ok] with nothing focused but the terminal, Paste still goes to the terminal
+```
+
+The last one matters as much as the fix: aiming at the focused field must not
+break the ordinary case, where the terminal is what has focus.
+
+The clipboard read itself is stood in for. `readText()` needs a trusted user
+gesture and a dispatched `pointerdown` is not one — the browser refuses, and the
+app says so correctly. What changed, and what is checked here, is *where* the
+text goes once it arrives.
+
+Two things the run corrected in the test rather than in the app: the key bar
+listens on `pointerdown`, not `click`, so `.click()` did nothing; and Ctrl+V was
+never broken — the app's global key and paste handlers already stand aside while
+a dialog is open.
+
+`projorder.mjs` — **7/7**. Projects are ordered by their newest agent session,
+and a plain shell is not a session, so a folder with no agent history sank to the
+very bottom the moment a terminal was opened in it — the hardest place to find it
+at exactly the moment it was being used.
+
+```
+    before:  alpha, beta, data
+    running: data, alpha, beta
+    saved:   data, alpha, beta
+    forgot:  alpha, beta, data
+```
+
+The fixture registers the sessionless folder **last**, so registry order alone
+would leave it last and the old behaviour fails loudly. The sort only decides a
+band and is stable, so the registry's own ordering by date survives inside each
+band — asserted, because a sort that also scrambled the rest would pass a naive
+"is it first?" check.
+
+While running the suite afterwards, `sidebarui` went red on "emptying it restores
+the original title" — and the cause was neither flakiness nor the app: it runs
+against the author's own daemon, which by then held two saved terminals, and a
+named terminal wears the same marker a renamed session does. That is deliberate —
+a name you chose has to look like a name wherever its row appears — so the
+assertion was narrowed to the alias actually under test.
 
 ### 9. Windows without WSL
 

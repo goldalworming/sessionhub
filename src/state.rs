@@ -1583,6 +1583,28 @@ fn same_path(a: &str, b: &str) -> bool {
     registry::path_key(a) == registry::path_key(b)
 }
 
+/// Which band of the project list a folder belongs to. Lower sorts first.
+///
+/// The registry orders by newest agent session, and a plain shell is not a
+/// session — so opening a terminal in a folder with no agent history sank it to
+/// the very bottom, which is where it was hardest to find at exactly the moment
+/// it was being worked in. What is running here counts as the most recent thing
+/// that happened here.
+///
+/// Only the band is decided here; the sort is stable, so the registry's own
+/// ordering by date survives inside each band.
+fn project_rank(path: &str, running: &[&str], named: &[&str]) -> u8 {
+    if running.iter().any(|p| same_path(p, path)) {
+        0
+    } else if named.iter().any(|p| same_path(p, path)) {
+        // Named but not running: still something set up here on purpose, so it
+        // stays above folders holding nothing but history.
+        1
+    } else {
+        2
+    }
+}
+
 fn send_state(
     cfg: &Config,
     registry: &[ProjectInfo],
@@ -1599,7 +1621,7 @@ fn send_state(
         .filter_map(|t| t.session_id.as_deref().map(|s| (s, t.id)))
         .collect();
 
-    let projects: Vec<ProjectInfo> = registry
+    let mut projects: Vec<ProjectInfo> = registry
         .iter()
         .map(|p| ProjectInfo {
             sessions: p
@@ -1613,6 +1635,22 @@ fn send_state(
             ..p.clone()
         })
         .collect();
+
+    // The registry orders projects by their newest agent session, and a plain
+    // shell is not a session — so opening a terminal in a folder with no agent
+    // history sank that folder to the very bottom of the list, which is where it
+    // was hardest to find at exactly the moment it was being worked in.
+    //
+    // What is running counts as the most recent thing that happened here. A
+    // stable sort, so within each rank the registry's own ordering by date
+    // survives untouched.
+    let running: Vec<&str> = terminals
+        .values()
+        .filter(|t| t.alive)
+        .map(|t| t.project.as_str())
+        .collect();
+    let named: Vec<&str> = cfg.saved.iter().map(|s| s.project.as_str()).collect();
+    projects.sort_by_key(|p| project_rank(&p.path, &running, &named));
 
     let mut list: Vec<TerminalInfo> = terminals
         .values()
@@ -1700,6 +1738,42 @@ mod tests {
 
     fn viewers(entries: &[(ClientId, u16, u16)]) -> HashMap<ClientId, (u16, u16)> {
         entries.iter().map(|&(id, c, r)| (id, (c, r))).collect()
+    }
+
+    #[test]
+    fn a_folder_you_are_working_in_rises_out_of_the_bottom_of_the_list() {
+        // The report this exists for: a terminal opened in a folder with no
+        // agent sessions put that folder dead last — under every project with
+        // any history at all — at the moment it was the one being used.
+        let running = [r"C:\data"];
+        let named = [r"C:\data\code\mcp"];
+
+        assert_eq!(project_rank(r"C:\data", &running, &named), 0);
+        assert_eq!(project_rank(r"C:\data\code\mcp", &running, &named), 1);
+        assert_eq!(project_rank(r"C:\data\code\notex", &running, &named), 2);
+
+        // Running beats merely named; a folder that is both is still first.
+        let both = [r"C:\data\code\mcp"];
+        assert_eq!(project_rank(r"C:\data\code\mcp", &both, &named), 0);
+    }
+
+    #[test]
+    fn the_project_ranking_follows_this_systems_rule_about_case() {
+        // These paths arrive from three places — the config, the registry and a
+        // live terminal — and they do not always agree on case.
+        let running = [r"C:\Data\Code"];
+        let want = if cfg!(windows) || cfg!(target_os = "macos") { 0 } else { 2 };
+        assert_eq!(project_rank(r"c:\data\code", &running, &[]), want);
+    }
+
+    #[test]
+    fn ranking_only_bands_projects_and_leaves_the_rest_of_the_order_alone() {
+        // The sort is stable, so within a band the registry's ordering by date
+        // must survive. Two projects with nothing running keep their order.
+        let mut list = vec![r"C:\a", r"C:\b", r"C:\live", r"C:\c"];
+        let running = [r"C:\live"];
+        list.sort_by_key(|p| project_rank(p, &running, &[]));
+        assert_eq!(list, vec![r"C:\live", r"C:\a", r"C:\b", r"C:\c"]);
     }
 
     fn terminal_with(entries: &[(ClientId, u16, u16)], cols: u16, rows: u16) -> Terminal {

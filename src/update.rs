@@ -93,11 +93,27 @@ pub fn is_newer(latest: &str, have: &str) -> bool {
 pub fn parse_release(body: &[u8], suffix: &str) -> Result<Release, String> {
     let json: serde_json::Value =
         serde_json::from_slice(body).map_err(|_| "GitHub did not answer with JSON.".to_string())?;
-    let tag = json
-        .get("tag_name")
-        .and_then(|v| v.as_str())
-        .ok_or("that release has no tag")?
-        .to_string();
+    // GitHub answers a refusal with 200-shaped JSON carrying `message`, so a
+    // missing tag usually means "it said no", not "the release is malformed".
+    // Reporting it as a bad release sends you looking at the release page, where
+    // everything is fine. The most common one by far is the anonymous rate
+    // limit — 60 requests an hour per address, shared by everyone behind the
+    // same router.
+    let tag = match json.get("tag_name").and_then(|v| v.as_str()) {
+        Some(t) => t.to_string(),
+        None => {
+            let said = json.get("message").and_then(|v| v.as_str()).unwrap_or("");
+            return Err(if said.contains("rate limit") {
+                "GitHub is rate-limiting this network right now. It allows 60 checks an \
+                 hour per address; try again in a few minutes."
+                    .to_string()
+            } else if said.is_empty() {
+                "GitHub's answer had no release in it.".to_string()
+            } else {
+                format!("GitHub said: {said}")
+            });
+        }
+    };
     let notes = json.get("body").and_then(|v| v.as_str()).unwrap_or("").to_string();
 
     let mut asset_url = None;
@@ -345,5 +361,30 @@ mod tests {
     fn rubbish_from_the_network_is_an_error_not_a_panic() {
         assert!(parse_release(b"<html>404</html>", "windows-x86_64.exe").is_err());
         assert!(parse_release(b"{}", "windows-x86_64.exe").is_err());
+    }
+
+    #[test]
+    fn a_refusal_from_github_is_reported_as_a_refusal() {
+        // The real body GitHub sends once the anonymous limit is used up. This
+        // was reported as "that release has no tag", which sends you to look at
+        // a release page where nothing is wrong. Hit during the 0.0.2 release
+        // itself, because publishing it spent the hour's requests.
+        // One line on purpose: a literal newline inside a JSON string is not
+        // valid JSON, and a prettier fixture would fail in the parser instead of
+        // in the branch under test.
+        let limited = br#"{"message":"API rate limit exceeded for 203.0.113.7. (But here's the good news: Authenticated requests get a higher rate limit.)","documentation_url":"https://docs.github.com/rest"}"#;
+        let err = parse_release(limited, "windows-x86_64.exe").unwrap_err();
+        assert!(err.contains("rate-limiting"), "{err}");
+        assert!(err.contains("60"), "harus menyebut batasnya: {err}");
+
+        // Any other refusal is quoted rather than guessed at.
+        let gone = br#"{"message":"Not Found","documentation_url":"https://docs.github.com/rest"}"#;
+        let err = parse_release(gone, "windows-x86_64.exe").unwrap_err();
+        assert!(err.contains("Not Found"), "{err}");
+
+        // And a body with neither a tag nor a message still says something
+        // truthful rather than blaming the release.
+        let empty = parse_release(b"{}", "windows-x86_64.exe").unwrap_err();
+        assert!(empty.contains("no release in it"), "{empty}");
     }
 }

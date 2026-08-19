@@ -529,15 +529,28 @@ mod tests {
     }
 
     #[test]
-    fn resolving_is_fast_enough_to_run_on_every_panel_open() {
+    fn resolving_never_shells_out() {
         // This used to call `where.exe` per agent: hundreds of milliseconds and a
-        // flashing console window. There is no subprocess now.
+        // flashing console window. What must not come back is the subprocess.
+        //
+        // Measured as the FASTEST of many calls, not the total. The total is a
+        // measurement of the machine as much as of this function — it went red
+        // three times during unrelated work, always while a build was running in
+        // parallel, and always passed on its own a moment later. A busy machine
+        // can make any single call slow; what it cannot do is make a call that
+        // spawns a process finish in microseconds. So the best case is the
+        // honest signal, and the threshold sits far below any process spawn
+        // (milliseconds) and far above a directory scan (microseconds).
         let name = if cfg!(windows) { "cmd" } else { "sh" };
-        let t0 = std::time::Instant::now();
+        let mut best = std::time::Duration::MAX;
         for _ in 0..20 {
+            let t0 = std::time::Instant::now();
             let _ = resolve_command(name);
+            best = best.min(t0.elapsed());
         }
-        let ms = t0.elapsed().as_millis();
-        assert!(ms < 200, "20 kali resolusi memakan {ms}ms — terlalu lambat");
+        assert!(
+            best < std::time::Duration::from_millis(5),
+            "resolusi tercepat memakan {best:?} — sepertinya ada proses yang dijalankan"
+        );
     }
 }

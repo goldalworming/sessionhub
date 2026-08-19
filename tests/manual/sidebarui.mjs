@@ -310,8 +310,15 @@ await ev(`
   })()
 `);
 await sleep(600);
+// Scoped to THIS alias, not to the marker in general: a named terminal wears
+// the same marker on purpose — a name you chose has to look like a name
+// wherever its row appears — so "no alias anywhere" would fail for reasons that
+// have nothing to do with renaming a session.
 check(
-  !(await ev(`!!document.querySelector('#tree .stitle.alias')`)),
+  !(await ev(`
+    [...document.querySelectorAll('#tree .stitle.alias')]
+      .some(x => x.textContent.includes('UJI ALIAS'))
+  `)),
   'emptying it restores the original title',
 );
 

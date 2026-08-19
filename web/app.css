@@ -645,14 +645,15 @@ html, body {
    says which one it is — the tab only answers that when the tab strip is in
    view, and in grid mode there is no active tab at all.
 
-   The bar takes its own 3px of the panel instead of being painted over the
-   terminal. An overlay would sit on top of the leftmost pixels of column one,
-   and box-drawing characters live exactly there. */
+   The bar sits in the gap every panel already leaves on its left, so it never
+   paints over the terminal: an overlay would sit on the leftmost pixels of
+   column one, and box-drawing characters live exactly there. */
 /* The bar is a pseudo-element in that padding rather than a background on the
    whole panel: `fit` rounds the row count down, so a panel is usually a few
    pixels taller than its rows, and a background would show through there as a
    stray band along the bottom. */
-.host[data-color] .hview { padding-left: 3px; }
+/* No extra padding for a tagged panel: the bar lives inside the gap every panel
+   already has, so tagging one does not shift its text relative to the others. */
 .host[data-color] .hview::before {
   content: '';
   position: absolute;
@@ -724,7 +725,15 @@ html, body {
 #terms .host { position: absolute; inset: 0; }
 #terms .host[hidden] { display: none; }
 #terms .host { display: flex; flex-direction: column; min-height: 0; }
-.hview { flex: 1 1 auto; min-height: 0; position: relative; }
+/* xterm draws its first column hard against the edge of its box, which puts the
+   text right up against the window frame. A little breathing room on the left
+   costs a few pixels of a column that `fit` was rounding away anyway. */
+.hview {
+  flex: 1 1 auto;
+  min-height: 0;
+  position: relative;
+  padding-left: 8px;
+}
 
 /* The scrollback control on a touch screen. It sits on the terminal rather than
    on the key bar: the bar's PgUp/PgDn look like this and mean something else —

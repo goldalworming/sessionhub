@@ -57,6 +57,21 @@ const el = {
 
 const isNarrow = () => window.matchMedia('(max-width: 720px)').matches;
 
+/// Put text where the cursor is in a plain input, replacing any selection —
+/// what the browser itself would do for a native paste.
+///
+/// `input` is dispatched afterwards because that is the event fields listen to;
+/// setting `.value` alone changes what is on screen without telling anything
+/// that was watching.
+function insertIntoField(field, text) {
+  const start = field.selectionStart ?? field.value.length;
+  const end = field.selectionEnd ?? field.value.length;
+  field.value = field.value.slice(0, start) + text + field.value.slice(end);
+  const at = start + text.length;
+  field.setSelectionRange?.(at, at);
+  field.dispatchEvent(new Event('input', { bubbles: true }));
+}
+
 /// The key bar for touch screens. Built first because every terminal's
 /// `onData` passes through it.
 const keybar = new KeyBar(document.getElementById('stage'), {
@@ -77,12 +92,31 @@ const keybar = new KeyBar(document.getElementById('stage'), {
   // knows whether the program asked for bracketed paste, and an agent that did
   // must see the wrapping or it treats a pasted prompt as typed keystrokes.
   onPaste: async () => {
-    if (activeId === null) return;
-    const entry = terms.get(activeId);
-    if (!entry) return;
+    // The clipboard belongs wherever the cursor is. With a dialog open — naming
+    // a terminal, say — the focused thing is an ordinary input, and sending the
+    // text past it into the terminal behind drops it somewhere the user cannot
+    // see and did not ask for. On a phone this button is the only way to paste
+    // at all, so getting the target wrong makes those fields unfillable.
+    const focused = document.activeElement;
+    const field =
+      focused &&
+      (focused.tagName === 'INPUT' || focused.tagName === 'TEXTAREA') &&
+      // xterm's own hidden textarea is not a field to type into — text meant for
+      // the terminal has to go through `term.paste` for bracketed paste.
+      !focused.classList.contains('xterm-helper-textarea')
+        ? focused
+        : null;
+
+    const entry = activeId === null ? null : terms.get(activeId);
+    if (!field && !entry) return;
     try {
       const text = await navigator.clipboard.readText();
-      if (text) entry.term.paste(text);
+      if (!text) return;
+      if (field) {
+        insertIntoField(field, text);
+      } else {
+        entry.term.paste(text);
+      }
     } catch {
       // Refused, or the API is absent. The one honest cause worth naming: over
       // plain http on the LAN the browser never offers the clipboard at all.
@@ -670,9 +704,6 @@ function renderTabs() {
 
   const ids = new Set([...terms.keys()]);
   const list = state.terminals.filter((t) => ids.has(t.id) || t.alive);
-  // Set when a panel gained or lost its colour bar, which changes how much room
-  // the terminal has and so needs a fresh measurement.
-  let recolored = false;
 
   for (const t of list) {
     const tab = document.createElement('div');
@@ -721,19 +752,12 @@ function renderTabs() {
     // "which tab" but not "which of these am I looking at", which is the harder
     // question in grid mode and the only question in tab mode.
     //
-    // The bar takes its own 3px rather than being drawn over the terminal: at
-    // this font a column is about 8px wide, so an overlay would clip the left
-    // edge of every glyph in column one. That makes it a layout change, so the
-    // terminal is measured again — but only when the colour actually changed,
-    // not on every state update.
+    // The bar is drawn inside the gap every panel already leaves on its left, so
+    // tagging one changes nothing about how much room its terminal has.
     const entry = terms.get(t.id);
     if (entry) {
-      const had = entry.host.dataset.color || '';
-      if (had !== (t.color || '')) {
-        if (t.color) entry.host.dataset.color = t.color;
-        else delete entry.host.dataset.color;
-        recolored = true;
-      }
+      if (t.color) entry.host.dataset.color = t.color;
+      else delete entry.host.dataset.color;
     }
 
     tab.onclick = () => (terms.has(t.id) ? show(t.id) : attach(t.id));
@@ -763,9 +787,6 @@ function renderTabs() {
     });
     strip.appendChild(tab);
   }
-
-  // After the loop, so several panels changing at once cost one measurement.
-  if (recolored) relayout();
 
   const tools = document.createElement('div');
   tools.className = 'tools';
