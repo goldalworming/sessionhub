@@ -3,7 +3,7 @@
 Environment: Windows 11 Pro 26200, no WSL. Rust 1.96.0, Node 24.19 (only for the
 test scripts), Chrome 151 headless over the DevTools Protocol.
 
-**211 unit tests** on Windows and **213 on unix** (`cargo test`; two of them test the PATH merging, which only exists on unix) cover the ring buffer, size
+**214 unit tests** on Windows and **216 on unix** (`cargo test`; two of them test the PATH merging, which only exists on unix) cover the ring buffer, size
 negotiation, backpressure, JSONL parsing, cwd resolution, time formatting, process
 tree summation, HTTP and token parsing, cloudflared URL extraction, agent name
 filtering, dropped-file sweeping, folder-picker path cleanup, file tree reading,
@@ -393,6 +393,30 @@ than installing a binary that cannot start.
 > FASTEST of the twenty: load can make any single call slow, but it cannot make a
 > call that spawns a process finish in microseconds, so the best case is the
 > honest signal. Verified red-free with four busy cores.
+
+### 8c2. Updating from one published release to the next
+
+`updatereal.mjs 0.0.2 0.0.3` — **11/11**. The binary under test is DOWNLOADED
+from the release page — the same artifact anyone else gets — and left to update
+itself through the UI.
+
+```
+[ok] the released 0.0.2 binary is running (0.0.2)
+[ok] the release page is read and a newer build offered
+[ok] it comes back as the new release: 0.0.2 -> 0.0.3
+[ok] the binary it replaced is kept alongside, so a bad update can be undone
+[ok] and once installed it stops offering itself
+```
+
+Two failures only this shape can catch, and both have happened: assets named
+something the updater does not recognise, and a daemon that swaps its binary
+correctly and then fails to come back. The last two checks matter as much as the
+install — a build that kept offering to reinstall itself would loop forever.
+
+An earlier attempt used a leftover development binary instead of a published
+one. It failed, and the failure said nothing about the release: that build
+predated the shutdown fix, so it was measuring a binary nobody would ever run.
+Downloading the real asset is the only version of this test worth having.
 
 ### 8d. Terminals that outlive the daemon
 
