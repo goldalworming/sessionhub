@@ -1003,7 +1003,10 @@ pub fn run(cfg: Config, rx: Receiver<Cmd>, tx: Sender<Cmd>, registry_cfg: Sender
                         name: name.clone(),
                         project: t.project.clone(),
                         agent: t.agent.clone(),
-                        command: crate::typed::clean_command(&command),
+                        command: crate::typed::runnable(
+                            std::path::Path::new(&t.project),
+                            &crate::typed::clean_command(&command),
+                        ),
                         // Naming a terminal never changes its tag.
                         color: t.color.clone().unwrap_or_default(),
                     };
@@ -1162,7 +1165,10 @@ pub fn run(cfg: Config, rx: Receiver<Cmd>, tx: Sender<Cmd>, registry_cfg: Sender
                                 term.color = Some(saved.color.clone());
                             }
                             if !saved.command.is_empty() {
-                                term.pending_run = Some(saved.command.clone());
+                                term.pending_run = Some(crate::typed::runnable(
+                                    std::path::Path::new(&saved.project),
+                                    &saved.command,
+                                ));
                             }
                             terminals.insert(tid, term);
                             next_term += 1;

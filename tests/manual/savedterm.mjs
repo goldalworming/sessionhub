@@ -322,6 +322,40 @@ check(
 );
 check(existsSync(TRACE), 'the script really ran — it left its mark on disk');
 
+// A bare filename is not something a shell will run from the current folder.
+// Two real services were saved that way and quietly never started; the only
+// clue was an error in a panel nobody had open.
+{
+  const ws = new WebSocket(`ws://127.0.0.1:${PORT}/ws?token=${TOKEN}`);
+  const msgs = [];
+  await new Promise((r) => { ws.onopen = r; });
+  ws.onmessage = (e) => { if (typeof e.data === 'string') msgs.push(JSON.parse(e.data)); };
+  await sleep(800);
+  // A terminal of its own. Saving the RUNNING one under a second name would take
+  // the first name off it — one name per terminal, by design — and every later
+  // step here looks that first name up.
+  ws.send(
+    JSON.stringify({ t: 'spawn', project: PROJ, agent: 'terminal', resume: null, cols: 90, rows: 26 }),
+  );
+  await sleep(2500);
+  const spare = msgs.filter((m) => m.t === 'attached').pop().id;
+  ws.send(JSON.stringify({ t: 'save_terminal', id: spare, name: 'bare', command: '@run-bot.bat' }));
+  await sleep(1200);
+  msgs.length = 0;
+  ws.send(JSON.stringify({ t: 'list' }));
+  await sleep(800);
+  const entry = msgs.filter((m) => m.t === 'state').pop().saved.find((s) => s.name === 'bare');
+  check(
+    entry?.command === '.\\@run-bot.bat',
+    `a bare filename is stored the way the shell will actually run it (${JSON.stringify(entry?.command)})`,
+  );
+  ws.send(JSON.stringify({ t: 'forget_terminal', project: PROJ, name: 'bare' }));
+  await sleep(400);
+  ws.send(JSON.stringify({ t: 'kill', id: spare }));
+  await sleep(1200);
+  ws.close();
+}
+
 const liveCount = async () =>
   (await (await fetch(`http://127.0.0.1:${PORT}/api/status?token=${TOKEN}`)).json())
     .terminals_alive;

@@ -200,6 +200,47 @@ fn is_report(seq: &str) -> bool {
     }
 }
 
+/// Make a bare filename runnable from the folder it sits in.
+///
+/// Neither PowerShell nor sh will run `thing.bat` from the current directory —
+/// the current directory is deliberately not on the path, and you have to write
+/// `.\thing.bat`. At a prompt the shell tells you so. Stored as a saved
+/// terminal's command it says nothing: the shell opens, the command fails into a
+/// terminal nobody is watching, and the service you thought you started is not
+/// running. That happened for real, to two services, and the only clue was an
+/// error scrolled off a panel that was never opened.
+///
+/// So: if the first word names a file that exists in the project folder and
+/// carries no path of its own, it is written the way the shell needs. Everything
+/// else is left exactly as typed — a name that is not a file here is meant for
+/// the PATH, and rewriting it would break it.
+pub fn runnable(dir: &std::path::Path, command: &str) -> String {
+    let trimmed = command.trim_start();
+    // Quoted, so the writer has already been explicit about what they mean.
+    if trimmed.starts_with('"') || trimmed.starts_with('\'') {
+        return command.to_string();
+    }
+    let Some(first) = trimmed.split_whitespace().next() else {
+        return command.to_string();
+    };
+    // Already a path: relative, absolute, or with a directory in it.
+    if first.starts_with('.')
+        || first.starts_with('/')
+        || first.starts_with('\\')
+        || first.starts_with('~')
+        || first.contains('/')
+        || first.contains('\\')
+        || first.contains(':')
+    {
+        return command.to_string();
+    }
+    if !dir.join(first).is_file() {
+        return command.to_string();
+    }
+    let prefix = if cfg!(windows) { ".\\" } else { "./" };
+    format!("{prefix}{}", trimmed)
+}
+
 /// Strip what must never reach a shell as a stored command: the newline that
 /// would make it run something on the next line, and other control bytes.
 /// Returns the cleaned command, cut to `MAX_COMMAND`.
@@ -401,6 +442,66 @@ mod tests {
         assert_eq!(clean_command("ls\nwhoami"), "lswhoami");
         assert_eq!(clean_command("  npm run dev  "), "npm run dev");
         assert_eq!(clean_command(""), "");
+    }
+
+    #[test]
+    fn a_script_in_the_project_folder_is_made_runnable() {
+        // The real case: two saved terminals stored `0run-telegram-bot.bat`, the
+        // shell refused to run it from the current directory, and both services
+        // were quietly not running.
+        let dir = std::env::temp_dir().join("sessionhub-runnable-test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let script = dir.join("0run-telegram-bot.bat");
+        std::fs::write(&script, b"@echo off\n").unwrap();
+
+        let want = if cfg!(windows) {
+            ".\\0run-telegram-bot.bat"
+        } else {
+            "./0run-telegram-bot.bat"
+        };
+        assert_eq!(runnable(&dir, "0run-telegram-bot.bat"), want);
+        // Arguments survive.
+        assert_eq!(
+            runnable(&dir, "0run-telegram-bot.bat --once"),
+            format!("{want} --once")
+        );
+
+        std::fs::remove_file(&script).ok();
+    }
+
+    #[test]
+    fn anything_that_is_not_a_file_here_is_left_alone() {
+        let dir = std::env::temp_dir().join("sessionhub-runnable-empty");
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // Meant for the PATH; prefixing it would break it.
+        assert_eq!(runnable(&dir, "npm run dev"), "npm run dev");
+        assert_eq!(runnable(&dir, "cargo build --release"), "cargo build --release");
+        assert_eq!(runnable(&dir, ""), "");
+    }
+
+    #[test]
+    fn a_command_that_already_says_where_it_is_is_untouched() {
+        let dir = std::env::temp_dir().join("sessionhub-runnable-test2");
+        std::fs::create_dir_all(&dir).unwrap();
+        let script = dir.join("go.bat");
+        std::fs::write(&script, b"@echo off\n").unwrap();
+
+        // Every shape that already carries a path of its own.
+        for already in [
+            ".\\go.bat",
+            "./go.bat",
+            "..\\go.bat",
+            "C:\\tools\\go.bat",
+            "/usr/local/bin/go.bat",
+            "~/go.bat",
+            "sub/go.bat",
+            "\"go.bat\"",
+        ] {
+            assert_eq!(runnable(&dir, already), already, "{already}");
+        }
+
+        std::fs::remove_file(&script).ok();
     }
 
     #[test]
