@@ -360,6 +360,13 @@ sessionhubd tunnel
 This command runs `cloudflared` as a child and prints its public URL with the
 token. If `cloudflared` is missing, the command to install it is printed too.
 
+The URL it prints is a throwaway one that changes every run. For an address that
+stays put, point a **Cloudflare tunnel of your own** at `localhost:7717` and use
+its hostname instead — nothing in sessionhub needs to change, and a stable
+hostname is what makes it worth adding to a phone's home screen. Either way the
+warning below applies, and so does
+[Updates through caches and tunnels](#updates-through-caches-and-tunnels).
+
 > **This exposes a shell to the internet.**
 >
 > Anyone with the URL and the token can run any command on this computer, as
