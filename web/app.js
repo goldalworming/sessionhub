@@ -580,12 +580,18 @@ function pushSize(id) {
 }
 
 function closeView(id) {
-  const entry = terms.get(id);
-  if (!entry) return;
-  // Remembered, because the strip lists every live terminal and would otherwise
-  // put this one straight back — closing a tab would visibly do nothing. The
-  // process is untouched; the row in the sidebar still shows it running.
+  // Remembered first, and whether or not a view is open here: the strip lists
+  // every live terminal, including the ones this page has never attached to.
+  // After a reload that is *every* tab, so bailing out on a missing view meant
+  // the ✕ did nothing at all on a freshly opened window — the case the fix was
+  // reported against. The process is untouched either way; the row in the
+  // sidebar still shows it running.
   dismissed.add(id);
+  const entry = terms.get(id);
+  if (!entry) {
+    renderTabs();
+    return;
+  }
   conn.send({ t: 'detach', id });
   entry.term.dispose();
   entry.host.remove();
