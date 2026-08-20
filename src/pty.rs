@@ -3,13 +3,14 @@
 //! authoritative terminal parser can replace it later without touching
 //! anything else.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
+use std::time::SystemTime;
 
 use portable_pty::{native_pty_system, ChildKiller, CommandBuilder, MasterPty, PtySize};
 
@@ -168,6 +169,100 @@ impl Pty {
     pub fn kill(&mut self) {
         let _ = self.killer.kill();
     }
+}
+
+/// What `<command> --version` prints, on one line.
+///
+/// Shown in the agent settings so the panel says which build is installed, not
+/// only where it lives. Empty when the command is missing, refuses `--version`,
+/// or takes too long — a version is worth showing but never worth waiting on,
+/// and a blank line reads better than an excuse.
+pub fn agent_version(command: &str) -> String {
+    use std::io::Read;
+    let Some(path) = resolve_command(command) else { return String::new() };
+
+    // Remembered against the binary's own timestamp. Asking two agents costs the
+    // better part of two seconds, and the settings panel cannot arrive until it
+    // is done — which was enough to make agent rows appear late and tests that
+    // waited a fixed moment for them fail. Keying on mtime means an agent that
+    // updates itself is re-asked on the next open, with nothing to invalidate by
+    // hand.
+    static SEEN: OnceLock<Mutex<HashMap<PathBuf, (Option<SystemTime>, String)>>> = OnceLock::new();
+    let cache = SEEN.get_or_init(|| Mutex::new(HashMap::new()));
+    let stamp = std::fs::metadata(&path).and_then(|m| m.modified()).ok();
+    if let Ok(map) = cache.lock() {
+        if let Some((when, version)) = map.get(&path) {
+            if *when == stamp {
+                return version.clone();
+            }
+        }
+    }
+
+    // `stdin` is closed and there is a deadline, because neither is optional.
+    // Asking a *shell* for `--version` is what taught this: `cmd.exe --version`
+    // does not answer and does not exit — it sits waiting for input, and the
+    // whole settings panel waited with it, so agents never appeared at all.
+    let mut child = match quiet_command(&path)
+        .arg("--version")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+    {
+        Ok(c) => c,
+        Err(_) => return remember(cache, path, stamp, String::new()),
+    };
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+    let ok = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status.success(),
+            Ok(None) if std::time::Instant::now() < deadline => {
+                std::thread::sleep(std::time::Duration::from_millis(30));
+            }
+            // Out of time, or it cannot be waited on. Either way this version is
+            // not worth the panel hanging for.
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return remember(cache, path, stamp, String::new());
+            }
+        }
+    };
+    if !ok {
+        return remember(cache, path, stamp, String::new());
+    }
+    // A version line is a few bytes, so it fits the pipe buffer and cannot have
+    // blocked the child above.
+    let mut buf = Vec::new();
+    if let Some(mut out) = child.stdout.take() {
+        let _ = out.read_to_end(&mut buf);
+    }
+    let text = String::from_utf8_lossy(&buf);
+    // Agents answer differently: `2.1.237 (Claude Code)` on one line, or a
+    // banner over several. The first non-empty line is the useful part of both.
+    let version: String = text
+        .lines()
+        .map(str::trim)
+        .find(|l| !l.is_empty())
+        .map(|l| l.chars().take(60).collect())
+        .unwrap_or_default();
+    remember(cache, path, stamp, version)
+}
+
+/// Store what was learned and hand it back, so every path out of the lookup
+/// above records its answer — including "this one has no version", which is
+/// otherwise re-asked, and re-waited for, on every settings open.
+fn remember(
+    cache: &Mutex<HashMap<PathBuf, (Option<SystemTime>, String)>>,
+    path: PathBuf,
+    stamp: Option<SystemTime>,
+    version: String,
+) -> String {
+    if let Ok(mut map) = cache.lock() {
+        map.insert(path, (stamp, version.clone()));
+    }
+    version
 }
 
 /// Run a command without popping up a console window.

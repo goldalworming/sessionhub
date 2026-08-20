@@ -26,6 +26,57 @@ use tracing::{info, warn};
 
 const REPO: &str = "goldalworming/sessionhub";
 
+/// What a frontend bundle is called in a release.
+const WEB_SUFFIX: &str = ".shweb";
+
+/// The version out of `sessionhubd-0.0.4-windows-x86_64.exe`.
+///
+/// This is what the panel compares against, rather than the release tag, and the
+/// difference is the point of releasing the frontend separately. A release that
+/// changes only `web/` still needs a tag of its own — tags are unique — but it
+/// carries the same daemon binary. Comparing tags would then offer a binary swap
+/// that changes nothing, charging a restart and every live terminal for a CSS
+/// fix. Comparing the binary the release actually ships says the honest thing:
+/// the daemon is current, the interface is not.
+pub fn daemon_version_from_name(name: &str) -> Option<String> {
+    let rest = name.strip_prefix("sessionhubd-")?;
+    let v = rest.split('-').next()?;
+    if !v.is_empty() && v.chars().all(|c| c.is_ascii_digit() || c == '.') {
+        Some(v.to_string())
+    } else {
+        None
+    }
+}
+
+/// The version out of `sessionhub-web-1.2.3.shweb`, so the panel can say what a
+/// release offers without downloading it first.
+fn web_version_from_name(name: &str) -> Option<String> {
+    let stem = name.strip_suffix(WEB_SUFFIX)?;
+    let v = stem.rsplit(char::is_alphabetic).next()?.trim_start_matches(['-', '_']);
+    let v = v.trim_start_matches(['-', '_']);
+    if !v.is_empty() && v.chars().all(|c| c.is_ascii_digit() || c == '.') {
+        Some(v.to_string())
+    } else {
+        None
+    }
+}
+
+/// Fetch and install a frontend bundle. No restart, no terminal dies — this is
+/// the whole reason the frontend is released on its own.
+pub fn apply_web(rel: &Release) -> Result<crate::webpack::WebVersion, String> {
+    let url = rel
+        .web_url
+        .as_deref()
+        .ok_or_else(|| format!("release {} carries no interface bundle", rel.tag))?;
+    let bytes = curl(&["-sSL", "--max-time", "120", url])?;
+    if bytes.len() < 10_000 {
+        return Err(format!("the download is only {} bytes — that is not a frontend", bytes.len()));
+    }
+    let v = crate::webpack::install(&bytes, current())?;
+    info!(version = %v.version, bytes = bytes.len(), "interface installed");
+    Ok(v)
+}
+
 /// What a release offers this machine.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Release {
@@ -37,6 +88,15 @@ pub struct Release {
     pub asset_url: Option<String>,
     pub asset_name: Option<String>,
     pub notes: String,
+    /// The frontend bundle in that release, if it carries one.
+    ///
+    /// Most releases change `web/` and nothing else. Installing that costs no
+    /// restart and kills no terminal, so it is worth telling apart from the
+    /// binary rather than folding both into one button.
+    pub web_url: Option<String>,
+    pub web_name: Option<String>,
+    /// The frontend version that bundle declares, read from its name.
+    pub web_version: Option<String>,
 }
 
 /// The version this binary was built as.
@@ -131,8 +191,31 @@ pub fn parse_release(body: &[u8], suffix: &str) -> Result<Release, String> {
             }
         }
     }
-    let version = tag.trim_start_matches(['v', 'V']).to_string();
-    Ok(Release { tag, version, asset_url, asset_name, notes })
+    // The frontend bundle is named `sessionhub-web-<version>.shweb`, so the
+    // version can be read without downloading it first.
+    let mut web_url = None;
+    let mut web_name = None;
+    let mut web_version = None;
+    if let Some(list) = json.get("assets").and_then(|v| v.as_array()) {
+        for a in list {
+            let name = a.get("name").and_then(|v| v.as_str()).unwrap_or("");
+            if name.ends_with(WEB_SUFFIX) {
+                web_url =
+                    a.get("browser_download_url").and_then(|v| v.as_str()).map(|s| s.to_string());
+                web_version = web_version_from_name(name);
+                web_name = Some(name.to_string());
+                break;
+            }
+        }
+    }
+
+    // The daemon version offered is the one in the binary's own name, falling
+    // back to the tag when there is no build for this machine to read it from.
+    let version = asset_name
+        .as_deref()
+        .and_then(daemon_version_from_name)
+        .unwrap_or_else(|| tag.trim_start_matches(['v', 'V']).to_string());
+    Ok(Release { tag, version, asset_url, asset_name, notes, web_url, web_name, web_version })
 }
 
 /// The newest release, or why we could not find out.
@@ -355,6 +438,91 @@ mod tests {
         let got = parse_release(body, "linux-x86_64").unwrap();
         assert_eq!(got.tag, "v0.0.2");
         assert!(got.asset_url.is_none());
+    }
+
+
+
+    #[test]
+    fn a_release_that_only_changes_the_interface_does_not_offer_a_binary_swap() {
+        // The case the whole split exists for. Tags must be unique, so a
+        // frontend-only release still gets a new tag — but it ships the same
+        // daemon binary. Comparing tags would charge a restart and every live
+        // terminal for a CSS fix.
+        let body = br#"{
+            "tag_name": "v0.0.4-web2",
+            "assets": [
+              {"name":"sessionhubd-0.0.4-windows-x86_64.exe","browser_download_url":"https://x/bin"},
+              {"name":"sessionhub-web-1.0.1.shweb","browser_download_url":"https://x/web"}
+            ]
+        }"#;
+        let r = parse_release(body, "windows-x86_64.exe").unwrap();
+        assert_eq!(r.tag, "v0.0.4-web2");
+        assert_eq!(r.version, "0.0.4", "the daemon offered is the one in the binary name");
+        assert!(!is_newer(&r.version, "0.0.4"), "so a 0.0.4 daemon is told it is current");
+        assert_eq!(r.web_version.as_deref(), Some("1.0.1"), "while the interface is newer");
+    }
+
+    #[test]
+    fn the_daemon_version_is_read_out_of_the_binary_name() {
+        assert_eq!(
+            daemon_version_from_name("sessionhubd-0.0.4-windows-x86_64.exe").as_deref(),
+            Some("0.0.4")
+        );
+        assert_eq!(daemon_version_from_name("sessionhubd-1.10.2-macos-arm64").as_deref(), Some("1.10.2"));
+        // Anything not shaped that way falls back to the tag rather than
+        // inventing a version.
+        assert_eq!(daemon_version_from_name("sessionhubd-nightly-macos-arm64"), None);
+        assert_eq!(daemon_version_from_name("something-else"), None);
+    }
+
+    #[test]
+    fn without_a_build_for_us_the_tag_still_names_the_release() {
+        let body = br#"{"tag_name":"v0.9.0","assets":[
+            {"name":"sessionhubd-0.9.0-linux-arm64","browser_download_url":"https://x/bin"}]}"#;
+        let r = parse_release(body, "windows-x86_64.exe").unwrap();
+        assert!(r.asset_url.is_none());
+        assert_eq!(r.version, "0.9.0", "read from the tag when no asset can supply it");
+    }
+
+    #[test]
+    fn the_interface_bundle_is_picked_out_alongside_the_binary() {
+        // A release carries both. They are told apart because installing one
+        // costs a restart and the other costs nothing, and the panel has to be
+        // able to offer only the cheap one.
+        let body = br#"{
+            "tag_name": "v0.0.5",
+            "body": "notes",
+            "assets": [
+              {"name":"sessionhubd-0.0.5-windows-x86_64.exe","browser_download_url":"https://x/bin"},
+              {"name":"sessionhub-web-1.2.0.shweb","browser_download_url":"https://x/web"}
+            ]
+        }"#;
+        let r = parse_release(body, "windows-x86_64.exe").unwrap();
+        assert_eq!(r.asset_url.as_deref(), Some("https://x/bin"));
+        assert_eq!(r.web_url.as_deref(), Some("https://x/web"));
+        assert_eq!(r.web_version.as_deref(), Some("1.2.0"));
+    }
+
+    #[test]
+    fn a_release_with_no_interface_bundle_offers_none() {
+        // Every release before this feature looks like this, and the panel must
+        // not invent a frontend update out of it.
+        let body = br#"{"tag_name":"v0.0.3","assets":[
+            {"name":"sessionhubd-0.0.3-macos-arm64","browser_download_url":"https://x/bin"}]}"#;
+        let r = parse_release(body, "macos-arm64").unwrap();
+        assert!(r.web_url.is_none());
+        assert!(r.web_version.is_none());
+    }
+
+    #[test]
+    fn the_interface_version_is_read_out_of_its_name() {
+        assert_eq!(web_version_from_name("sessionhub-web-1.0.0.shweb").as_deref(), Some("1.0.0"));
+        assert_eq!(web_version_from_name("sessionhub-web-10.2.30.shweb").as_deref(), Some("10.2.30"));
+        // Anything that does not carry a plain version is left unnamed rather
+        // than guessed at — the panel then says a bundle exists without lying
+        // about which one.
+        assert_eq!(web_version_from_name("sessionhub-web.shweb"), None);
+        assert_eq!(web_version_from_name("something-else.zip"), None);
     }
 
     #[test]

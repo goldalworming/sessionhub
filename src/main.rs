@@ -20,6 +20,7 @@ mod service;
 mod state;
 mod tunnel;
 mod typed;
+mod webpack;
 mod update;
 
 use std::fs::{File, OpenOptions};
@@ -78,6 +79,7 @@ fn main() -> ExitCode {
             }
         },
         "tunnel" => cmd_tunnel(),
+        "bundle-web" => cmd_bundle_web(&argv),
         "help" | "--help" | "-h" => {
             print_help();
             ExitCode::SUCCESS
@@ -100,6 +102,7 @@ fn print_help() {
          sessionhubd status                 port, live terminal count, uptime\n\
          sessionhubd token rotate           replace the token; the old one stops working\n\
          sessionhubd tunnel                 expose it externally through cloudflared\n\
+         sessionhubd bundle-web FILE        pack the frontend for a release\n\
          sessionhubd install [--account NAME --password SECRET]\n\
          sessionhubd uninstall\n\
          \n\
@@ -352,6 +355,49 @@ fn cmd_token_rotate() -> ExitCode {
     println!("\nNew address:\n  http://127.0.0.1:{running}/?token={token}");
     println!("\nBrowser tabs still open use the old token and will be rejected;");
     println!("open the address above once to refresh them.");
+    ExitCode::SUCCESS
+}
+
+/// Pack the frontend this binary carries into one file, for a release.
+///
+/// Built from the embedded assets rather than from `web/` on disk, so the bundle
+/// is exactly what this binary would have served. A release built from a
+/// different tree than the bundle is the one mistake this whole scheme must not
+/// make quietly.
+fn cmd_bundle_web(argv: &[String]) -> ExitCode {
+    let Some(out) = argv.get(1) else {
+        eprintln!("Usage: sessionhubd bundle-web FILE");
+        return ExitCode::from(2);
+    };
+    let files = http::embedded_app_files();
+    let version = match files.get("version.json") {
+        Some(raw) => match webpack::parse_version(raw) {
+            Ok(v) => v,
+            Err(e) => {
+                eprintln!("web/version.json is not usable: {e}");
+                return ExitCode::FAILURE;
+            }
+        },
+        None => {
+            eprintln!("web/version.json is missing — the bundle needs it to declare its version.");
+            return ExitCode::FAILURE;
+        }
+    };
+    let bytes = webpack::pack(&files);
+    // Read it back before claiming success: a bundle that cannot be unpacked is
+    // worse than no bundle, because it only fails on someone else's machine.
+    if let Err(e) = webpack::unpack(&bytes) {
+        eprintln!("the bundle just written cannot be read back: {e}");
+        return ExitCode::FAILURE;
+    }
+    if let Err(e) = std::fs::write(out, &bytes) {
+        eprintln!("could not write {out}: {e}");
+        return ExitCode::FAILURE;
+    }
+    println!("frontend {} packed into {out}", version.version);
+    println!("  files  : {}", files.len());
+    println!("  size   : {:.0} KB", bytes.len() as f64 / 1024.0);
+    println!("  needs  : sessionhub {} or newer", version.needs_daemon);
     ExitCode::SUCCESS
 }
 

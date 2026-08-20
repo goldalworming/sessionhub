@@ -597,7 +597,11 @@ fn serve_static(
         return respond(sock, 404, "text/plain; charset=utf-8", b"404\n");
     }
 
-    let Some(file) = Web::get(rel) else {
+    // An installed frontend wins over the one baked into this binary, so a
+    // change to `web/` can reach you without swapping 8 MB and killing every
+    // terminal. Anything it does not carry — `vendor/`, above all — still comes
+    // from the binary.
+    let Some(data) = served_asset(rel) else {
         return respond(sock, 404, "text/plain; charset=utf-8", b"404\n");
     };
     // The page is served with every app asset URL stamped `?v=<hash>`. That is
@@ -606,7 +610,7 @@ fn serve_static(
     // browser, a tunnel edge — held under the old URL simply stops being asked
     // for. No cache needs to be cleared, ever; stale copies just go unused.
     if rel == "index.html" {
-        let html = stamp_index(&String::from_utf8_lossy(&file.data), &asset_version());
+        let html = stamp_index(&String::from_utf8_lossy(&data), &asset_version());
         let caching = caching_for(rel, false);
         let extra = if set_cookie {
             format!("{caching}{}", cookie_header(token))
@@ -621,7 +625,7 @@ fn serve_static(
     } else {
         caching.to_string()
     };
-    respond_with(sock, 200, mime_of(rel), &file.data, &extra)
+    respond_with(sock, 200, mime_of(rel), &data, &extra)
 }
 
 /// How long the sign-in cookie lives.
@@ -688,16 +692,49 @@ fn caching_for(rel: &str, versioned: bool) -> &'static str {
 fn asset_version() -> String {
     use std::hash::Hasher;
     let mut h = std::collections::hash_map::DefaultHasher::new();
-    let mut names: Vec<_> = Web::iter().filter(|n| !n.starts_with("vendor/")).collect();
+    let mut names: Vec<String> =
+        Web::iter().filter(|n| !n.starts_with("vendor/")).map(|n| n.to_string()).collect();
+    // An installed frontend may carry a file the binary never had, and it must
+    // change the hash too — otherwise the browser keeps serving itself the old
+    // page from cache and the update looks like it did nothing.
+    if let Ok(Some(_)) = crate::webpack::installed() {
+        if let Ok(entries) = std::fs::read_dir(crate::webpack::installed_dir()) {
+            for e in entries.flatten() {
+                let name = e.file_name().to_string_lossy().into_owned();
+                if !names.contains(&name) {
+                    names.push(name);
+                }
+            }
+        }
+    }
     // Iteration order is not promised; the hash must not depend on it.
     names.sort();
     for name in names {
         h.write(name.as_bytes());
-        if let Some(f) = Web::get(&name) {
-            h.write(&f.data);
+        if let Some(data) = served_asset(&name) {
+            h.write(&data);
         }
     }
     format!("{:016x}", h.finish())
+}
+
+/// Every app file this binary carries, for building a frontend bundle. Vendor is
+/// left out on purpose: xterm and Monaco are 5 MB and change almost never, and a
+/// frontend that needs a new one of those needs a new daemon anyway.
+pub fn embedded_app_files() -> std::collections::BTreeMap<String, Vec<u8>> {
+    Web::iter()
+        .filter(|n| !n.starts_with("vendor/"))
+        .filter_map(|n| Web::get(&n).map(|f| (n.to_string(), f.data.to_vec())))
+        .collect()
+}
+
+/// The bytes actually served for one path: the installed frontend first, then
+/// what is baked into the binary.
+fn served_asset(rel: &str) -> Option<Vec<u8>> {
+    if let Some(data) = crate::webpack::installed_file(rel) {
+        return Some(data);
+    }
+    Web::get(rel).map(|f| f.data.to_vec())
 }
 
 /// Stamp `?v=` onto every app asset the page references.

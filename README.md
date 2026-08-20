@@ -36,7 +36,7 @@ If you live in tmux and SSH, herdr is probably the better fit. If your second sc
 
 ### Feature comparison
 
-As I found them in **August 2026**. All three projects move fast, so file an issue if a cell has gone stale.
+As I found them in **August 2026**. All three projects move fast, so file an issue if a cell has gone stale — one already was: this table used to claim T3 Code had no multi-machine view, which is wrong, and it is a good feature there.
 
 | | sessionhub | T3 Code | herdr |
 |---|---|---|---|
@@ -45,7 +45,7 @@ As I found them in **August 2026**. All three projects move fast, so file an iss
 | Resumes the CLI's own on-disk sessions | yes (`~/.claude`, `~/.pi`, opencode) | own task history | attaches to its own panes |
 | Prompt/token overhead added | none — raw PTY passthrough | task harness around each thread | none — raw terminal |
 | Phone support | key bar, clipboard Paste, image upload, touch scrollback | browser UI (desktop-shaped) | via SSH client apps |
-| Several machines in one window | tabs via daemon relay; remote tokens never reach the browser | — | SSH per machine |
+| Several machines in one window | yes — tabs via daemon relay; remote tokens never reach the browser | yes | SSH per machine |
 | Agent activity signal | busy/finished colours + finish chime | task status in UI | blocked/working/done/idle sidebar |
 | Install | one binary, no npm, no build step | desktop/web app | one Rust binary |
 

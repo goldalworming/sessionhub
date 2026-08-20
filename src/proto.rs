@@ -105,6 +105,24 @@ pub enum ClientMsg {
     /// Install that release: download it, then restart into it. Every live
     /// terminal dies with the daemon, so the UI asks twice before sending this.
     UpdateApply,
+    /// Install only the interface from that release. Costs no restart and kills
+    /// no terminal — most releases change nothing else.
+    UpdateApplyWeb,
+    /// Run an agent's own updater — `claude update`, `opencode upgrade` — in a
+    /// terminal, so what it says is visible rather than swallowed.
+    UpdateAgentCli {
+        name: String,
+        cols: u16,
+        rows: u16,
+    },
+    /// Restart a terminal in place: same tab, same folder, same session resumed.
+    /// What you do after updating an agent, since a running process keeps the
+    /// binary it started with.
+    Relaunch {
+        id: u32,
+        cols: u16,
+        rows: u16,
+    },
     SetLanAccess {
         enabled: bool,
     },
@@ -242,6 +260,22 @@ pub enum ServerMsg {
         /// Set once the download is done and the swap is about to happen.
         #[serde(default)]
         applying: bool,
+        /// The interface being served right now, and where it came from.
+        web_current: String,
+        /// True when that is the copy baked into the binary rather than one
+        /// installed on top of it — worth saying, because "revert" only means
+        /// something in the other case.
+        web_builtin: bool,
+        /// The interface that release offers, when it carries one.
+        #[serde(default)]
+        web_latest: String,
+        /// Is it newer than what is being served, and installable by this
+        /// daemon? A bundle that needs a newer daemon is reported, not offered.
+        #[serde(default)]
+        web_newer: bool,
+        /// Why the interface cannot be updated, when it cannot.
+        #[serde(default)]
+        web_note: String,
     },
     Mem {
         terminals: Vec<MemInfo>,
@@ -392,6 +426,12 @@ pub struct AgentInfo {
     /// `true` for agents with no stored sessions (a plain shell).
     pub is_terminal: bool,
     pub fork_args: Vec<String>,
+    /// Arguments that make this agent update itself; empty when it has none, and
+    /// then no button is offered.
+    pub update_args: Vec<String>,
+    /// What `<command> --version` printed, when it could be asked. Shown so the
+    /// panel says which build is installed rather than only where it is.
+    pub version: String,
     /// `false` for agents rebuilt every time the daemon starts, where removing
     /// one would only appear to work until the next restart.
     pub removable: bool,
@@ -591,5 +631,142 @@ mod tests {
         })
         .unwrap();
         assert_eq!(s, r#"{"t":"error","code":"spawn_failed","message":"x"}"#);
+    }
+}
+
+#[cfg(test)]
+mod contract {
+    /// Every `{ t: '…' }` the frontend sends must be a message this daemon
+    /// understands.
+    ///
+    /// This is what makes shipping the frontend separately safe. A frontend that
+    /// sends a message an older daemon has never heard of does not fail loudly:
+    /// the daemon ignores it and the button simply does nothing — the exact
+    /// shape of several bugs found by hand rather than by tests. Once the two
+    /// can move independently, that mistake becomes easy to make and invisible
+    /// to review, so it is caught here instead.
+    ///
+    /// Read from disk rather than `include_str!` so a new web file is covered
+    /// the moment it exists, without anyone remembering to list it here.
+    #[test]
+    fn the_frontend_sends_nothing_the_daemon_cannot_read() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("web");
+        let mut sent: Vec<(String, String)> = Vec::new();
+        for entry in std::fs::read_dir(&root).expect("web/ is next to src/") {
+            let path = entry.expect("readable entry").path();
+            if path.extension().and_then(|e| e.to_str()) != Some("js") {
+                continue;
+            }
+            let text = std::fs::read_to_string(&path).expect("web files are utf-8");
+            let file = path.file_name().unwrap().to_string_lossy().into_owned();
+            for name in message_names(&text) {
+                sent.push((file.clone(), name));
+            }
+        }
+        assert!(sent.len() > 10, "found almost nothing to check — the scan is broken");
+
+        let known = client_msg_variants();
+        let mut unknown: Vec<String> = sent
+            .into_iter()
+            .filter(|(_, name)| !known.contains(&pascal(name)))
+            .map(|(file, name)| format!("{file}: {{ t: '{name}' }}"))
+            .collect();
+        unknown.sort();
+        unknown.dedup();
+        assert!(
+            unknown.is_empty(),
+            "the frontend sends messages this daemon does not accept.\n\
+             Add them to ClientMsg, or raise `needs_daemon` in web/version.json \
+             so an older daemon refuses this frontend instead of ignoring it:\n  {}",
+            unknown.join("\n  ")
+        );
+    }
+
+    /// `{ t: 'name' }` and `{ t: "name" }`, however they are spaced.
+    fn message_names(text: &str) -> Vec<String> {
+        let mut out = Vec::new();
+        let bytes = text.as_bytes();
+        let mut i = 0;
+        while let Some(found) = text[i..].find("t:") {
+            let at = i + found;
+            i = at + 2;
+            // `t:` must start a key — the character before it is `{`, a comma or
+            // whitespace, never part of a longer identifier like `format:`.
+            let before = text[..at].chars().next_back().unwrap_or('{');
+            if before.is_alphanumeric() || before == '_' || before == '.' {
+                continue;
+            }
+            let rest = &text[i..];
+            let rest = rest.trim_start();
+            let quote = match rest.chars().next() {
+                Some(q @ ('\'' | '"')) => q,
+                _ => continue,
+            };
+            let body = &rest[1..];
+            let Some(end) = body.find(quote) else { continue };
+            let name = &body[..end];
+            if !name.is_empty() && name.chars().all(|c| c.is_ascii_lowercase() || c == '_') {
+                out.push(name.to_string());
+            }
+            let _ = bytes;
+        }
+        out
+    }
+
+    /// The variant names of `ClientMsg`, read from this file.
+    fn client_msg_variants() -> Vec<String> {
+        let src = include_str!("proto.rs");
+        let start = src.find("pub enum ClientMsg {").expect("ClientMsg is in this file");
+        let body = &src[start..];
+        let end = body.find("\n}\n").expect("its closing brace is at column 0");
+        body[..end]
+            .lines()
+            .filter_map(|l| {
+                let l = l.trim_end();
+                let name = l.strip_prefix("    ")?;
+                if name.starts_with(' ') || name.starts_with("//") || name.starts_with('#') {
+                    return None;
+                }
+                let name = name.trim_end_matches([' ', '{', ',']);
+                if name.chars().next()?.is_ascii_uppercase()
+                    && name.chars().all(|c| c.is_ascii_alphanumeric())
+                {
+                    Some(name.to_string())
+                } else {
+                    None
+                }
+            })
+            .collect()
+    }
+
+    fn pascal(snake: &str) -> String {
+        snake
+            .split('_')
+            .map(|w| {
+                let mut c = w.chars();
+                match c.next() {
+                    Some(f) => f.to_ascii_uppercase().to_string() + c.as_str(),
+                    None => String::new(),
+                }
+            })
+            .collect()
+    }
+
+    #[test]
+    fn the_scan_finds_what_is_really_there() {
+        // The scan is only worth having if it can be trusted, so it is checked
+        // against hand-written input rather than only against the real files.
+        let found = message_names(
+            "conn.send({ t: 'spawn', project }); x.send({t:\"kill\", id}); const format: 'x';",
+        );
+        assert_eq!(found, vec!["spawn", "kill"], "a key called `format:` is not a message");
+
+        assert_eq!(pascal("set_lan_access"), "SetLanAccess");
+        assert_eq!(pascal("ping"), "Ping");
+
+        let known = client_msg_variants();
+        assert!(known.contains(&"Ping".to_string()), "{known:?}");
+        assert!(known.contains(&"OpenSaved".to_string()));
+        assert!(!known.contains(&"Pong".to_string()), "Pong is a server message");
     }
 }

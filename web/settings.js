@@ -52,10 +52,13 @@ export class Settings {
   /// `onRemove(name)` deletes it. `onLan(enabled)` opens or closes network
   /// access. `onDrops(limits|null)` stores the drop folder limits; null = sweep
   /// now.
-  constructor(root, onSave, onLan, onDrops, onRemove, onForget, onUpdate) {
-    /// `onUpdate('check'|'apply')` asks the daemon to look for a release, or
-    /// to install it and restart into it.
+  constructor(root, onSave, onLan, onDrops, onRemove, onForget, onUpdate, onUpdateAgent) {
+    /// `onUpdate('check'|'apply'|'apply_web')` asks the daemon to look for a
+    /// release, to install it and restart into it, or to install only the
+    /// interface — which costs no restart.
     this.onUpdate = onUpdate || (() => {});
+    /// `onUpdateAgent(name)` runs that agent's own updater in a terminal.
+    this.onUpdateAgent = onUpdateAgent || (() => {});
     this.onSave = onSave;
     this.onLan = onLan;
     this.onDrops = onDrops;
@@ -482,6 +485,50 @@ export class Settings {
     if (this.open) this.paint();
   }
 
+  /// The interface half of the Update panel.
+  ///
+  /// Kept apart from the daemon half because the two cost completely different
+  /// things. Installing an interface writes a third of a megabyte into
+  /// `~/.sessionhub/web/` and asks you to reload the page. Installing a daemon
+  /// swaps eight megabytes and kills every terminal you have open. Most releases
+  /// change only the first, and a panel that offered them together would make
+  /// every CSS fix cost a restart.
+  webSection(pane, r) {
+    // Something is installed that this daemon cannot serve. It is already being
+    // ignored in favour of the built-in copy; saying so is the difference
+    // between a puzzle and a sentence.
+    if (r.web_note && !r.web_newer) {
+      pane.appendChild(Settings.stat('warn', r.web_note));
+    }
+    if (!r.web_newer) return;
+
+    pane.appendChild(
+      Settings.stat('warn', `Interface ${r.web_latest} is available — no restart, nothing closes.`),
+    );
+    if (r.web_note) pane.appendChild(Settings.stat('muted', r.web_note));
+
+    const bar = document.createElement('div');
+    bar.className = 'usagebar';
+    const go = document.createElement('button');
+    go.type = 'button';
+    go.id = 'update-web';
+    go.className = 'secbtn';
+    go.textContent = `Update interface to ${r.web_latest}`;
+    // One click, unlike the daemon button. Nothing is lost by pressing it: no
+    // process dies, and the previous interface is the one baked into the binary,
+    // which is always still there to fall back to.
+    go.onclick = () => {
+      go.disabled = true;
+      go.textContent = 'Downloading…';
+      this.onUpdate('apply_web');
+    };
+    bar.appendChild(go);
+    pane.appendChild(bar);
+    pane.appendChild(
+      Settings.stat('muted', 'Reload the page afterwards to pick it up.'),
+    );
+  }
+
   updatePane() {
     const pane = document.createElement('div');
     pane.className = 'sec update';
@@ -497,6 +544,13 @@ export class Settings {
     const r = this.release;
     ver.textContent = r ? `Running ${r.current}` : 'Running this build';
     now.appendChild(ver);
+    if (r && r.web_current) {
+      const web = document.createElement('span');
+      web.className = 'usage';
+      web.id = 'web-version';
+      web.textContent = `Interface ${r.web_current}${r.web_builtin ? ' (built in)' : ''}`;
+      now.appendChild(web);
+    }
 
     const check = document.createElement('button');
     check.type = 'button';
@@ -519,6 +573,11 @@ export class Settings {
       );
       return pane;
     }
+    // The interface first, and on its own. Installing it costs no restart and
+    // kills no terminal, so burying it under the expensive button — or worse,
+    // behind it — would charge the wrong price for the common change.
+    this.webSection(pane, r);
+
     if (!r.newer) {
       pane.appendChild(Settings.stat('ok', `${r.current} is the newest release.`));
       return pane;
@@ -835,6 +894,34 @@ export class Settings {
       !a.enabled ? 'disabled' : a.resolved || `\`${a.command}\` not found on PATH`,
     );
     head.appendChild(where);
+
+    // What is installed, beside where it is. An Update button with no version
+    // next to it asks you to press it to find out what you already have.
+    if (a.enabled && a.resolved && a.version) {
+      const ver = document.createElement('span');
+      ver.className = 'aver';
+      ver.textContent = a.version;
+      ver.title = `${a.command} --version`;
+      head.appendChild(ver);
+    }
+
+    // Offered only for an agent that has an updater and is actually installed.
+    // What it runs is the agent's own command — `claude update` is documented as
+    // "check for updates and install if available" — so nothing here pretends to
+    // know in advance whether there is one.
+    if (a.enabled && a.resolved && a.update_args && a.update_args.length) {
+      const up = document.createElement('button');
+      up.type = 'button';
+      up.className = 'abtn aupdate';
+      up.dataset.agent = a.name;
+      up.textContent = 'Update';
+      up.title = `Run \`${a.command} ${a.update_args.join(' ')}\` in a terminal`;
+      up.onclick = (e) => {
+        e.stopPropagation();
+        this.onUpdateAgent?.(a.name);
+      };
+      head.appendChild(up);
+    }
 
     const toggle = document.createElement('label');
     toggle.className = 'switch small';

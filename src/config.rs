@@ -185,9 +185,22 @@ pub struct Agent {
     /// fork, and the button is not offered.
     #[serde(default)]
     pub fork_args: Option<Vec<String>>,
+    /// Arguments that make the agent update itself — `claude update`,
+    /// `opencode upgrade`. Run in a terminal you can watch, because an update
+    /// that prints something you never see is an update you cannot trust.
+    ///
+    /// `None` means never filled in, and is completed from the built-in list on
+    /// read. An empty list means this agent has no update command, and no button
+    /// is offered.
+    #[serde(default)]
+    pub update_args: Option<Vec<String>>,
 }
 
 impl Agent {
+    pub fn can_update(&self) -> bool {
+        self.update_args.as_ref().is_some_and(|a| !a.is_empty())
+    }
+
     pub fn can_fork(&self) -> bool {
         self.fork_args.as_ref().is_some_and(|a| !a.is_empty())
     }
@@ -207,6 +220,20 @@ impl Agent {
 ///   claude   `--fork-session` makes a new session id on resume, `--name`
 ///            sets the display name.
 ///   opencode `--fork` continues as a new session; there is no name flag.
+/// How each agent updates itself, verified against its own `--help` on this
+/// machine:
+///   claude    `claude update` — "check for updates and install if available"
+///   opencode  `opencode upgrade [target]`
+/// Anything else is left empty rather than guessed at: running the wrong
+/// subcommand at someone's toolchain is worse than offering no button.
+fn known_update_args(name: &str) -> Vec<String> {
+    match name {
+        "claude" => vec!["update".into()],
+        "opencode" => vec!["upgrade".into()],
+        _ => Vec::new(),
+    }
+}
+
 fn known_fork_args(name: &str) -> Vec<String> {
     match name {
         "claude" => vec![
@@ -360,6 +387,7 @@ fn default_agents() -> BTreeMap<String, Agent> {
             env: BTreeMap::new(),
             enabled: true,
             fork_args: None,
+            update_args: None,
         },
     );
     m.insert(
@@ -370,6 +398,7 @@ fn default_agents() -> BTreeMap<String, Agent> {
             env: BTreeMap::new(),
             enabled: true,
             fork_args: None,
+            update_args: None,
         },
     );
     m.insert(
@@ -380,6 +409,7 @@ fn default_agents() -> BTreeMap<String, Agent> {
             env: BTreeMap::new(),
             enabled: true,
             fork_args: None,
+            update_args: None,
         },
     );
     m
@@ -472,6 +502,7 @@ pub fn load_or_create() -> io::Result<Config> {
                 env: BTreeMap::new(),
                 enabled: true,
                 fork_args: None,
+                update_args: None,
             },
         );
     }
@@ -483,6 +514,10 @@ pub fn load_or_create() -> io::Result<Config> {
     for (name, agent) in cfg.agents.iter_mut() {
         if agent.fork_args.is_none() {
             agent.fork_args = Some(known_fork_args(name));
+            filled_fork = true;
+        }
+        if agent.update_args.is_none() {
+            agent.update_args = Some(known_update_args(name));
             filled_fork = true;
         }
     }
@@ -619,6 +654,7 @@ mod tests {
             env: BTreeMap::new(),
             enabled: true,
             fork_args: None,
+            update_args: None,
         };
         assert!(a.resume_args.is_empty());
     }
@@ -671,6 +707,7 @@ mod tests {
             env: BTreeMap::new(),
             enabled: true,
             fork_args: None,
+            update_args: None,
         };
         assert!(!a.can_fork(), "belum diisi berarti belum diketahui");
 

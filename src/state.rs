@@ -37,7 +37,13 @@ pub enum Cmd {
     /// A file dragged from the browser. `term` only decides which terminal the
     /// path is later offered back to.
     ClientDrop { id: ClientId, term: u32, name: String, data: Vec<u8> },
-    Pty { term: u32, event: PtyEvent },
+    /// `run` names which process this came from, not just which terminal.
+    ///
+    /// A relaunch keeps the terminal id — that is what makes it the same tab —
+    /// so for a moment the old process and the new one both answer to it. The
+    /// old one's dying EOF would otherwise mark the new terminal dead the
+    /// instant it started.
+    Pty { term: u32, run: u64, event: PtyEvent },
     /// The latest registry scan from the registry thread.
     Registry(Vec<ProjectInfo>),
     /// Answer with (live terminals, total terminals) for `sessionhubd status`.
@@ -85,6 +91,9 @@ struct Terminal {
     /// reader thread finishes too. The terminal entry itself stays, with
     /// `alive: false`.
     pty: Option<Pty>,
+    /// Which process is currently this terminal's. Bumped by every relaunch, so
+    /// a message from the one it replaced can be told apart and dropped.
+    run: u64,
     /// The saved name this terminal runs under, when it has one.
     name: Option<String>,
     /// The colour its tab is tagged with, one of `config::TAB_COLORS`.
@@ -103,6 +112,9 @@ pub fn run(cfg: Config, rx: Receiver<Cmd>, tx: Sender<Cmd>, registry_cfg: Sender
     let mut clients: HashMap<ClientId, Client> = HashMap::new();
     let mut terminals: HashMap<u32, Terminal> = HashMap::new();
     let mut next_term: u32 = 1;
+    // Never reused, so a message from a replaced process can always be told
+    // apart from one belonging to the terminal that replaced it.
+    let mut next_run: u64 = 1;
     // The last registry snapshot; `live_terminal_id` is deliberately not stored
     // here but filled in at send time, so "changed or not" is only about the
     // registry's own contents.
@@ -137,13 +149,14 @@ pub fn run(cfg: Config, rx: Receiver<Cmd>, tx: Sender<Cmd>, registry_cfg: Sender
 
                 ClientMsg::Spawn { project, agent, resume, cols, rows } => {
                     let (cols, rows) = sane_size(cols, rows);
-                    match spawn_terminal(&cfg, next_term, &project, &agent, resume, cols, rows, &tx)
+                    match spawn_terminal(&cfg, next_term, next_run, &project, &agent, resume, cols, rows, &tx)
                     {
                         Ok(mut term) => {
                             let tid = term.id;
                             term.viewers.insert(id, (cols, rows));
                             terminals.insert(tid, term);
                             next_term += 1;
+                            next_run += 1;
                             info!(terminal = tid, %project, %agent, "terminal created");
                             send_state(&cfg, &projects, &agent_names, scanned, &clients, &terminals, None);
                             send_to(&clients, id, json(&ServerMsg::Attached { id: tid, cols, rows }));
@@ -158,13 +171,14 @@ pub fn run(cfg: Config, rx: Receiver<Cmd>, tx: Sender<Cmd>, registry_cfg: Sender
                 ClientMsg::Fork { project, agent, session_id, name, cols, rows } => {
                     let (cols, rows) = sane_size(cols, rows);
                     match fork_terminal(
-                        &cfg, next_term, &project, &agent, &session_id, &name, cols, rows, &tx,
+                        &cfg, next_term, next_run, &project, &agent, &session_id, &name, cols, rows, &tx,
                     ) {
                         Ok(mut term) => {
                             let tid = term.id;
                             term.viewers.insert(id, (cols, rows));
                             terminals.insert(tid, term);
                             next_term += 1;
+                            next_run += 1;
                             info!(terminal = tid, %project, %agent, %session_id, "session forked");
                             send_state(&cfg, &projects, &agent_names, scanned, &clients, &terminals, None);
                             send_to(&clients, id, json(&ServerMsg::Attached { id: tid, cols, rows }));
@@ -298,6 +312,19 @@ pub fn run(cfg: Config, rx: Receiver<Cmd>, tx: Sender<Cmd>, registry_cfg: Sender
                                     .map(|p| p.display().to_string()),
                                 is_terminal: a.resume_args.is_empty(),
                                 fork_args: a.fork_args.unwrap_or_default(),
+                                update_args: a.update_args.unwrap_or_default(),
+                                // Asked here, on the thread that already resolves
+                                // each command on PATH, because it costs a process
+                                // spawn and the actor must not wait for it.
+                                //
+                                // Never for a shell: `resume_args` empty means
+                                // this is a plain shell, and `cmd.exe --version`
+                                // has no answer to give — it waits for input.
+                                version: if a.resume_args.is_empty() {
+                                    String::new()
+                                } else {
+                                    crate::pty::agent_version(&a.command)
+                                },
                                 removable: name != crate::config::TERMINAL_AGENT,
                                 live: live.get(&name).copied().unwrap_or(0),
                                 name,
@@ -383,6 +410,10 @@ pub fn run(cfg: Config, rx: Receiver<Cmd>, tx: Sender<Cmd>, registry_cfg: Sender
                             // harness would only build a button that destroys
                             // someone's session.
                             fork_args: Some(Vec::new()),
+                            // Same reasoning: running a guessed subcommand at
+                            // somebody's toolchain is worse than offering no
+                            // update button at all.
+                            update_args: Some(Vec::new()),
                         }
                     });
                     entry.command = command;
@@ -787,20 +818,43 @@ pub fn run(cfg: Config, rx: Receiver<Cmd>, tx: Sender<Cmd>, registry_cfg: Sender
                     // Straight on this thread: one HTTPS request, only when a
                     // person clicks Check, and the panel is waiting for it.
                     let msg = match crate::update::check() {
-                        Ok(rel) => ServerMsg::Update {
-                            current: crate::update::current().to_string(),
-                            newer: crate::update::is_newer(&rel.version, crate::update::current()),
-                            installable: rel.asset_url.is_some(),
-                            latest: rel.version,
-                            notes: rel.notes,
-                            applying: false,
-                        },
+                        Ok(rel) => update_msg(&rel, false),
                         Err(why) => {
                             warn!(error = %why, "update check failed");
                             ServerMsg::Error { code: "update_check".into(), message: why }
                         }
                     };
                     send_to(&clients, id, json(&msg));
+                }
+
+                // The cheap half of updating: the interface only. No restart, no
+                // terminal dies. Most releases change nothing but `web/`.
+                ClientMsg::UpdateApplyWeb => {
+                    let rel = match crate::update::check() {
+                        Ok(r) => r,
+                        Err(why) => {
+                            send_to(&clients, id, json(&ServerMsg::Error {
+                                code: "update_check".into(), message: why }));
+                            continue;
+                        }
+                    };
+                    match crate::update::apply_web(&rel) {
+                        Ok(v) => {
+                            info!(version = %v.version, "interface updated in place");
+                            // Every open page is told, not just the one that
+                            // asked: they are all serving the old interface, and
+                            // they all need to reload to pick up the new one.
+                            let msg = json(&update_msg(&rel, false));
+                            for cid in clients.keys() {
+                                send_to(&clients, *cid, msg.clone());
+                            }
+                        }
+                        Err(why) => {
+                            warn!(error = %why, "interface update failed");
+                            send_to(&clients, id, json(&ServerMsg::Error {
+                                code: "update_web_failed".into(), message: why }));
+                        }
+                    }
                 }
 
                 ClientMsg::UpdateApply => {
@@ -840,14 +894,7 @@ pub fn run(cfg: Config, rx: Receiver<Cmd>, tx: Sender<Cmd>, registry_cfg: Sender
                     send_to(
                         &clients,
                         id,
-                        json(&ServerMsg::Update {
-                            current: crate::update::current().to_string(),
-                            latest: rel.version,
-                            newer: true,
-                            installable: true,
-                            notes: rel.notes,
-                            applying: true,
-                        }),
+                        json(&update_msg(&rel, true)),
                     );
                     // Exactly the road `sessionhubd stop` takes, and for a
                     // reason learned the hard way: `Cmd::Shutdown` alone ends
@@ -864,6 +911,125 @@ pub fn run(cfg: Config, rx: Receiver<Cmd>, tx: Sender<Cmd>, registry_cfg: Sender
                         std::process::exit(0);
                     });
                     continue;
+                }
+
+                // An agent updates itself in a terminal you can watch. Nothing
+                // here parses its output or decides whether it worked: `claude
+                // update` already says "check for updates and install if
+                // available", and hiding that behind a spinner would replace
+                // something true with something invented.
+                ClientMsg::UpdateAgentCli { name, cols, rows } => {
+                    let (cols, rows) = sane_size(cols, rows);
+                    let Some(agent) = cfg.agents.get(&name) else {
+                        send_to(&clients, id, json(&ServerMsg::Error {
+                            code: "unknown_agent".into(),
+                            message: format!("Agent `{name}` is not in config.toml."),
+                        }));
+                        continue;
+                    };
+                    let args = agent.update_args.clone().unwrap_or_default();
+                    if args.is_empty() {
+                        send_to(&clients, id, json(&ServerMsg::Error {
+                            code: "no_update_command".into(),
+                            message: format!(
+                                "`{name}` has no update command. Add `update_args` for it in \
+                                 config.toml if it has one."
+                            ),
+                        }));
+                        continue;
+                    }
+                    // Home, not a project: updating a toolchain is not work on
+                    // anyone's repository, and it must not litter one.
+                    let cwd = crate::config::home().display().to_string();
+                    match build_terminal(&cfg, next_term, next_run, &cwd, &name, args, None, cols, rows, &tx) {
+                        Ok(mut term) => {
+                            let tid = term.id;
+                            term.viewers.insert(id, (cols, rows));
+                            terminals.insert(tid, term);
+                            next_term += 1;
+                            next_run += 1;
+                            info!(terminal = tid, %name, "running the agent's updater");
+                            send_state(&cfg, &projects, &agent_names, scanned, &clients, &terminals, None);
+                            send_to(&clients, id, json(&ServerMsg::Attached { id: tid, cols, rows }));
+                        }
+                        Err((code, message)) => {
+                            warn!(%name, %message, "could not run the agent's updater");
+                            send_to(&clients, id, json(&ServerMsg::Error { code, message }));
+                        }
+                    }
+                }
+
+                // Restart a terminal in place. A running process keeps the binary
+                // it started with, so after updating an agent this is what puts
+                // the new one to work without losing the conversation.
+                //
+                // The terminal id is kept, which is what makes it a restart
+                // rather than a new tab: the tab stays where it was, everyone
+                // attached stays attached, and the saved name and colour ride
+                // along.
+                ClientMsg::Relaunch { id: tid, cols, rows } => {
+                    let (cols, rows) = sane_size(cols, rows);
+                    let Some(old) = terminals.get(&tid) else {
+                        send_to(&clients, id, json(&ServerMsg::Error {
+                            code: "no_such_terminal".into(),
+                            message: format!("Terminal {tid} does not exist."),
+                        }));
+                        continue;
+                    };
+                    let (project, agent) = (old.project.clone(), old.agent.clone());
+                    let (session, name, color) =
+                        (old.session_id.clone(), old.name.clone(), old.color.clone());
+                    // A saved terminal runs its stored command again; that is
+                    // what "the same terminal" means for a plain shell, which
+                    // has no session to resume.
+                    let rerun = name.as_ref().and_then(|n| {
+                        cfg.saved
+                            .iter()
+                            .find(|s| s.name == *n && same_path(&s.project, &project))
+                            .filter(|s| !s.command.is_empty())
+                            .map(|s| crate::typed::runnable(std::path::Path::new(&s.project), &s.command))
+                    });
+
+                    match spawn_terminal(&cfg, tid, next_run, &project, &agent, session, cols, rows, &tx) {
+                        Ok(mut fresh) => {
+                            // Everything that made this tab itself is carried
+                            // over; only the process is new.
+                            // The replacement is started first, so a spawn that
+                            // fails leaves the old process running rather than
+                            // trading a working terminal for nothing. Only once
+                            // it is up does the old one go.
+                            if let Some(mut prev) = terminals.remove(&tid) {
+                                fresh.viewers = std::mem::take(&mut prev.viewers);
+                                if let Some(p) = prev.pty.as_mut() {
+                                    p.kill();
+                                }
+                            }
+                            fresh.name = name;
+                            fresh.color = color;
+                            fresh.pending_run = rerun;
+                            let viewers: Vec<ClientId> = fresh.viewers.keys().copied().collect();
+                            terminals.insert(tid, fresh);
+                            // The old screen belongs to a process that is gone.
+                            // A full reset clears it for everyone already
+                            // watching, and the empty ring means anyone
+                            // attaching later sees only the new one.
+                            // Consumed here, not only where new terminals are
+                            // made: without this the replacement would answer to
+                            // the same run id as the process it replaced, which
+                            // is the whole thing the id exists to prevent.
+                            next_run += 1;
+                            let clear = encode_frame(tid, b"\x1bc");
+                            for cid in viewers {
+                                send_to(&clients, cid, Out::Binary(clear.clone()));
+                            }
+                            info!(terminal = tid, %agent, "relaunched");
+                            send_state(&cfg, &projects, &agent_names, scanned, &clients, &terminals, None);
+                        }
+                        Err((code, message)) => {
+                            warn!(terminal = tid, %message, "relaunch failed");
+                            send_to(&clients, id, json(&ServerMsg::Error { code, message }));
+                        }
+                    }
                 }
 
                 ClientMsg::SweepDrops => {
@@ -1160,7 +1326,7 @@ pub fn run(cfg: Config, rx: Receiver<Cmd>, tx: Sender<Cmd>, registry_cfg: Sender
                     }
 
                     match spawn_terminal(
-                        &cfg, next_term, &saved.project, &saved.agent, None, cols, rows, &tx,
+                        &cfg, next_term, next_run, &saved.project, &saved.agent, None, cols, rows, &tx,
                     ) {
                         Ok(mut term) => {
                             let tid = term.id;
@@ -1177,6 +1343,7 @@ pub fn run(cfg: Config, rx: Receiver<Cmd>, tx: Sender<Cmd>, registry_cfg: Sender
                             }
                             terminals.insert(tid, term);
                             next_term += 1;
+                            next_run += 1;
                             info!(terminal = tid, name = %saved.name, "saved terminal opened");
                             send_state(
                                 &cfg, &projects, &agent_names, scanned, &clients, &terminals, None,
@@ -1233,9 +1400,9 @@ pub fn run(cfg: Config, rx: Receiver<Cmd>, tx: Sender<Cmd>, registry_cfg: Sender
                 });
             }
 
-            Cmd::Pty { term, event } => match event {
+            Cmd::Pty { term, run, event } => match event {
                 PtyEvent::Output(data) => {
-                    if let Some(t) = terminals.get_mut(&term) {
+                    if let Some(t) = terminals.get_mut(&term).filter(|t| t.run == run) {
                         t.ring.push(&data);
                         let frame = encode_frame(term, &data);
                         for cid in t.viewers.keys() {
@@ -1260,6 +1427,12 @@ pub fn run(cfg: Config, rx: Receiver<Cmd>, tx: Sender<Cmd>, registry_cfg: Sender
                     }
                 }
                 PtyEvent::Eof { code } => {
+                    // A relaunched terminal's predecessor dies moments after the
+                    // replacement starts. Letting that through would mark a
+                    // healthy terminal dead.
+                    if terminals.get(&term).is_some_and(|t| t.run != run) {
+                        continue;
+                    }
                     if let Some(t) = terminals.get_mut(&term) {
                         t.alive = false;
                         // Closes the ConPTY; without this the reader thread hangs
@@ -1334,6 +1507,7 @@ pub fn run(cfg: Config, rx: Receiver<Cmd>, tx: Sender<Cmd>, registry_cfg: Sender
 fn fork_terminal(
     cfg: &Config,
     id: u32,
+    run: u64,
     project: &str,
     agent: &str,
     session_id: &str,
@@ -1362,13 +1536,14 @@ fn fork_terminal(
         .map(|a| a.replace("{session_id}", session_id).replace("{name}", name))
         .collect();
 
-    build_terminal(cfg, id, project, agent, args, None, cols, rows, tx)
+    build_terminal(cfg, id, run, project, agent, args, None, cols, rows, tx)
 }
 
 #[allow(clippy::too_many_arguments)]
 fn spawn_terminal(
     cfg: &Config,
     id: u32,
+    run: u64,
     project: &str,
     agent: &str,
     resume: Option<String>,
@@ -1395,7 +1570,7 @@ fn spawn_terminal(
         None => Vec::new(),
     };
 
-    build_terminal(cfg, id, project, agent, args, resume, cols, rows, tx)
+    build_terminal(cfg, id, run, project, agent, args, resume, cols, rows, tx)
 }
 
 /// The part shared by spawn and fork: only the arguments differ.
@@ -1403,6 +1578,7 @@ fn spawn_terminal(
 fn build_terminal(
     cfg: &Config,
     id: u32,
+    run: u64,
     project: &str,
     agent: &str,
     args: Vec<String>,
@@ -1433,13 +1609,14 @@ fn build_terminal(
         rows,
         &agent_cfg.env,
         Arc::new(move |event| {
-            let _ = sink_tx.send(Cmd::Pty { term: id, event });
+            let _ = sink_tx.send(Cmd::Pty { term: id, run, event });
         }),
     )
     .map_err(|e| (e.code().to_string(), e.to_string()))?;
 
     Ok(Terminal {
         id,
+        run,
         project: project.to_string(),
         agent: agent.to_string(),
         cols,
@@ -1592,6 +1769,68 @@ fn broadcast_size(clients: &HashMap<ClientId, Client>, t: &Terminal) {
 /// macOS ignore case, Linux does not.
 fn same_path(a: &str, b: &str) -> bool {
     registry::path_key(a) == registry::path_key(b)
+}
+
+/// What the Update panel is told about a release.
+///
+/// Built in one place because two senders use it — the check, and the moment
+/// just before the daemon restarts — and a panel that says different things
+/// depending on which one spoke would be worse than one that says nothing.
+///
+/// The interface is reported apart from the binary on purpose: installing it
+/// costs no restart and kills no terminal, so offering both behind one button
+/// would charge the expensive price for the cheap change.
+fn update_msg(rel: &crate::update::Release, applying: bool) -> ServerMsg {
+    let daemon = crate::update::current();
+    let (web_current, web_builtin, mut web_note) = match crate::webpack::installed() {
+        Ok(Some(v)) => (v.version, false, String::new()),
+        Ok(None) => (built_in_web_version(), true, String::new()),
+        // An interface is installed that this daemon cannot serve. It is already
+        // being ignored in favour of the built-in one; saying so is the
+        // difference between a puzzle and a sentence.
+        Err(why) => (built_in_web_version(), true, why),
+    };
+
+    let web_latest = rel.web_version.clone().unwrap_or_default();
+    let mut web_newer = false;
+    if !web_latest.is_empty() && rel.web_url.is_some() {
+        web_newer = crate::update::is_newer(&web_latest, &web_current);
+        // A newer interface that needs a newer daemon is named, not offered:
+        // installing it would leave the page unable to talk to this daemon.
+        if web_newer && crate::update::is_newer(&rel.version, daemon) && web_note.is_empty() {
+            // The bundle's own floor is only known once downloaded, so the
+            // release version stands in for it — a release newer than this
+            // daemon may well carry an interface that needs it.
+            web_note = format!(
+                "interface {web_latest} ships with sessionhub {}; update sessionhub first if it \
+                 refuses",
+                rel.version
+            );
+        }
+    }
+
+    ServerMsg::Update {
+        current: daemon.to_string(),
+        latest: rel.version.clone(),
+        newer: crate::update::is_newer(&rel.version, daemon),
+        installable: rel.asset_url.is_some(),
+        notes: rel.notes.clone(),
+        applying,
+        web_current,
+        web_builtin,
+        web_latest,
+        web_newer,
+        web_note,
+    }
+}
+
+/// The version of the interface baked into this binary.
+fn built_in_web_version() -> String {
+    crate::http::embedded_app_files()
+        .get("version.json")
+        .and_then(|raw| crate::webpack::parse_version(raw).ok())
+        .map(|v| v.version)
+        .unwrap_or_else(|| "unknown".to_string())
 }
 
 /// Which band of the project list a folder belongs to. Lower sorts first.
@@ -1790,6 +2029,7 @@ mod tests {
     fn terminal_with(entries: &[(ClientId, u16, u16)], cols: u16, rows: u16) -> Terminal {
         Terminal {
             id: 1,
+            run: 1,
             project: "p".into(),
             agent: "a".into(),
             cols,

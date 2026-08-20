@@ -737,6 +737,10 @@ function tabMenu(t) {
   if (at > 0) items.push({ label: 'Move left', run: () => nudgeTab(t.id, -1) });
   if (at >= 0 && at < order.length - 1) items.push({ label: 'Move right', run: () => nudgeTab(t.id, 1) });
 
+  // After updating an agent, a running process still holds the binary it
+  // started with. This puts the new one to work without losing the conversation:
+  // same tab, same folder, session resumed.
+  items.push({ label: 'Relaunch', run: () => relaunch(t.id) });
   items.push({ label: 'Kill terminal…', run: () => killTerminal(t.id) });
   return items;
 }
@@ -745,6 +749,14 @@ function tabMenu(t) {
 /// terminal is looked at from the phone and the laptop, and a mark that only one
 /// of them can see is not a mark. On a named terminal it is stored with the name
 /// and survives a restart.
+/// Restart a terminal in place. The daemon keeps the terminal id, so the tab
+/// stays where it is and everyone attached stays attached.
+function relaunch(id) {
+  const entry = terms.get(id);
+  const size = (entry && proposed(entry)) || { cols: 100, rows: 30 };
+  conn.send({ t: 'relaunch', id, cols: size.cols, rows: size.rows });
+}
+
 function setColor(id, color) {
   conn.send({ t: 'set_color', id, color });
 }
@@ -1547,7 +1559,19 @@ const settings = new Settings(
   (name) => local.conn.send({ t: 'forget', name }),
   // Updating goes to the machine whose settings are on screen, through the
   // facade — so the Update section of a remote's panel updates that remote.
-  (what) => conn.send({ t: what === 'apply' ? 'update_apply' : 'update_check' }),
+  (what) =>
+    conn.send({
+      t: { apply: 'update_apply', apply_web: 'update_apply_web' }[what] || 'update_check',
+    }),
+  // Updating an agent opens a terminal running its own updater, so what it says
+  // is watched rather than swallowed. It lands on the machine whose settings are
+  // open, which is the machine that has that agent installed.
+  (name) => {
+    const active = terms.get(activeId);
+    const size = (active && proposed(active)) || { cols: 100, rows: 30 };
+    conn.send({ t: 'update_agent_cli', name, cols: size.cols, rows: size.rows });
+    settings.close();
+  },
 );
 
 document.getElementById('settings-btn').onclick = () => {
