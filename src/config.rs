@@ -197,10 +197,6 @@ pub struct Agent {
 }
 
 impl Agent {
-    pub fn can_update(&self) -> bool {
-        self.update_args.as_ref().is_some_and(|a| !a.is_empty())
-    }
-
     pub fn can_fork(&self) -> bool {
         self.fork_args.as_ref().is_some_and(|a| !a.is_empty())
     }

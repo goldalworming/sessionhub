@@ -21,7 +21,7 @@
 //! nothing, and compressing it would mean another dependency.
 
 use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 const MAGIC: &[u8] = b"SHWEB1";
 
@@ -225,30 +225,6 @@ pub fn remove_installed() -> Result<(), String> {
         return Ok(());
     }
     std::fs::remove_dir_all(&dir).map_err(|e| format!("could not remove {dir:?}: {e}"))
-}
-
-/// Read `web/` from disk, for building a bundle from a source tree.
-pub fn read_tree(root: &Path) -> Result<BTreeMap<String, Vec<u8>>, String> {
-    let mut out = BTreeMap::new();
-    let entries =
-        std::fs::read_dir(root).map_err(|e| format!("could not read {root:?}: {e}"))?;
-    for entry in entries {
-        let entry = entry.map_err(|e| format!("could not read an entry: {e}"))?;
-        let path = entry.path();
-        // `vendor/` stays in the binary: xterm and Monaco are 5 MB and change
-        // almost never, and a frontend that needs a new one of those is a
-        // frontend that needs a new daemon anyway.
-        if path.is_dir() {
-            continue;
-        }
-        let name = entry.file_name().to_string_lossy().into_owned();
-        if check_name(&name).is_err() {
-            continue;
-        }
-        let data = std::fs::read(&path).map_err(|e| format!("could not read {path:?}: {e}"))?;
-        out.insert(name, data);
-    }
-    Ok(out)
 }
 
 #[cfg(test)]

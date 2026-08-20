@@ -80,6 +80,7 @@ fn main() -> ExitCode {
         },
         "tunnel" => cmd_tunnel(),
         "bundle-web" => cmd_bundle_web(&argv),
+        "revert-web" => cmd_revert_web(),
         "help" | "--help" | "-h" => {
             print_help();
             ExitCode::SUCCESS
@@ -103,6 +104,7 @@ fn print_help() {
          sessionhubd token rotate           replace the token; the old one stops working\n\
          sessionhubd tunnel                 expose it externally through cloudflared\n\
          sessionhubd bundle-web FILE        pack the frontend for a release\n\
+         sessionhubd revert-web             drop an installed interface, back to the built-in\n\
          sessionhubd install [--account NAME --password SECRET]\n\
          sessionhubd uninstall\n\
          \n\
@@ -399,6 +401,35 @@ fn cmd_bundle_web(argv: &[String]) -> ExitCode {
     println!("  size   : {:.0} KB", bytes.len() as f64 / 1024.0);
     println!("  needs  : sessionhub {} or newer", version.needs_daemon);
     ExitCode::SUCCESS
+}
+
+/// Throw away an installed interface and go back to the one inside the binary.
+///
+/// A command rather than a button, because the case it exists for is an
+/// interface that does not work — and then there is no button to press. The
+/// daemon serves the built-in copy again on the next page load, with nothing to
+/// restart.
+fn cmd_revert_web() -> ExitCode {
+    match webpack::installed() {
+        Ok(None) => {
+            println!("No interface is installed; the built-in one is already what is served.");
+            return ExitCode::SUCCESS;
+        }
+        Ok(Some(v)) => println!("Removing interface {}…", v.version),
+        // Refused for needing a newer daemon, and still worth removing — that is
+        // one of the states someone would be trying to get out of.
+        Err(why) => println!("Removing the installed interface ({why})…"),
+    }
+    match webpack::remove_installed() {
+        Ok(()) => {
+            println!("Done. Reload the page; the built-in interface is served again.");
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("Could not remove it: {e}");
+            ExitCode::FAILURE
+        }
+    }
 }
 
 fn cmd_tunnel() -> ExitCode {
