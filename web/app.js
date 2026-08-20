@@ -203,6 +203,12 @@ const filterCollapsed = new Set();
 const saveCollapsed = () => localStorage.setItem(LS.collapsed, JSON.stringify([...collapsed]));
 const saveBookmarks = () => localStorage.setItem(LS.bookmarks, JSON.stringify([...bookmarks]));
 let terms = new Map(); // id -> { term, fit, host, awaitingReplay, lastSize }
+/// Tabs closed by hand on the machine being shown. Held in memory rather than
+/// stored: terminal ids start again at 1 when a daemon restarts, so a remembered
+/// id would eventually hide a brand new terminal that merely inherited the
+/// number. A reload gives you the full strip back, which is the right default
+/// for a fresh look at what is running.
+let dismissed = new Set();
 let activeId = null;
 /// 'tabs' = one terminal fills the stage; 'grid' = all of them at once.
 let layout = localStorage.getItem(LS.layout) === 'grid' ? 'grid' : 'tabs';
@@ -272,6 +278,10 @@ function makeMachine({ id, label, via }) {
     via, // '' for this machine itself
     state: { projects: [], terminals: [], agents: [], saved: [], scanning: true },
     terms: new Map(),
+    /// Terminals whose tab was closed by hand. They keep running — closing a tab
+    /// has never meant killing anything here — but they stop taking room in the
+    /// strip until you pick them out of the sidebar again.
+    dismissed: new Set(),
     activeId: null,
     pinnedProject: null,
     memById: new Map(),
@@ -293,12 +303,14 @@ function useMachine(m) {
     current.terms = terms;
     current.activeId = activeId;
     current.memById = memById;
+    current.dismissed = dismissed;
     current.pinnedProject = pinnedProject;
     current.host.hidden = true;
   }
   current = m;
   state = m.state;
   terms = m.terms;
+  dismissed = m.dismissed;
   activeId = m.activeId;
   memById = m.memById;
   pinnedProject = m.pinnedProject;
@@ -450,6 +462,9 @@ function proposed(entry) {
 /// Show a terminal's view. `focus: false` is used by grid mode, which opens
 /// several at once without moving the active terminal over and over.
 function openView(id, focus = true) {
+  // Opening it is the undo for closing its tab — picking it out of the sidebar
+  // is how you say you want it back.
+  dismissed.delete(id);
   const entry = terms.get(id) || makeTerminal(id);
   if (layout === 'grid') entry.host.hidden = false;
   const size = proposed(entry) || { cols: 80, rows: 24 };
@@ -520,7 +535,11 @@ function setLayout(next) {
 
   // The grid shows live terminals, not only the ones that happen to have been
   // opened: switching layout and seeing a single panel is not what "grid" means.
-  const live = grid ? state.terminals.filter((t) => t.alive).map((t) => t.id) : [];
+  // Grid means "everything live", but not the ones deliberately put away — it
+  // would undo the tidying the moment you switched layout.
+  const live = grid
+    ? state.terminals.filter((t) => t.alive && !dismissed.has(t.id)).map((t) => t.id)
+    : [];
   const want = live.slice(0, GRID_MAX);
 
   for (const [tid, e] of terms) e.host.hidden = grid ? false : tid !== activeId;
@@ -563,6 +582,10 @@ function pushSize(id) {
 function closeView(id) {
   const entry = terms.get(id);
   if (!entry) return;
+  // Remembered, because the strip lists every live terminal and would otherwise
+  // put this one straight back — closing a tab would visibly do nothing. The
+  // process is untouched; the row in the sidebar still shows it running.
+  dismissed.add(id);
   conn.send({ t: 'detach', id });
   entry.term.dispose();
   entry.host.remove();
@@ -716,7 +739,9 @@ function nudgeTab(id, delta) {
 /// The terminals that have a tab: the ones open here, plus every live one.
 function visibleTerminals() {
   const ids = new Set([...terms.keys()]);
-  return state.terminals.filter((t) => ids.has(t.id) || t.alive);
+  // Open here, or alive and not put away. A terminal that is open wins either
+  // way: it has a panel on screen, so a tab is the only way to reach it.
+  return state.terminals.filter((t) => ids.has(t.id) || (t.alive && !dismissed.has(t.id)));
 }
 
 /// The menu behind a right-click, or a long press, on a tab.

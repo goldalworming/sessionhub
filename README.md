@@ -73,7 +73,7 @@ As I found them in **August 2026**. All three projects move fast, so file an iss
 | `Ctrl/Cmd+K` | command palette |
 | `Ctrl/Cmd+B` | hide/show the sidebar |
 | `Ctrl/Cmd+1..9` | switch to the nth terminal |
-| `Ctrl/Cmd+W` | close the terminal view (not kill it) |
+| `Ctrl/Cmd+W` | close the tab; the terminal keeps running |
 | `Ctrl/Cmd+Shift+W` | kill the terminal, with confirmation |
 
 Every other key goes to the agent untouched. Not a supervisor: nothing restarts
