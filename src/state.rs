@@ -939,6 +939,11 @@ pub fn run(cfg: Config, rx: Receiver<Cmd>, tx: Sender<Cmd>, registry_cfg: Sender
                     }
                 }
 
+                // Answered here rather than in the HTTP layer so that a
+                // connection going to another machine is proved all the way to
+                // that machine, not just to the relay in front of it.
+                ClientMsg::Ping => send_to(&clients, id, json(&ServerMsg::Pong)),
+
                 ClientMsg::LastCommand { id: tid } => {
                     let command =
                         terminals.get(&tid).map(|t| t.typed.last().to_string()).unwrap_or_default();

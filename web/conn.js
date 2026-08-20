@@ -4,6 +4,26 @@
 const RECONNECT_MIN = 500;
 const RECONNECT_MAX = 8000;
 
+/// How often to prove the link is alive.
+///
+/// A WebSocket does not always die loudly. A tunnel that idles it out, a phone
+/// that changes network, a laptop that sleeps — any of these can leave the
+/// socket with `readyState === OPEN` on this side while nothing crosses it any
+/// more. `send()` then succeeds into a void and no message ever arrives: the
+/// terminal looks frozen, typing does nothing, and only reloading the page
+/// helps. `onclose` never fires, so nothing here would ever have noticed.
+///
+/// This does both halves of the job. The traffic itself keeps an intermediary
+/// from deciding the connection is idle, and the silence that follows a lost
+/// link is what gives it away.
+const PING_MS = 15000;
+
+/// Give up on the link after this long with nothing at all from the other side —
+/// about three missed pings. Long enough that a slow moment is not mistaken for
+/// a dead socket, short enough that a phone coming out of a tunnel does not sit
+/// there frozen.
+const SILENT_MS = 50000;
+
 export class Conn {
   /// `via` is the name of another paired machine; empty means this machine.
   /// `owner` is carried into every handler, so one set of handlers can serve
@@ -15,6 +35,19 @@ export class Conn {
     this.ws = null;
     this.delay = RECONNECT_MIN;
     this.closedByUs = false;
+    /// When anything last arrived. Any frame counts as proof of life — a busy
+    /// terminal keeps the link proven without a single ping being sent.
+    this.lastSeen = 0;
+    this.beat = null;
+    /// Has the other end ever answered a ping?
+    ///
+    /// Silence only means a dead link if the peer would have spoken. A daemon
+    /// older than this feature never answers, and treating that as death would
+    /// tear down a perfectly good connection every fifty seconds — which is
+    /// worse than the freeze this fixes, and would hit a paired machine that has
+    /// not been updated yet, over the relay, where the version is not ours to
+    /// choose. So the timeout arms itself only once a pong has been seen.
+    this.answers = false;
     // handlers: onState, onAttached, onSize, onExit, onError, onMem,
     //           onOutput(id, bytes), onStatus(kind) — all of them take
     //           `owner` as their last argument.
@@ -32,10 +65,16 @@ export class Conn {
 
     ws.onopen = () => {
       this.delay = RECONNECT_MIN;
+      this.lastSeen = Date.now();
+      // Re-proved per connection: the machine on the other end may have changed
+      // version between one socket and the next.
+      this.answers = false;
+      this.startBeat();
       this.emit('onStatus', 'open');
     };
 
     ws.onmessage = (ev) => {
+      this.lastSeen = Date.now();
       if (typeof ev.data !== 'string') {
         const view = new DataView(ev.data);
         const id = view.getUint32(0, true);
@@ -46,6 +85,12 @@ export class Conn {
       try {
         msg = JSON.parse(ev.data);
       } catch {
+        return;
+      }
+      if (msg.t === 'pong') {
+        // Arriving is the whole message; what it proves is that this peer
+        // answers at all, which is what lets the timeout below arm.
+        this.answers = true;
         return;
       }
       const map = {
@@ -70,6 +115,7 @@ export class Conn {
     };
 
     ws.onclose = () => {
+      this.stopBeat();
       if (this.closedByUs) return;
       this.emit('onStatus', 'lost');
       // Backoff from 0.5 s to 8 s. The user has to do nothing.
@@ -81,9 +127,37 @@ export class Conn {
     ws.onerror = () => {};
   }
 
+  /// Send a ping on a timer, and give up on a link that has gone quiet.
+  ///
+  /// Closing the socket ourselves is what makes this work: `onclose` then fires
+  /// for real, and the reconnect below runs exactly as it does for a link that
+  /// died loudly. There is no second recovery path to keep working.
+  startBeat() {
+    this.stopBeat();
+    this.beat = setInterval(() => {
+      if (!this.ready) return;
+      if (this.answers && Date.now() - this.lastSeen > SILENT_MS) {
+        this.emit('onStatus', 'lost');
+        try {
+          this.ws.close();
+        } catch {
+          // already gone; onclose still runs
+        }
+        return;
+      }
+      this.send({ t: 'ping' });
+    }, PING_MS);
+  }
+
+  stopBeat() {
+    clearInterval(this.beat);
+    this.beat = null;
+  }
+
   /// Close for good — no reconnect. Used when the machine is forgotten.
   close() {
     this.closedByUs = true;
+    this.stopBeat();
     try {
       this.ws?.close();
     } catch {

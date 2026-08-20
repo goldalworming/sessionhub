@@ -159,6 +159,14 @@ pub enum ClientMsg {
     LastCommand {
         id: u32,
     },
+    /// Is this connection still alive? Answered with `Pong`.
+    ///
+    /// A WebSocket that dies without a close frame — a tunnel idling it out, a
+    /// phone changing network, a laptop waking up — leaves the browser believing
+    /// it is still open. Sends vanish, nothing arrives, and the page looks frozen
+    /// until it is reloaded by hand. The client cannot send a WebSocket-level
+    /// ping (the browser API does not expose one), so it asks here instead.
+    Ping,
     /// Tag this terminal's tab with a colour, so it can be picked out of a strip
     /// of tabs that otherwise read alike. Empty clears the tag. On a saved
     /// terminal the colour is stored with it and comes back on the next open.
@@ -190,6 +198,9 @@ pub enum ServerMsg {
         /// would give the wrong guidance for a few seconds.
         scanning: bool,
     },
+    /// The answer to `Ping`: proof the link is alive end to end, including the
+    /// relay when this connection is going to another machine.
+    Pong,
     /// The answer to `LastCommand`. Empty when nothing could be read honestly —
     /// a command recalled from shell history never passed through the daemon.
     LastCommand {

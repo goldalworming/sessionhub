@@ -236,9 +236,11 @@ the screen comes back with its contents replayed once, not twice.
 > after the note was written, and it did not fail: with nothing disconnected the
 > banner never appeared, and "reconnects by itself" passed in 0.0 s because there
 > was nothing to reconnect. The script now wraps `window.WebSocket` before the
-> page loads so it can close the real socket — the client has no heartbeat and
-> learns of a broken link from `onclose` alone, so nothing short of closing the
-> transport reaches the code being tested.
+> page loads so it can close the real socket. At the time the client had no
+> heartbeat and learned of a broken link from `onclose` alone, so nothing short
+> of closing the transport reached the code being tested. That gap is now closed
+> — see 8h — and this test still exercises the loud case, where the socket does
+> report its own death.
 
 ### 8b. Reading back through a session on a phone
 
@@ -596,6 +598,53 @@ that would have caught this without a finger.
 
 Confirmed to guard the bug: with the `z-index` removed the test drops to 5/9;
 with it back, 9/9.
+
+### 8h. A link that dies without saying so
+
+`heartbeat.mjs` — **11/11**. Reported from real use: the terminal freezes, typing
+does nothing, and only reloading the page brings it back.
+
+A WebSocket does not always close loudly. A tunnel that idles it out, a phone
+changing network, a laptop waking up — each can leave the socket reading `OPEN`
+in the browser while nothing crosses it. `send()` succeeds into a void, no frame
+arrives, and `onclose` never fires, so the client had no way to find out. This
+gap was written down here long before it was reported: section 8's note says
+*"the client has no heartbeat and learns of a broken link from `onclose` alone"*
+— stated as a fact about the test, and left as a fact about the product.
+
+The client now sends `{"t":"ping"}` every 15 s and the daemon answers `pong`. The
+traffic keeps an intermediary from calling the connection idle, and fifty seconds
+of total silence is what gives away a link that is already gone: the client then
+closes the socket itself, so `onclose` fires for real and the existing reconnect
+runs. There is no second recovery path to keep working.
+
+Chrome's offline emulation reproduces the failure exactly — it stops the traffic
+and leaves the socket open. That property is why the first reconnect test had to
+close the socket by hand; here it is the whole point.
+
+```
+[ok] the client sends pings on a timer (2)
+[ok] and the daemon answers every one (2)
+[ok] going offline does not close the socket by itself — this is the silent case
+[ok] the client works out on its own that the link is gone
+[ok] it opens a fresh socket by itself
+[ok] all of that without the page being reloaded
+[ok] and the terminal takes typing again — the shell echoes it back
+```
+
+The last one is the question the report actually asked. A banner that clears
+proves nothing if the keyboard is still dead.
+
+**Silence only counts against a peer that would have spoken.** A daemon older
+than this feature never answers, and treating that as death would tear down a
+healthy connection every fifty seconds — worse than the freeze it fixes, and it
+would land on a paired machine that has not been updated yet, over the relay,
+where the version is not ours to choose. So the timeout arms itself only after a
+pong has been seen, per connection.
+
+Verified against a real pre-feature binary rather than a mock: driven by today's
+client for 70 s, past the timeout, it stayed on one socket with no warning shown.
+Re-runnable with any build from before this commit.
 
 ### 9. Windows without WSL
 
