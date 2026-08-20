@@ -553,7 +553,7 @@ function show(id) {
   // Switching terminals means switching projects; that beats a project picked
   // by hand earlier.
   pinnedProject = null;
-  renderTabs();
+  paintTabs();
   renderTree();
   if (sidePanel) sidePanel.syncRoots();
 }
@@ -874,6 +874,37 @@ function revealTab(strip, tab) {
 }
 
 let dragging = null;
+
+/// Update what changes *inside* tabs that already exist: which one is active,
+/// and the memory numbers. Both used to go through `renderTabs`, which throws
+/// the strip away and builds every tab, every listener and the whole button bar
+/// again. With the RAM display on that ran every two seconds for numbers alone.
+///
+/// It checks first that the strip is still showing exactly the right tabs in the
+/// right order, and rebuilds when it is not. That check is what makes this safe
+/// to call from anywhere: a caller never has to know whether the list changed.
+function paintTabs() {
+  const want = inTabOrder(visibleTerminals()).map((t) => String(t.id));
+  const tabs = [...el.tabs.querySelectorAll('.tab')];
+  if (tabs.length !== want.length || tabs.some((n, i) => n.dataset.id !== want[i])) {
+    renderTabs();
+    return;
+  }
+  for (const tab of tabs) {
+    tab.classList.toggle('active', tab.dataset.id === String(activeId));
+    const span = tab.querySelector('.mem');
+    // Turning the display on adds a span that is not there yet, so that case
+    // belongs to a full render rather than to this one.
+    if (memOn !== !!span) {
+      renderTabs();
+      return;
+    }
+    if (!span) continue;
+    const m = memById.get(Number(tab.dataset.id));
+    span.textContent = m ? bytes(m.rss_bytes) : '…';
+    if (m) span.title = `${m.processes} processes in this terminal's tree`;
+  }
+}
 
 function renderTabs() {
   el.tabs.textContent = '';
@@ -2219,7 +2250,7 @@ conn.on.onUpdate = (msg, m) => {
 conn.on.onMem = (msg) => {
   memById.clear();
   for (const m of msg.terminals) memById.set(m.id, m);
-  renderTabs();
+  paintTabs();
 };
 
 let bannerTimer = null;
