@@ -1301,6 +1301,29 @@ html, body {
 /* The command is code, and reads as code. */
 .abox input.second { font-family: var(--mono); font-size: 13px; }
 .abox input.second[hidden] { display: none; }
+/* The tick box, when the dialog asks something yes-or-no as well. `.abox input`
+   above stretches every field to the full width, which would make a checkbox a
+   full-width bar, so its size is set back here. The whole line is the label, so
+   the words are part of the hit area - it is a 13px box otherwise. */
+.acheck {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 12px;
+  font-size: 12px;
+  cursor: pointer;
+  user-select: none;
+}
+.acheck[hidden] { display: none; }
+.abox input.tick {
+  width: 14px;
+  height: 14px;
+  flex: 0 0 auto;
+  padding: 0;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+
 .anote { color: var(--muted); font-size: 11px; margin-top: 8px; line-height: 1.5; }
 .anote[hidden] { display: none; }
 

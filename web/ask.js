@@ -15,6 +15,8 @@ export class Ask {
       '<input type="text" spellcheck="false">' +
       '<label class="alab lab2" hidden></label>' +
       '<input class="second" type="text" spellcheck="false" hidden>' +
+      '<label class="acheck" hidden>' +
+      '<input class="tick" type="checkbox"><span class="cklab"></span></label>' +
       '<div class="anote"></div>' +
       '<div class="arow"><button class="batal">Cancel</button>' +
       '<button class="ok primary"></button></div>' +
@@ -27,6 +29,9 @@ export class Ask {
     this.lab1 = this.el.querySelector('.lab1');
     this.lab2 = this.el.querySelector('.lab2');
     this.note = this.el.querySelector('.anote');
+    this.check = this.el.querySelector('.acheck');
+    this.tick = this.el.querySelector('.tick');
+    this.ckLab = this.el.querySelector('.cklab');
     this.okBtn = this.el.querySelector('.ok');
 
     this.el.querySelector('.batal').onclick = () => this.close(null);
@@ -55,7 +60,12 @@ export class Ask {
   /// Two lines instead of one. Returns `{ first, second }`, or `null` when
   /// cancelled — never a bare string, so a caller cannot read the wrong field
   /// by accident.
-  showPair({ title, label1, value1 = '', label2, value2 = '', hint2 = '', note = '', ok = 'Save' }) {
+  /// `check` adds a tick box under the fields: `{ label, on }`. Its state comes
+  /// back as `third`, so a caller that did not ask for one cannot read it.
+  showPair({
+    title, label1, value1 = '', label2, value2 = '', hint2 = '', note = '', ok = 'Save',
+    check = null,
+  }) {
     return this.open2({
       title,
       value: value1,
@@ -66,10 +76,13 @@ export class Ask {
       value2,
       hint2,
       pair: true,
+      check,
     });
   }
 
-  open2({ title, value, note, ok, label1, label2, value2 = '', hint2 = '', pair = false }) {
+  open2({
+    title, value, note, ok, label1, label2, value2 = '', hint2 = '', pair = false, check = null,
+  }) {
     this.pair = pair;
     this.title.textContent = title;
     this.input.value = value;
@@ -80,6 +93,12 @@ export class Ask {
     this.lab1.hidden = !pair || !label1;
     this.lab2.textContent = label2 || '';
     this.lab2.hidden = !pair || !label2;
+    this.checking = check;
+    this.check.hidden = !check;
+    if (check) {
+      this.tick.checked = check.on !== false;
+      this.ckLab.textContent = check.label;
+    }
     this.note.textContent = note;
     this.note.hidden = !note;
     this.okBtn.textContent = ok;
@@ -101,6 +120,12 @@ export class Ask {
       return;
     }
     const first = String(value).trim();
-    done(this.pair ? { first, second: this.second.value.trim() } : first);
+    if (!this.pair) {
+      done(first);
+      return;
+    }
+    const answer = { first, second: this.second.value.trim() };
+    if (this.checking) answer.third = this.tick.checked;
+    done(answer);
   }
 }

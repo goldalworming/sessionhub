@@ -1394,12 +1394,26 @@ async function saveTerminal(id) {
     value2: suggested,
     hint2: 'leave empty to just open a shell',
     ok: 'Save',
+    // Asked here rather than left to be found later on the row: this is the
+    // moment you know whether the thing you are naming is a service you want up
+    // or a command you will run when you want it. Saving over an entry offers
+    // back what it is already set to.
+    check: {
+      label: 'Start it with the daemon',
+      on: already ? already.autostart : true,
+    },
     note:
       `Kept in ${basename(t.project)}, and it comes back after a restart. ` +
       'Opening it starts the shell in that folder and runs this line.',
   });
   if (answer === null) return;
-  conn.send({ t: 'save_terminal', id, name: answer.first, command: answer.second });
+  conn.send({
+    t: 'save_terminal',
+    id,
+    name: answer.first,
+    command: answer.second,
+    autostart: answer.third,
+  });
 }
 
 /// Open a saved terminal — its shell, its folder, its command.

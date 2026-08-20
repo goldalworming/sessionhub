@@ -125,6 +125,51 @@ check(
   'a page that connects afterwards finds them already running, under their names',
 );
 
+// --- the save dialog asks -------------------------------------------------
+// Not everything worth naming is worth starting. Leaving that to be discovered
+// later on a row means every terminal anyone names is a service until they find
+// the switch, so the dialog asks at the moment you actually know the answer.
+await ev(`
+  (() => {
+    const row = [...document.querySelectorAll('#tree .row')]
+      .find(r => (r.dataset.path || '').toLowerCase().includes('autoproj'));
+    row.querySelector('.add').click();
+  })()
+`);
+await sleep(500);
+await ev(`
+  [...document.querySelectorAll('#menu > div')].find(x => /terminal/i.test(x.textContent)).click()
+`);
+await sleep(2500);
+await ev(`
+  (() => {
+    const shown = new Set([...document.querySelectorAll('.tab')].map(t => t.dataset.id));
+    const rows = [...document.querySelectorAll('#tree [data-tid]')];
+    const row = rows[rows.length - 1];
+    row.querySelector('.act-save').click();
+  })()
+`);
+await sleep(1200);
+check(await ev(`!document.getElementById('ask').hidden`), 'the save dialog opens');
+check(
+  await ev(`!document.querySelector('#ask .acheck').hidden`),
+  'and it asks whether to start it with the daemon',
+);
+check(
+  await ev(`document.querySelector('#ask .tick').checked`),
+  'ticked by default - naming a shell usually means you want it up',
+);
+await ev(`document.querySelector('#ask .tick').click()`);
+await ev(`document.querySelector('#ask input').value = 'hands-off'`);
+await ev(`document.querySelector('#ask .ok').click()`);
+await sleep(1500);
+{
+  const text = readFileSync(`${HOME}\\.sessionhub\\config.toml`, 'utf8');
+  const block = text.split('[[saved]]').find((b) => b.includes('hands-off')) || '';
+  check(/autostart = false/.test(block), 'unticking it is what gets written');
+}
+
+
 // --- the switch has to be reachable while it is running --------------------
 // The saved row carries the same switch, but that row only exists while nothing
 // is running under the name - and something that starts with the daemon is

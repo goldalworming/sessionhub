@@ -164,6 +164,11 @@ pub enum ClientMsg {
         /// Run when it is opened later. Empty just opens the shell.
         #[serde(default)]
         command: String,
+        /// Start it with the daemon. Absent means "leave it as it is" — which
+        /// for a new entry is on, and for one being saved over is whatever it
+        /// was already set to.
+        #[serde(default)]
+        autostart: Option<bool>,
     },
     /// Stop remembering one. A terminal running under that name right now is
     /// left alone — this forgets the note, not the process.

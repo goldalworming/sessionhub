@@ -1223,7 +1223,7 @@ pub fn run(cfg: Config, rx: Receiver<Cmd>, tx: Sender<Cmd>, registry_cfg: Sender
                     send_state(&cfg, &projects, &agent_names, scanned, &clients, &terminals, None);
                 }
 
-                ClientMsg::SaveTerminal { id: tid, name, command } => {
+                ClientMsg::SaveTerminal { id: tid, name, command, autostart } => {
                     let name = name.trim().to_string();
                     if let Err(message) = crate::config::check_saved_name(&name) {
                         send_to(
@@ -1254,14 +1254,17 @@ pub fn run(cfg: Config, rx: Receiver<Cmd>, tx: Sender<Cmd>, registry_cfg: Sender
                         ),
                         // Naming a terminal never changes its tag.
                         color: t.color.clone().unwrap_or_default(),
-                        // Saving over an entry keeps whatever it was set to.
-                        // Changing the command is not a reason to start it on
-                        // boot again after somebody turned that off.
-                        autostart: cfg
-                            .saved
-                            .iter()
-                            .find(|s| same_path(&s.project, &t.project) && s.name == name)
-                            .is_none_or(|s| s.autostart),
+                        // What the dialog was ticked to. Absent - an older
+                        // client, or a caller that did not ask - keeps whatever
+                        // the entry was set to, because changing a command is
+                        // not a reason to start something on boot again after
+                        // somebody turned that off.
+                        autostart: autostart.unwrap_or_else(|| {
+                            cfg.saved
+                                .iter()
+                                .find(|s| same_path(&s.project, &t.project) && s.name == name)
+                                .is_none_or(|s| s.autostart)
+                        }),
                     };
 
                     let before = cfg.saved.clone();
