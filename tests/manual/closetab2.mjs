@@ -169,6 +169,10 @@ check(now.length === 0, `closing a tab while in GRID removes it (${now.length})`
 // This is how the app is normally met: you load it and the strip already lists
 // everything running, without a single view attached. It is also the case the
 // first test never reached, because it opened every terminal by hand first.
+//
+// The tabs closed above are stored now, so they would stay closed through the
+// reload. Cleared here to get the strip a first-time visitor would see.
+await ev(`localStorage.removeItem('sh.closed.local')`);
 await ev(`location.reload()`);
 await sleep(6000);
 await ev(`document.getElementById('backdrop')?.click()`);
@@ -188,6 +192,59 @@ now = await tabIds();
 check(!now.includes(victim), 'and it stays gone through the next broadcast');
 check((await status()).terminals_alive === 4, 'nothing was killed');
 
+
+// --- 7. it survives a reload ------------------------------------------------
+// The whole point of closing a tab is that it stays closed. A reload that puts
+// every tab back makes the gesture pointless, which is what was reported.
+const kept = await tabIds();
+await ev(`location.reload()`);
+await sleep(6000);
+await ev(`document.getElementById('backdrop')?.click()`);
+await sleep(800);
+now = await tabIds();
+check(
+  now.length === kept.length && !now.includes(victim),
+  `a reload keeps the tidying (${now.length} tabs, the closed one still away)`,
+);
+check((await status()).terminals_alive === 4, 'and still nothing killed');
+
+// --- 8. but a reused id must NOT stay hidden --------------------------------
+// Terminal ids start again at 1 when a daemon restarts. Storing the number on
+// its own would hide a brand new terminal that merely inherited it, which is a
+// worse bug than the one being fixed. The fingerprint stored beside the number
+// is what stops that, so this restarts the daemon and checks it.
+const closedId = Number(victim);
+spawn(BIN, ['stop', '--home', HOME], { stdio: 'ignore' });
+for (let i = 0; i < 30 && (await status()); i++) await sleep(500);
+check(!(await status()), 'daemon stopped — every terminal with it');
+spawn(BIN, ['start', '--home', HOME], { detached: true, stdio: 'ignore' }).unref();
+for (let i = 0; i < 40 && !(await status()); i++) await sleep(500);
+check(!!(await status()), 'daemon up again, ids starting from 1');
+await ev(`location.reload()`);
+await sleep(6000);
+await ev(`document.getElementById('backdrop')?.click()`);
+await sleep(800);
+check((await tabIds()).length === 0, 'nothing running yet, so no tabs');
+
+// Started from ANOTHER connection, not from this page. That is the case the
+// fingerprint exists for: opening a terminal here clears its entry anyway, so a
+// terminal this page opened could never prove anything. A terminal started from
+// a phone, or from another browser, arrives with no such clearing — and it is
+// the one that would be silently hidden if only the number were stored.
+const other = new WebSocket(`ws://127.0.0.1:${PORT}/ws?token=${TOKEN}`);
+await new Promise((r) => { other.onopen = r; });
+for (let i = 0; i < closedId; i++) {
+  other.send(JSON.stringify({ t: 'spawn', project: PROJ, agent: 'terminal', cols: 80, rows: 24 }));
+  await sleep(2500);
+}
+check((await status()).terminals_alive === closedId, `${closedId} terminals started from elsewhere`);
+await sleep(1500);
+now = await tabIds();
+check(
+  now.includes(String(closedId)) && now.length === closedId,
+  `terminal ${closedId} of a new daemon run gets its tab — the stored number did not hide it (${now.length} tabs)`,
+);
+other.close();
 console.log(`\n${steps.filter(Boolean).length}/${steps.length} steps passed`);
 spawn(BIN, ['stop', '--home', HOME], { stdio: 'ignore' });
 await sleep(1500);
