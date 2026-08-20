@@ -569,6 +569,27 @@ named terminal wears the same marker a renamed session does. That is deliberate 
 a name you chose has to look like a name wherever its row appears — so the
 assertion was narrowed to the alias actually under test.
 
+### 8g. The button on the empty stage
+
+`emptystage.mjs` — **9/9**. On a phone with terminals alive but none attached,
+the stage shows "No session open." and a button that opens the drawer. Tapping
+it did nothing at all.
+
+`#empty` comes before `#terms` in the DOM and both are `inset: 0`. Each machine
+keeps a host at `inset: 0` whether or not it holds a terminal, so that invisible
+layer painted over the button and took every tap. One `z-index` fixes it, and it
+is safe because the empty layer only shows while no terminal view is open.
+
+The test taps with `Input.dispatchTouchEvent`, not `element.click()`. That
+distinction is the whole point: dispatching a click to an element skips
+hit-testing, so the first probe reported the button working while it was
+unusable on a real phone. It also asserts directly that
+`document.elementFromPoint` at the button's centre IS the button — the check
+that would have caught this without a finger.
+
+Confirmed to guard the bug: with the `z-index` removed the test drops to 5/9;
+with it back, 9/9.
+
 ### 9. Windows without WSL
 
 Every test above runs natively on Windows 11. The PTY uses ConPTY through
