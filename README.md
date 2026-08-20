@@ -62,7 +62,7 @@ As I found them in **August 2026**. All three projects move fast, so file an iss
 - File panel with Monaco
 - Drag or paste a file — it uploads to the agent's machine
 - Fork a session
-- Busy/finished colours and a finish chime
+- Busy/finished colours, a finish chime, and a notice saying which terminal on which machine — click it to go there
 - RAM per terminal, whole process tree
 - Self-update from Settings
 - Search across projects, session titles and parent folders

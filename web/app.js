@@ -17,6 +17,7 @@ import { KeyBar } from './keybar.js';
 import { attachTouchScroll, touchOnlyDevice } from './touchscroll.js';
 import { attachScrollPad } from './scrollpad.js';
 import { unlock as unlockAudio, ding } from './chime.js';
+import { Toasts } from './toasts.js';
 
 const LS = {
   token: 'sh.token',
@@ -1353,6 +1354,48 @@ const IDLE_MS = 3000;
 const MIN_RUN_MS = 5000;
 const MIN_RUN_BYTES = 2048;
 
+// Mounted inside the stage, not the window: anchored to the window they cover
+// the machine tabs and the tab strip on a phone — the two rows that say what is
+// running, which is exactly what you look at after being told something
+// finished.
+const toasts = new Toasts(document.getElementById('stage'));
+
+/// Say what finished and where, with one click to go there.
+///
+/// Built from the machine's own state rather than the global one: the terminal
+/// that finished is very often on a machine you are not looking at, which is
+/// exactly when being told is worth anything.
+function announceDone(m, id) {
+  const t = m.state.terminals.find((x) => x.id === id);
+  if (!t) return;
+  const session = m.state.projects
+    .flatMap((p) => p.sessions)
+    .find((s) => s.session_id && s.session_id === t.session_id);
+  const what = t.name || session?.title || `terminal ${t.id}`;
+  const where = basename(t.project);
+  // The machine is named only when it is not the one on screen. On a single
+  // machine, saying "This machine" on every toast is noise.
+  const machine = m === current ? '' : ` · ${m.label}`;
+
+  toasts.show({
+    key: `${m.id}:${id}`,
+    title: `${what} finished`,
+    note: `${where} · ${t.agent}${machine}`,
+    onClick: () => goToTerminal(m, id),
+  });
+}
+
+/// Take the user to a terminal, wherever it is: the right machine, the right
+/// project in the file panel, the terminal itself open.
+function goToTerminal(m, id) {
+  if (m !== current) switchMachine(m);
+  const t = state.terminals.find((x) => x.id === id);
+  if (t) focusProject(t.project);
+  if (terms.has(id)) show(id);
+  else attach(id);
+  closeDrawerIfNarrow();
+}
+
 /// Is this terminal the thing the user is looking at right now?
 const lookedAt = (m, id) =>
   m === current && id === activeId && document.hasFocus() && !document.hidden;
@@ -1401,6 +1444,10 @@ setInterval(() => {
       if (ranLong && ranReal && !lookedAt(m, id)) {
         entry.done = true;
         if (soundOn) ding();
+        // The chime says something finished; this says which, and where. With
+        // terminals on several machines the sound alone is the least useful
+        // half of the message, and it is gone before you start looking.
+        announceDone(m, id);
       }
       paintActivity(m, id, entry);
     }
@@ -2187,6 +2234,9 @@ conn.on.onRemotes = (msg, m) => {
 /// Drop a machine along with everything it displays.
 function dropMachine(m) {
   if (m === current) switchMachine(local);
+  // Its toasts go with it: one left behind would offer to take you to a
+  // terminal on a machine that is no longer here.
+  toasts.dismissFor(`${m.id}:`);
   m.conn.close();
   for (const e of m.terms.values()) e.term.dispose();
   m.terms.clear();
