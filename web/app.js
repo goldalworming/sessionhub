@@ -823,6 +823,21 @@ function tabMenu(t) {
   if (at > 0) items.push({ label: 'Move left', run: () => nudgeTab(t.id, -1) });
   if (at >= 0 && at < order.length - 1) items.push({ label: 'Move right', run: () => nudgeTab(t.id, 1) });
 
+  // The same switch is on the saved row in the sidebar — but that row only
+  // exists while nothing is running under the name, and something set to start
+  // with the daemon is running nearly always. Without this the switch would be
+  // reachable only by first stopping the thing you want to keep running.
+  const saved = t.name
+    ? state.saved.find((s) => s.name === t.name && samePath(s.project, t.project))
+    : null;
+  if (saved) {
+    items.push({
+      label: 'Start with the daemon',
+      on: saved.autostart,
+      run: () => setAutostart(saved.project, saved.name, !saved.autostart),
+    });
+  }
+
   // After updating an agent, a running process still holds the binary it
   // started with. This puts the new one to work without losing the conversation:
   // same tab, same folder, session resumed.
@@ -1276,6 +1291,7 @@ function sidebarCtx() {
     saveTerminal,
     openSaved,
     forgetSaved,
+    setAutostart,
     explorerRoot,
     saveCollapsed,
     saveBookmarks,
@@ -1392,6 +1408,12 @@ function openSaved(project, name) {
   const size = (active && proposed(active)) || { cols: 100, rows: 30 };
   conn.send({ t: 'open_saved', project, name, cols: size.cols, rows: size.rows });
   closeDrawerIfNarrow();
+}
+
+/// Start it with the daemon, or stop doing that. Nothing starts or stops now:
+/// this is about the next time the daemon comes up.
+function setAutostart(project, name, on) {
+  conn.send({ t: 'set_autostart', project, name, on });
 }
 
 /// Forget the note. Anything running under that name keeps running — this

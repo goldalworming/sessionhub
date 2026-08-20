@@ -100,6 +100,13 @@ pub enum ClientMsg {
     },
     /// Open or close access from the local network. Takes effect at once;
     /// loopback is untouched, so no terminal is disconnected.
+    /// Turn "start with the daemon" on or off for a saved terminal. Takes
+    /// effect at the next start; nothing is started or stopped now.
+    SetAutostart {
+        project: String,
+        name: String,
+        on: bool,
+    },
     /// Ask GitHub what the newest release is. Answered with `Update`.
     UpdateCheck,
     /// Install that release: download it, then restart into it. Every live
@@ -510,6 +517,10 @@ pub struct SavedInfo {
     /// Set when this saved terminal is running right now — the difference
     /// between attaching to it and starting it again.
     pub live_terminal_id: Option<u32>,
+    /// Does it start with the daemon? The row says so, because a thing that
+    /// comes up on its own and a thing you have to open are different things to
+    /// live with, and nothing else on screen would tell them apart.
+    pub autostart: bool,
 }
 
 /// Wrap a terminal payload into a binary frame: `id` (u32 LE) + raw bytes.

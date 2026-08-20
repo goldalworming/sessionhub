@@ -67,6 +67,16 @@ pub struct SavedTerminal {
     /// The colour its tab is tagged with. Empty means untagged.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub color: String,
+    /// Start this one as soon as the daemon does, without waiting for anybody to
+    /// open a tab. On by default, and on for entries saved before this existed:
+    /// naming a shell and the line it runs is what people do to the things they
+    /// want running, and having to open each one after every restart is the
+    /// whole reason the daemon outlives the browser.
+    ///
+    /// Still not a supervisor. This starts it once; nothing watches it, and
+    /// nothing restarts it when it ends.
+    #[serde(default = "yes")]
+    pub autostart: bool,
 }
 
 /// The colours a terminal's tab can be tagged with.
@@ -779,6 +789,7 @@ mod tests {
             agent: TERMINAL_AGENT.into(),
             command: ".\\@run-telegram-bot.bat".into(),
             color: "cyan".into(),
+            autostart: true,
         });
         let back: Config = toml::from_str(&toml::to_string_pretty(&cfg).unwrap()).unwrap();
         assert_eq!(back.saved, cfg.saved);
@@ -817,6 +828,40 @@ mod tests {
         }
     }
 
+    /// Entries written before autostart existed carry no such key. They have to
+    /// come back on, or upgrading would quietly stop everything anyone had
+    /// saved - the opposite of what the setting is for.
+    #[test]
+    fn a_saved_terminal_from_an_older_config_starts_with_the_daemon() {
+        let text = r#"
+[[saved]]
+name = "telegram-bot"
+project = 'C:\data'
+agent = "terminal"
+command = "run.bat"
+"#;
+        let cfg: Config = toml::from_str(text).unwrap();
+        assert!(cfg.saved[0].autostart, "a config with no autostart key must default to on");
+    }
+
+    /// And turning it off has to survive the round trip, or it would come back
+    /// on at the next restart - which is exactly when it matters.
+    #[test]
+    fn turning_autostart_off_is_remembered() {
+        let mut cfg = Config::default();
+        cfg.token = "x".into();
+        cfg.saved.push(SavedTerminal {
+            name: "one-shot".into(),
+            project: "C:/p".into(),
+            agent: TERMINAL_AGENT.into(),
+            command: "build.bat".into(),
+            color: String::new(),
+            autostart: false,
+        });
+        let back: Config = toml::from_str(&toml::to_string_pretty(&cfg).unwrap()).unwrap();
+        assert!(!back.saved[0].autostart);
+    }
+
     #[test]
     fn an_untagged_saved_terminal_writes_no_colour_line() {
         let mut cfg = Config::default();
@@ -827,6 +872,7 @@ mod tests {
             agent: TERMINAL_AGENT.into(),
             command: String::new(),
             color: String::new(),
+            autostart: true,
         });
         let text = toml::to_string_pretty(&cfg).unwrap();
         assert!(!text.contains("color"), "{text}");

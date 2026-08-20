@@ -305,6 +305,12 @@ html, body {
   font-size: 10px;
   opacity: 0.8;
 }
+/* Will not start with the daemon. Shown at rest, unlike the other row actions:
+   everything named starts by default, so it is the exception that has to be
+   readable without hovering. */
+.act-boot.off { opacity: 0.55; }
+.session:hover .act-boot.off { opacity: 1; }
+
 /* Armed to forget. Red only in this second state, so the resting row carries no
    warning colour it has not earned. */
 .act-forget.armed {

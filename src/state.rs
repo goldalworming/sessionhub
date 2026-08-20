@@ -125,6 +125,41 @@ pub fn run(cfg: Config, rx: Receiver<Cmd>, tx: Sender<Cmd>, registry_cfg: Sender
     // means "not known yet", not "there are no projects".
     let mut scanned = false;
 
+    // The things you named because you want them running. Started here, before
+    // any client exists: waiting for a browser would make the browser part of
+    // the lifecycle again, which is the one thing this daemon is for.
+    //
+    // Nothing has attached, and nothing needs to. A held command is written when
+    // the shell first speaks, not when somebody looks — see `Cmd::Pty`.
+    for saved in cfg.saved.clone().iter().filter(|s| s.autostart) {
+        match spawn_terminal(
+            &cfg, next_term, next_run, &saved.project, &saved.agent, None, 80, 24, &tx,
+        ) {
+            Ok(mut term) => {
+                let tid = term.id;
+                term.name = Some(saved.name.clone());
+                if !saved.color.is_empty() {
+                    term.color = Some(saved.color.clone());
+                }
+                if !saved.command.is_empty() {
+                    term.pending_run = Some(crate::typed::runnable(
+                        std::path::Path::new(&saved.project),
+                        &saved.command,
+                    ));
+                }
+                terminals.insert(tid, term);
+                next_term += 1;
+                next_run += 1;
+                info!(terminal = tid, name = %saved.name, "saved terminal started with the daemon");
+            }
+            // One that cannot start must not stop the others, or a folder that
+            // has been moved would take the whole set down with it.
+            Err((code, message)) => {
+                warn!(name = %saved.name, code, %message, "could not start saved terminal");
+            }
+        }
+    }
+
     // Ends by itself once every Sender is gone — no polled flag.
     for cmd in rx.iter() {
         match cmd {
@@ -814,6 +849,45 @@ pub fn run(cfg: Config, rx: Receiver<Cmd>, tx: Sender<Cmd>, registry_cfg: Sender
                     send_to(&clients, id, json(&remotes_msg(&cfg)));
                 }
 
+                ClientMsg::SetAutostart { project, name, on } => {
+                    let before = cfg.saved.clone();
+                    let Some(entry) = cfg
+                        .saved
+                        .iter_mut()
+                        .find(|s| same_path(&s.project, &project) && s.name == name)
+                    else {
+                        send_to(
+                            &clients,
+                            id,
+                            json(&ServerMsg::Error {
+                                code: "no_such_saved".into(),
+                                message: format!("`{name}` is not a saved terminal any more."),
+                            }),
+                        );
+                        continue;
+                    };
+                    if entry.autostart == on {
+                        continue;
+                    }
+                    entry.autostart = on;
+                    if let Err(e) = crate::config::save(&cfg) {
+                        cfg.saved = before;
+                        warn!(error = %e, "could not save config");
+                        send_to(
+                            &clients,
+                            id,
+                            json(&ServerMsg::Error {
+                                code: "config_write_failed".into(),
+                                message: format!("Could not write config.toml: {e}"),
+                            }),
+                        );
+                        continue;
+                    }
+                    info!(%name, on, "autostart changed");
+                    let _ = registry_cfg.send(cfg.clone());
+                    send_state(&cfg, &projects, &agent_names, scanned, &clients, &terminals, None);
+                }
+
                 ClientMsg::UpdateCheck => {
                     // Straight on this thread: one HTTPS request, only when a
                     // person clicks Check, and the panel is waiting for it.
@@ -1180,6 +1254,14 @@ pub fn run(cfg: Config, rx: Receiver<Cmd>, tx: Sender<Cmd>, registry_cfg: Sender
                         ),
                         // Naming a terminal never changes its tag.
                         color: t.color.clone().unwrap_or_default(),
+                        // Saving over an entry keeps whatever it was set to.
+                        // Changing the command is not a reason to start it on
+                        // boot again after somebody turned that off.
+                        autostart: cfg
+                            .saved
+                            .iter()
+                            .find(|s| same_path(&s.project, &t.project) && s.name == name)
+                            .is_none_or(|s| s.autostart),
                     };
 
                     let before = cfg.saved.clone();
@@ -1935,6 +2017,7 @@ fn send_state(
                         && same_path(&t.project, &s.project)
                 })
                 .map(|t| t.id),
+            autostart: s.autostart,
         })
         .collect();
 

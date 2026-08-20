@@ -567,6 +567,20 @@ function savedRow(ctx, s) {
   // it, and a row that runs something must say what.
   if (s.command) item.appendChild(el('span', 'scmd', s.command));
 
+  // Starting with the daemon is the normal state for something you named, so it
+  // is left to the hover like the other row actions. Turned off it stays on
+  // screen: "this one will not come back on its own" is the fact you would
+  // otherwise have no way of seeing.
+  const boot = el('span', 'fork act-boot' + (s.autostart ? '' : ' off'), '⏻');
+  boot.title = s.autostart
+    ? 'Starts with the daemon. Click so it does not.'
+    : 'Does not start with the daemon. Click so it does.';
+  boot.onclick = (e) => {
+    e.stopPropagation();
+    ctx.setAutostart(s.project, s.name, !s.autostart);
+  };
+  item.appendChild(boot);
+
   // Two clicks, because a mis-tap on a phone should not quietly delete the one
   // note saying how a bot is started.
   let armed = false;

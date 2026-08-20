@@ -54,7 +54,7 @@ As I found them in **August 2026**. All three projects move fast, so file an iss
 - Sessions survive the UI closing — the daemon owns the PTY
 - Resumes the CLI's own sessions (`~/.claude`, `~/.pi`, opencode)
 - Raw PTY passthrough — nothing injected into your prompts
-- Saved terminals: name a shell and the line it runs
+- Saved terminals: name a shell and the line it runs, and it comes up with the daemon
 - Tab colours, stored on the daemon so every device sees them
 - Several machines in one window, remote tokens never reach the browser
 - Phone: key bar, Paste, image upload, touch scrollback
@@ -76,8 +76,10 @@ As I found them in **August 2026**. All three projects move fast, so file an iss
 | `Ctrl/Cmd+W` | close the tab; the terminal keeps running |
 | `Ctrl/Cmd+Shift+W` | kill the terminal, with confirmation |
 
-Every other key goes to the agent untouched. Not a supervisor: nothing restarts
-a saved terminal for you, and nothing starts one when the daemon boots.
+Every other key goes to the agent untouched. Saved terminals start with the
+daemon, before any browser connects — turn that off per terminal on its sidebar
+row. Still not a supervisor: it starts each one once, and nothing restarts one
+that ends.
 
 ## Install
 

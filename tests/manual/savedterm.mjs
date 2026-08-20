@@ -249,9 +249,48 @@ check(
   await waitFor(`/bot uji/.test(document.getElementById('tree').textContent)`, 15000),
   'the saved terminal is still listed after the restart',
 );
+// It used to come back as a saved row - a note about something that was not
+// running. It comes back running now, which is the whole point of naming it,
+// and the trace file proves the command ran rather than the shell merely opening.
 check(
-  await ev(`!!document.querySelector('.session.saved')`),
-  'shown as saved rather than as something still running',
+  await waitFor(
+    `fetch('/api/status?token=${TOKEN}').then(r => r.json()).then(j => j.terminals_alive >= 1)`,
+    15000,
+  ),
+  'it is running again after the restart, without anybody opening a tab',
+);
+check(existsSync(TRACE), 'and its command ran, not just its shell');
+check(
+  !(await ev(`!!document.querySelector('.session.saved')`)),
+  'so there is no saved row - that row is for what is NOT running',
+);
+
+// Turned off and stopped, so what follows can look at the saved row again.
+{
+  const ws = new WebSocket(`ws://127.0.0.1:${PORT}/ws?token=${TOKEN}`);
+  const msgs = [];
+  await new Promise((r) => { ws.onopen = r; });
+  ws.onmessage = (e) => { if (typeof e.data === 'string') msgs.push(JSON.parse(e.data)); };
+  ws.send(JSON.stringify({ t: 'set_autostart', project: PROJ, name: 'bot uji', on: false }));
+  await sleep(800);
+  const st = msgs.filter((m) => m.t === 'state').pop();
+  for (const t of st.terminals.filter((t) => t.alive)) {
+    ws.send(JSON.stringify({ t: 'kill', id: t.id }));
+  }
+  await sleep(1500);
+  ws.close();
+}
+await ev(`location.reload()`);
+await sleep(5000);
+await ev(`document.getElementById('backdrop')?.click()`);
+await sleep(600);
+check(
+  await waitFor(`!!document.querySelector('.session.saved')`, 15000),
+  'stopped and turned off, it shows as a saved row again',
+);
+check(
+  await ev(`!!document.querySelector('.session.saved .act-boot.off')`),
+  'and that row says it will not come up on its own',
 );
 const shownCmd = await ev(`document.querySelector('.session.saved .scmd')?.textContent`);
 check(shownCmd === '.\\@run-bot.bat', `the row says what it will run ("${shownCmd}")`);
