@@ -601,6 +601,27 @@ html, body {
 .tab.active { color: var(--text); background: color-mix(in srgb, var(--accent) 22%, transparent); }
 .tab.dead { text-decoration: line-through; }
 
+/* ------------------------------------------------------ dragging a tab */
+
+/* The tab being carried fades, and the one under the pointer shows a line on
+   the side it would land — a line rather than a gap, so nothing shifts about
+   while you are aiming at it. */
+.tab.drag { opacity: 0.4; }
+.tab.over { position: relative; }
+.tab.over::after {
+  content: '';
+  position: absolute;
+  top: 4px;
+  bottom: 4px;
+  width: 2px;
+  background: var(--accent);
+  pointer-events: none;
+}
+.tab.over[data-side='before']::after { left: 0; }
+.tab.over[data-side='after']::after { right: 0; }
+/* The label must not be selected mid-drag, or the browser drags the text. */
+.tab[draggable='true'] { user-select: none; }
+
 /* ------------------------------------------------------ tab colour tags */
 
 /* A colour you put on a tab yourself, to find one terminal in a strip where

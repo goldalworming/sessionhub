@@ -58,7 +58,7 @@ As I found them in **August 2026**. All three projects move fast, so file an iss
 - Tab colours, stored on the daemon so every device sees them
 - Several machines in one window, remote tokens never reach the browser
 - Phone: key bar, Paste, image upload, touch scrollback
-- Tabs or grid
+- Tabs or grid, and drag a tab to reorder it
 - File panel with Monaco
 - Drag or paste a file — it uploads to the agent's machine
 - Fork a session

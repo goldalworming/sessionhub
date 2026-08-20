@@ -529,7 +529,37 @@ mod tests {
     }
 
     #[test]
-    fn resolving_never_shells_out() {
+    fn resolving_never_shells_out_source() {
+        // What this guards is a property, not a speed: `resolve_command` reads
+        // the PATH itself and must never go back to calling `where.exe`, which
+        // cost hundreds of milliseconds per agent and flashed a console window.
+        //
+        // Three timing shapes were tried and all three were really measuring the
+        // machine — "20 calls under 200ms", "fastest of 20 under 5ms", and even
+        // "at least 5x faster than a real spawn, measured here" still went red
+        // about one run in three. A test that cries wolf that often is worse
+        // than none: it trains you to re-run instead of to look.
+        //
+        // So the property is asserted where it actually lives. Crude, and it
+        // would miss a spawn moved into a helper — but it is honest about what
+        // it checks, and it never fails for a reason that is not about the code.
+        let src = include_str!("pty.rs");
+        let start = src.find("pub fn resolve_command").expect("resolve_command lives in this file");
+        let body = &src[start..];
+        let end = body.find("\n}\n").expect("its closing brace is at column 0");
+        let body = &body[..end];
+        assert!(
+            !body.contains("Command::new"),
+            "resolve_command spawns a process again:\n{body}"
+        );
+        // The timing claim it replaces, kept as a fact rather than an assertion:
+        // this scans directories, and a directory scan is microseconds when the
+        // cache is warm and milliseconds when it is not. Neither is a spawn.
+    }
+
+    #[test]
+    #[ignore = "measures the machine as much as the code; run by hand when changing PATH resolution"]
+    fn resolving_is_quick() {
         // This used to call `where.exe` per agent: hundreds of milliseconds and a
         // flashing console window. What must not come back is the subprocess.
         //

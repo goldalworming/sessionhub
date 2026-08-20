@@ -14,7 +14,7 @@ import { MachineBar } from './machines.js';
 import { SidePanel } from './sidepanel.js';
 import { renderTree as renderSidebar } from './sidebar.js';
 import { KeyBar } from './keybar.js';
-import { attachTouchScroll } from './touchscroll.js';
+import { attachTouchScroll, touchOnlyDevice } from './touchscroll.js';
 import { attachScrollPad } from './scrollpad.js';
 import { unlock as unlockAudio, ding } from './chime.js';
 
@@ -31,6 +31,7 @@ const LS = {
   layout: 'sh.layout',
   filesOpen: 'sh.files.open',
   filesWidth: 'sh.files.width',
+  tabOrder: 'sh.taborder',
 };
 
 const MAC = /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent);
@@ -644,6 +645,79 @@ function spawn(project, agent, resume) {
 /// unknown value into the page.
 const TAB_COLORS = ['red', 'green', 'yellow', 'blue', 'magenta', 'cyan'];
 
+// ------------------------------------------------------------- tab ordering
+
+/// The order tabs were last dragged into, as terminal ids.
+///
+/// Kept in this browser rather than on the daemon, unlike a tab's colour. A
+/// colour is a label you choose once and want to recognise from any device; an
+/// order is a working arrangement you nudge constantly, and it belongs to the
+/// screen you are nudging it on — a phone and a laptop do not have the same room
+/// for tabs. It also keeps a drag from writing to `config.toml`.
+let tabOrder = loadTabOrder();
+
+function loadTabOrder() {
+  try {
+    const v = JSON.parse(localStorage.getItem(LS.tabOrder) || '[]');
+    return Array.isArray(v) ? v.filter((n) => Number.isInteger(n)) : [];
+  } catch {
+    return [];
+  }
+}
+
+function saveTabOrder() {
+  // Ids of terminals that are gone are dropped, so the list cannot grow forever
+  // in a browser left open for weeks.
+  const live = new Set(state.terminals.map((t) => t.id));
+  tabOrder = tabOrder.filter((id) => live.has(id));
+  localStorage.setItem(LS.tabOrder, JSON.stringify(tabOrder));
+}
+
+/// Apply the stored order. Terminals never dragged keep their natural order by
+/// id and follow the ones that were — so a new terminal appears at the end,
+/// where it was just created, rather than somewhere in the middle.
+function inTabOrder(list) {
+  const at = new Map(tabOrder.map((id, i) => [id, i]));
+  return [...list].sort((a, b) => {
+    const ia = at.has(a.id) ? at.get(a.id) : Infinity;
+    const ib = at.has(b.id) ? at.get(b.id) : Infinity;
+    return ia - ib || a.id - b.id;
+  });
+}
+
+/// Put `id` where `before` is, or at the end when `before` is null.
+function moveTabTo(id, before) {
+  const shown = inTabOrder(visibleTerminals()).map((t) => t.id);
+  const from = shown.indexOf(id);
+  if (from < 0) return;
+  shown.splice(from, 1);
+  const to = before === null ? shown.length : shown.indexOf(before);
+  shown.splice(to < 0 ? shown.length : to, 0, id);
+  tabOrder = shown;
+  saveTabOrder();
+  renderTabs();
+}
+
+/// One step left or right — how a tab is moved where there is no mouse to drag
+/// with. On a touch screen a long press already opens this tab's menu, so a
+/// drag would have to fight it for the same gesture.
+function nudgeTab(id, delta) {
+  const shown = inTabOrder(visibleTerminals()).map((t) => t.id);
+  const from = shown.indexOf(id);
+  const to = from + delta;
+  if (from < 0 || to < 0 || to >= shown.length) return;
+  shown.splice(to, 0, shown.splice(from, 1)[0]);
+  tabOrder = shown;
+  saveTabOrder();
+  renderTabs();
+}
+
+/// The terminals that have a tab: the ones open here, plus every live one.
+function visibleTerminals() {
+  const ids = new Set([...terms.keys()]);
+  return state.terminals.filter((t) => ids.has(t.id) || t.alive);
+}
+
 /// The menu behind a right-click, or a long press, on a tab.
 function tabMenu(t) {
   const items = TAB_COLORS.map((c) => ({
@@ -655,6 +729,14 @@ function tabMenu(t) {
   // Only offered when there is something to clear — a permanently greyed-out
   // row teaches nothing.
   if (t.color) items.push({ label: 'No colour', swatch: '', run: () => setColor(t.id, '') });
+
+  // Reordering for a screen with no mouse to drag with. Offered only in the
+  // direction there is somewhere to go.
+  const order = inTabOrder(visibleTerminals()).map((x) => x.id);
+  const at = order.indexOf(t.id);
+  if (at > 0) items.push({ label: 'Move left', run: () => nudgeTab(t.id, -1) });
+  if (at >= 0 && at < order.length - 1) items.push({ label: 'Move right', run: () => nudgeTab(t.id, 1) });
+
   items.push({ label: 'Kill terminal…', run: () => killTerminal(t.id) });
   return items;
 }
@@ -693,6 +775,8 @@ function revealTab(strip, tab) {
   else if (r.left < s.left) strip.scrollLeft -= s.left - r.left;
 }
 
+let dragging = null;
+
 function renderTabs() {
   el.tabs.textContent = '';
   // Tabs scroll inside their own strip; the buttons on the right stay put. In one
@@ -702,8 +786,7 @@ function renderTabs() {
   strip.className = 'tabstrip';
   el.tabs.appendChild(strip);
 
-  const ids = new Set([...terms.keys()]);
-  const list = state.terminals.filter((t) => ids.has(t.id) || t.alive);
+  const list = inTabOrder(visibleTerminals());
 
   for (const t of list) {
     const tab = document.createElement('div');
@@ -785,6 +868,48 @@ function renderTabs() {
       // The menu is already open; letting the tap through would also switch tabs.
       if (held) e.preventDefault();
     });
+
+    // Dragging to reorder, with a mouse only. On a touch screen the strip
+    // scrolls sideways and a long press already belongs to this tab's menu, so
+    // a drag would be competing for both gestures at once; there, the menu
+    // carries "Move left" and "Move right" instead.
+    if (!touchOnlyDevice()) {
+      tab.draggable = true;
+      tab.addEventListener('dragstart', (e) => {
+        dragging = t.id;
+        tab.classList.add('drag');
+        e.dataTransfer.effectAllowed = 'move';
+        // Firefox starts no drag at all without something in the payload.
+        e.dataTransfer.setData('text/plain', String(t.id));
+      });
+      tab.addEventListener('dragend', () => {
+        dragging = null;
+        strip.querySelectorAll('.tab').forEach((n) => n.classList.remove('drag', 'over'));
+      });
+      tab.addEventListener('dragover', (e) => {
+        if (dragging === null || dragging === t.id) return;
+        e.preventDefault();
+        e.dataTransfer.dropEffect = 'move';
+        // Which side of this tab the pointer is on decides where it lands, so a
+        // tab can be dropped after the last one as well as before it.
+        const r = tab.getBoundingClientRect();
+        tab.dataset.side = e.clientX < r.left + r.width / 2 ? 'before' : 'after';
+        strip.querySelectorAll('.tab').forEach((n) => n.classList.remove('over'));
+        tab.classList.add('over');
+      });
+      tab.addEventListener('dragleave', () => tab.classList.remove('over'));
+      tab.addEventListener('drop', (e) => {
+        e.preventDefault();
+        if (dragging === null || dragging === t.id) return;
+        const after = tab.dataset.side === 'after';
+        const order = inTabOrder(visibleTerminals()).map((x) => x.id);
+        const at = order.indexOf(t.id);
+        const before = after ? (order[at + 1] ?? null) : t.id;
+        moveTabTo(dragging, before === dragging ? null : before);
+        dragging = null;
+      });
+    }
+
     strip.appendChild(tab);
   }
 

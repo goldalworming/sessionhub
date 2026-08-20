@@ -385,15 +385,22 @@ port, so the new binary could not bind it. The handler now takes the same road
 script refuses to touch anything if the old pid is somehow still alive, rather
 than installing a binary that cannot start.
 
-> Note: `pty::resolving_never_shells_out` guards against a subprocess coming
-> back — it used to call `where.exe` per agent. Two earlier shapes measured
-> wall-clock against a fixed number and both were really measuring the machine:
-> "20 calls under 200ms" went red three times while a build ran in parallel, and
-> "fastest of 20 under 5ms" went red too, because a PATH scan reads real
-> directories and a cold cache costs milliseconds. It now measures what a process
-> spawn actually costs on this machine, right now, and requires the resolve to be
-> at least 5x faster — so a slow or busy machine inflates both sides together.
-> Green three times idle and three times with four cores pegged.
+> Note: `resolve_command` must never go back to calling `where.exe` — hundreds
+> of milliseconds per agent, and a console window flashing on screen. Guarding
+> that by timing was tried three times and failed three times, because every
+> shape of it was really measuring the machine: "20 calls under 200ms" went red
+> under a parallel build, "fastest of 20 under 5ms" went red on a cold PATH
+> cache, and even "at least 5x faster than a spawn measured in the same test"
+> still went red about one run in three. A test that cries wolf that often
+> teaches you to re-run it instead of to look at it.
+>
+> `pty::resolving_never_shells_out_source` asserts the property where it lives:
+> the body of `resolve_command`, read via `include_str!`, contains no
+> `Command::new`. Crude, and it would miss a spawn moved into a helper — but it
+> never fails for a reason that is not about the code. Confirmed both ways: it
+> goes red when a `Command::new` is put back, and it stayed green over five
+> consecutive full runs. The timing version is kept as `resolving_is_quick`,
+> marked `#[ignore]`, for running by hand when PATH resolution changes.
 
 ### 8c2. Updating from one published release to the next
 
