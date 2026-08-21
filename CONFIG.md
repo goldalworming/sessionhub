@@ -96,7 +96,7 @@ written, because a name that is not a file there is meant for the PATH.
 
 `autostart` starts it when the daemon does, without waiting for anybody to open
 a tab — which is the point of naming a bot or a dev server in the first place.
-The save dialog asks, ticked by default. Entries written before the key existed
+The save dialog asks — *Autostart with sessionhub*, ticked by default. Entries written before the key existed
 default to on as well, and the ⏻ mark on the sidebar row turns it off later; a row that will not come up says so
 without being hovered. The daemon starts each one once and then leaves it alone:
 nothing watches it, and nothing restarts it when it ends.

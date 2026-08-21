@@ -832,7 +832,7 @@ function tabMenu(t) {
     : null;
   if (saved) {
     items.push({
-      label: 'Start with the daemon',
+      label: 'Autostart with sessionhub',
       on: saved.autostart,
       run: () => setAutostart(saved.project, saved.name, !saved.autostart),
     });
@@ -1387,7 +1387,11 @@ async function saveTerminal(id) {
   const suggested = already ? already.command : await lastCommand(id);
 
   const answer = await ask.showPair({
-    title: already ? `Rename ${already.name}` : `Save terminal ${id}`,
+    // The folder rides in the title. It is worth saying - the same name in two
+    // projects is two different entries - but not worth a line of its own.
+    title: already
+      ? `Rename ${already.name}`
+      : `Save terminal ${id} in ${basename(t.project)}`,
     label1: 'Name',
     value1: t.name || '',
     label2: 'Run when opened',
@@ -1399,12 +1403,9 @@ async function saveTerminal(id) {
     // or a command you will run when you want it. Saving over an entry offers
     // back what it is already set to.
     check: {
-      label: 'Start it with the daemon',
+      label: 'Autostart with sessionhub',
       on: already ? already.autostart : true,
     },
-    note:
-      `Kept in ${basename(t.project)}, and it comes back after a restart. ` +
-      'Opening it starts the shell in that folder and runs this line.',
   });
   if (answer === null) return;
   conn.send({

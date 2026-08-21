@@ -153,7 +153,7 @@ await sleep(1200);
 check(await ev(`!document.getElementById('ask').hidden`), 'the save dialog opens');
 check(
   await ev(`!document.querySelector('#ask .acheck').hidden`),
-  'and it asks whether to start it with the daemon',
+  'and it asks about autostart',
 );
 check(
   await ev(`document.querySelector('#ask .tick').checked`),
@@ -184,12 +184,12 @@ await sleep(600);
 const menu = await ev(`[...document.querySelectorAll('#menu > div')].map(x => x.textContent)`);
 console.log(`    tab menu: ${JSON.stringify(menu)}`);
 check(
-  menu.some((x) => /Start with the daemon/.test(x)),
+  menu.some((x) => /Autostart with sessionhub/.test(x)),
   'the running terminal offers the switch in its tab menu',
 );
 await ev(`
   [...document.querySelectorAll('#menu > div')]
-    .find(x => /Start with the daemon/.test(x.textContent)).click()
+    .find(x => /Autostart with sessionhub/.test(x.textContent)).click()
 `);
 await sleep(1200);
 check(
