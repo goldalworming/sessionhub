@@ -9,6 +9,12 @@ import { Editor } from './editor.js';
 import { iconFor } from './fileicons.js';
 
 const LS_WIDTH = 'sh.explorer.width';
+/// One entry per (machine, project). The key carries both, so the same path on
+/// two machines is two different sets of tabs.
+const LS_FILES = 'sh.files.';
+/// More than anyone keeps open, and a ceiling so a browser left running for
+/// weeks cannot grow one of these without end.
+const MAX_REMEMBERED = 20;
 const MIN = 120;
 /// Below this the code column is too narrow to read, and the Explorer is better
 /// out of the way. The number is roughly 80 columns at the default font size.
@@ -20,10 +26,23 @@ export class SidePanel {
   /// xterm and Monaco recompute with it.
   constructor(host, on) {
     this.on = on;
-    /// [{ path, name }] — in the order they were opened.
+    /// [{ path, name }] — in the order they were opened, within the scope
+    /// currently showing.
     this.files = [];
     /// The path of the file currently shown, or null when there is none.
     this.active = null;
+    /// Which (machine, project) the two above belong to, and what every other
+    /// scope was holding when it was last on screen. The Explorer has always
+    /// followed the project — it never stores a root, it asks for one — and
+    /// this is the same idea for the tabs beside it.
+    this.scope = null;
+    this.byScope = new Map();
+    /// The file asked for and not yet arrived: `{ scope, path, restoring }`.
+    ///
+    /// The scope is stamped on the request because a reply can outlive the
+    /// question. Switch projects while a file is on its way and it would
+    /// otherwise open a tab in whichever project you had moved to.
+    this.pending = null;
 
     this.el = host;
     this.el.innerHTML =
@@ -55,7 +74,9 @@ export class SidePanel {
 
     this.tree = new FileTree(this.exp, {
       list: on.list,
-      open: on.open,
+      // Through the panel rather than straight out, so every request carries the
+      // scope it was made in.
+      open: (path) => this.ask(path),
       root: on.root,
       projects: on.projects,
       pick: on.pick,
@@ -65,6 +86,7 @@ export class SidePanel {
       theme: on.theme,
       dirty: () => this.paintChrome(),
       projectRoot: on.root,
+      via: on.via,
     });
     this.tree.show();
 
@@ -116,28 +138,121 @@ export class SidePanel {
     document.addEventListener('mouseup', up);
   }
 
+  /// Move to another (machine, project). What was open stays open — behind the
+  /// scenes, models and all — the way a terminal's xterm stays alive when its
+  /// machine is not the one showing.
+  setScope(key) {
+    if (key === this.scope) return;
+    if (this.scope) {
+      this.byScope.set(this.scope, { files: this.files, active: this.active });
+    }
+    this.scope = key;
+    this.editor.setScope(key || '');
+    this.pending = null;
+
+    const seen = key ? this.byScope.get(key) : null;
+    const kept = seen || (key ? this.remembered(key) : null);
+    this.files = kept ? kept.files : [];
+    this.active = kept ? kept.active : null;
+
+    if (this.active) {
+      // A scope read back from storage has tabs but no contents. Only the one
+      // being shown is fetched; the rest wait until they are chosen, which is
+      // the difference between one round trip on arrival and twenty.
+      //
+      // And nothing at all while the panel is shut. Fetching a file loads
+      // Monaco, and those 4.9 MB are meant to stay unrequested for anyone who
+      // only came here for terminals. `wake` picks this up when it opens.
+      if (this.editor.has(this.active)) this.editor.select(this.active);
+      else if (!this.el.hidden) this.ask(this.active, true);
+    } else {
+      this.editor.clear();
+    }
+    this.paint();
+  }
+
+  /// The panel has been opened. If it is showing a tab whose contents were
+  /// deferred, now is when they are worth asking for.
+  wake() {
+    if (this.active && !this.editor.has(this.active) && !this.pending) {
+      this.ask(this.active, true);
+    }
+  }
+
+  /// What was open in this scope the last time the page was here.
+  remembered(key) {
+    try {
+      const v = JSON.parse(localStorage.getItem(LS_FILES + key) || 'null');
+      if (!v || !Array.isArray(v.files)) return null;
+      const files = v.files
+        .filter((f) => f && typeof f.path === 'string' && typeof f.name === 'string')
+        .slice(0, MAX_REMEMBERED);
+      if (!files.length) return null;
+      const active = files.some((f) => f.path === v.active) ? v.active : files[0].path;
+      return { files, active };
+    } catch {
+      return null;
+    }
+  }
+
+  remember() {
+    if (!this.scope) return;
+    const files = this.files.slice(-MAX_REMEMBERED);
+    if (!files.length) localStorage.removeItem(LS_FILES + this.scope);
+    else localStorage.setItem(LS_FILES + this.scope, JSON.stringify({ files, active: this.active }));
+  }
+
+  /// Ask the daemon for a file. `restoring` means the tab is already in the
+  /// strip — it was read back from storage or clicked — so the extras that
+  /// belong to opening something new are skipped.
+  ask(path, restoring = false) {
+    this.pending = { scope: this.scope, path, restoring };
+    this.on.open(path);
+  }
+
+  /// The daemon could not open what was asked for. A tab pointing at a file
+  /// that is gone is worse than no tab: it cannot be made to work by clicking.
+  openFailed() {
+    const p = this.pending;
+    this.pending = null;
+    if (p && p.scope === this.scope) this.closeFile(p.path);
+  }
+
   /// A file arrives from the daemon: open its tab if it has none, then show it.
   async openFile(file) {
+    // A file that arrives because a restored tab was chosen already has its
+    // place in the strip, and the tree was never asked to go looking for it.
+    const p = this.pending;
+    this.pending = null;
+    // The answer to a question asked in another project. Its tab is still over
+    // there, without contents, and will ask again when it is next chosen.
+    if (p && p.scope !== this.scope) return;
+    const restoring = p ? p.restoring : false;
     if (!this.files.some((f) => f.path === file.path)) {
       this.files.push({ path: file.path, name: file.name });
     }
     this.active = file.path;
     await this.editor.load(file);
-    this.tree.reveal(file.path);
+    if (!restoring) this.tree.reveal(file.path);
     // Fold only when the code really would be cramped. A panel that is already
     // wide does not have that problem, and folding there only hides the tree
     // for nothing.
-    if (this.el.clientWidth - this.exp.offsetWidth < CODE_MIN) {
+    if (!restoring && this.el.clientWidth - this.exp.offsetWidth < CODE_MIN) {
       this.fold();
     }
     this.paint();
+    this.remember();
   }
 
   select(path) {
     if (this.active === path) return;
     this.active = path;
-    this.editor.select(path);
+    // A tab restored from storage has no contents yet; asking for them brings
+    // it back through `openFile`, which shows it.
+    if (this.editor.has(path)) this.editor.select(path);
+    else this.ask(path, true);
     this.paint();
+    this.remember();
   }
 
   closeFile(path) {
@@ -149,9 +264,15 @@ export class SidePanel {
       // Move to the neighbouring tab; when none are left, the editor is empty again.
       const next = this.files[i] || this.files[i - 1];
       this.active = next ? next.path : null;
-      if (next) this.editor.select(next.path);
+      if (next) {
+        if (this.editor.has(next.path)) this.editor.select(next.path);
+        else this.ask(next.path, true);
+      } else {
+        this.editor.clear();
+      }
     }
     this.paint();
+    this.remember();
   }
 
   paint() {

@@ -39,17 +39,23 @@ export class Editor {
   /// `onSave(path, text)` saves a file. `appTheme()` returns the app theme, used
   /// when the editor mode is "auto". `onDirty()` is called when the saved/dirty
   /// state changes, so the tab bar can mark it.
-  constructor(root, { save, theme, dirty, projectRoot }) {
+  constructor(root, { save, theme, dirty, projectRoot, via }) {
     this.onSave = save;
     this.appTheme = theme;
     this.onDirty = dirty;
     this.projectRoot = projectRoot;
+    this.machineVia = via || (() => '');
     this.monaco = null;
     this.editor = null;
-    /// path -> model. Switching tabs restores each file's cursor position and
-    /// undo history.
+    /// Which (machine, project) the open files belong to. Everything below is
+    /// keyed by it as well as by path: two machines have the same paths far
+    /// more often than not, and one Monaco model shared between them would put
+    /// one machine's edits on the other's disk.
+    this.scope = '';
+    /// scope+path -> model. Switching tabs restores each file's cursor position
+    /// and undo history.
     this.models = new Map();
-    /// path -> { name, size, truncated, binary }
+    /// scope+path -> { name, size, truncated, binary }
     this.meta = new Map();
     this.current = null;
     this.dirty = new Set();
@@ -84,7 +90,7 @@ export class Editor {
     // The real dimensions are only known once the image has loaded; that is the
     // detail most often wanted when opening an asset.
     this.imgEl.onload = () => {
-      const meta = this.meta.get(this.current);
+      const meta = this.meta.get(this.key(this.current));
       if (meta) {
         meta.dims = `${this.imgEl.naturalWidth}×${this.imgEl.naturalHeight}`;
         this.paintHead();
@@ -109,8 +115,24 @@ export class Editor {
     return !this.el.hidden;
   }
 
+  /// The panel says which (machine, project) is showing; every lookup below is
+  /// answered within it.
+  setScope(scope) {
+    this.scope = scope || '';
+  }
+
+  key(path) {
+    return `${this.scope}\u0000${path}`;
+  }
+
+  /// Whether this file has been fetched already, in this scope. A tab restored
+  /// from storage has not been, and asks for its contents when it is chosen.
+  has(path) {
+    return this.meta.has(this.key(path));
+  }
+
   isDirty(path) {
-    return this.dirty.has(path);
+    return this.dirty.has(this.key(path));
   }
 
   get hasUnsaved() {
@@ -119,7 +141,8 @@ export class Editor {
 
   /// A new file from the daemon.
   async load(file) {
-    this.meta.set(file.path, {
+    const key = this.key(file.path);
+    this.meta.set(key, {
       name: file.name,
       size: file.size,
       truncated: file.truncated,
@@ -156,18 +179,21 @@ export class Editor {
     this.monaco = monaco;
     this.ensureEditor(monaco);
 
-    let model = this.models.get(file.path);
+    let model = this.models.get(key);
     if (!model || model.isDisposed()) {
       model = monaco.editor.createModel(file.text, languageFor(file.name));
+      // `key` and not `this.key(...)`: a model belongs to the scope it was born
+      // in for as long as it lives, and by the time an edit lands the panel may
+      // be showing another project entirely.
       model.onDidChangeContent(() => {
-        if (!this.dirty.has(file.path)) {
-          this.dirty.add(file.path);
+        if (!this.dirty.has(key)) {
+          this.dirty.add(key);
           this.onDirty();
         }
         if (this.current === file.path) this.paintHead();
       });
-      this.models.set(file.path, model);
-    } else if (model.getValue() !== file.text && !this.dirty.has(file.path)) {
+      this.models.set(key, model);
+    } else if (model.getValue() !== file.text && !this.dirty.has(key)) {
       // The file changed on disk while our copy was still unedited.
       model.setValue(file.text);
     }
@@ -178,7 +204,7 @@ export class Editor {
   select(path) {
     this.current = path;
     this.el.hidden = false;
-    const meta = this.meta.get(path);
+    const meta = this.meta.get(this.key(path));
     this.paintHead();
     if (meta?.image) {
       this.showImage(path);
@@ -202,22 +228,35 @@ export class Editor {
     this.placeEl.hidden = true;
   }
 
+  /// Nothing is showing any more — the last tab closed, or the panel moved to a
+  /// project with none open. The models stay; only the view is emptied.
+  clear() {
+    this.current = null;
+    this.hideAll();
+  }
+
   /// The image bytes are fetched over `GET /api/file`, not over the WebSocket:
   /// the browser can cache them, and there is no base64 swelling. The token
   /// rides along in the cookie set when the page was opened.
   showImage(path) {
     this.hideAll();
     this.imgWrap.hidden = false;
-    const url = `/api/file?path=${encodeURIComponent(path)}`;
+    // `via` names the machine that owns the file. Without it this asks the
+    // daemon the browser is talking to, which for a paired machine is the wrong
+    // disk — it would answer with its own file at that path, or with nothing.
+    const via = this.machineVia();
+    const url =
+      `/api/file?path=${encodeURIComponent(path)}` +
+      (via ? `&via=${encodeURIComponent(via)}` : '');
     if (this.imgEl.getAttribute('src') !== url) this.imgEl.src = url;
-    this.imgEl.alt = this.meta.get(path)?.name || '';
+    this.imgEl.alt = this.meta.get(this.key(path))?.name || '';
   }
 
   attach(path) {
-    const model = this.models.get(path);
+    const model = this.models.get(this.key(path));
     if (!this.editor || !model) return;
     this.editor.setModel(model);
-    this.editor.updateOptions({ readOnly: !!this.meta.get(path)?.truncated });
+    this.editor.updateOptions({ readOnly: !!this.meta.get(this.key(path))?.truncated });
     this.editor.focus();
   }
 
@@ -241,11 +280,12 @@ export class Editor {
 
   /// Drop a file along with its model.
   drop(path) {
-    const model = this.models.get(path);
+    const key = this.key(path);
+    const model = this.models.get(key);
     if (model && !model.isDisposed()) model.dispose();
-    this.models.delete(path);
-    this.meta.delete(path);
-    this.dirty.delete(path);
+    this.models.delete(key);
+    this.meta.delete(key);
+    this.dirty.delete(key);
     if (this.current === path) this.current = null;
   }
 
@@ -308,27 +348,31 @@ export class Editor {
 
   paintHead() {
     this.paintCrumb();
-    const meta = this.meta.get(this.current);
+    const meta = this.meta.get(this.key(this.current));
     if (!meta) return;
     const bits = [kb(meta.size)];
     if (meta.dims) bits.push(meta.dims);
     if (meta.truncated) bits.push('first 2 MB only — read-only');
-    if (this.dirty.has(this.current)) bits.push('unsaved');
+    if (this.dirty.has(this.key(this.current))) bits.push('unsaved');
     this.noteEl.textContent = bits.join(' · ');
     this.saveBtn.disabled = meta.truncated || meta.binary || meta.image;
-    this.saveBtn.classList.toggle('on', this.dirty.has(this.current));
+    this.saveBtn.classList.toggle('on', this.dirty.has(this.key(this.current)));
   }
 
+  /// Saving sends the path down the current machine's connection. That is only
+  /// safe because the open files are scoped: what is on screen always belongs to
+  /// the machine the socket goes to, so the same path on another machine cannot
+  /// be the thing being written.
   save() {
     if (!this.editor || !this.current || this.saveBtn.disabled) return;
-    const model = this.models.get(this.current);
+    const model = this.models.get(this.key(this.current));
     if (!model) return;
     this.saveBtn.textContent = 'Saving…';
     this.onSave(this.current, model.getValue());
   }
 
   saved(path) {
-    this.dirty.delete(path);
+    this.dirty.delete(this.key(path));
     this.saveBtn.textContent = 'Save';
     if (this.current === path) this.paintHead();
     this.onDirty();

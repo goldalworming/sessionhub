@@ -287,6 +287,20 @@ function focusProject(path) {
   renderTree();
 }
 
+/// Which set of open files belongs on screen: one per (machine, project).
+///
+/// Derived, never stored, for the same reason `explorerRoot` is — the answer
+/// changes when a terminal is switched, a project is picked, or a machine comes
+/// forward, and a copy kept anywhere would be the copy that goes stale.
+function fileScope() {
+  const root = explorerRoot();
+  return current && root ? `${current.id}\u0000${root.path}` : null;
+}
+
+function syncScope() {
+  if (sidePanel) sidePanel.setScope(fileScope());
+}
+
 /// The project the Explorer shows: the hand-picked one, then the active
 /// terminal's, then the first project that exists.
 function explorerRoot() {
@@ -368,6 +382,8 @@ function useMachine(m) {
   memById = m.memById;
   pinnedProject = m.pinnedProject;
   m.host.hidden = false;
+  // After the swap, not before: the scope is read from the machine now showing.
+  syncScope();
 }
 
 // ----------------------------------------------------------------- terminal
@@ -1307,6 +1323,11 @@ function sidebarCtx() {
 }
 
 function renderTree() {
+  // The tab strip in the file panel follows the same answer the sidebar is
+  // being drawn from, so it is kept here rather than chased through every place
+  // that can change which project is showing. `setScope` returns at once when
+  // nothing moved.
+  syncScope();
   renderSidebar(sidebarCtx());
 }
 
@@ -1950,8 +1971,12 @@ sidePanel = new SidePanel(el.side, {
   pick: (path) => {
     pinnedProject = path;
     sidePanel.syncRoots();
+    syncScope();
   },
   theme: () => (document.documentElement.dataset.theme === 'dark' ? 'dark' : 'light'),
+  /// Which machine the open files belong to. The image viewer fetches over HTTP
+  /// rather than the socket, so it is the one thing that has to be told.
+  via: () => current?.via || '',
   close: () => sidePane.hide(),
   layout: () => relayout(),
 });
@@ -1964,6 +1989,10 @@ const sidePane = {
     el.side.hidden = false;
     el.fsplit.hidden = false;
     localStorage.setItem(LS.filesOpen, '1');
+    // Tabs remembered from last time have been sitting there without contents,
+    // deliberately: fetching one loads Monaco, and a closed panel has no use
+    // for it.
+    sidePanel.wake();
     sidePanel.paint();
     renderTabs();
   },
@@ -2316,6 +2345,14 @@ conn.on.onError = (msg, m) => {
   // that the picker itself covers.
   if (msg.code === 'save_failed') {
     sidePanel.editor.failed();
+    banner(msg.message, false);
+    return;
+  }
+  if (msg.code === 'open_failed') {
+    // A tab remembered from last time can point at a file that has since been
+    // deleted or renamed. It takes itself out rather than sitting there unable
+    // to open.
+    sidePanel.openFailed();
     banner(msg.message, false);
     return;
   }
