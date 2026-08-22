@@ -1,5 +1,5 @@
 {
-  "version": "1.2.4",
+  "version": "1.2.6",
   "needs_daemon": "0.0.6",
   "note": "Raise `version` whenever web/ changes. Raise `needs_daemon` only when the frontend starts needing something the older daemon does not have — a new message, a new field, a new route. A daemon older than `needs_daemon` refuses this frontend and keeps serving its own, rather than showing a page whose buttons quietly do nothing."
 }

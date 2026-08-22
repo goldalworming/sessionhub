@@ -709,6 +709,7 @@ async function forkSession(project, session) {
 
   const active = terms.get(activeId);
   const size = (active && proposed(active)) || { cols: 100, rows: 30 };
+  showNextAttach = current;
   conn.send({
     t: 'fork',
     project,
@@ -730,11 +731,11 @@ async function forkSession(project, session) {
 /// opens is not known here; the daemon recognises it once the agent writes to
 /// it, the same way it does for a session started fresh.
 function spawn(project, agent, resume, pick = false) {
-  const probe = { fit: null };
   // The starting size is taken from the terminal on show, or from the stage size
   // when there is not one yet.
   const active = terms.get(activeId);
   const size = (active && proposed(active)) || { cols: 100, rows: 30 };
+  showNextAttach = current;
   conn.send({
     t: 'spawn',
     project,
@@ -747,7 +748,6 @@ function spawn(project, agent, resume, pick = false) {
   // On a narrow screen the sidebar is a drawer covering the stage: opening a
   // terminal and leaving it open means the terminal is not visible.
   closeDrawerIfNarrow();
-  void probe;
 }
 
 // ------------------------------------------------------------------- render
@@ -1441,6 +1441,7 @@ async function saveTerminal(id) {
 function openSaved(project, name) {
   const active = terms.get(activeId);
   const size = (active && proposed(active)) || { cols: 100, rows: 30 };
+  showNextAttach = current;
   conn.send({ t: 'open_saved', project, name, cols: size.cols, rows: size.rows });
   closeDrawerIfNarrow();
 }
@@ -1830,7 +1831,7 @@ const settings = new Settings(
   (name) => {
     const active = terms.get(activeId);
     const size = (active && proposed(active)) || { cols: 100, rows: 30 };
-    showNextAttach = true;
+    showNextAttach = current;
     conn.send({ t: 'update_agent_cli', name, cols: size.cols, rows: size.rows });
     settings.close();
   },
@@ -2177,13 +2178,17 @@ let pendingReattach = false;
 /// `onAttached` deliberately moves nobody: it fires for every terminal being
 /// reattached after a reconnect too, and being thrown at whichever one answered
 /// first is worse than staying put. But a terminal that exists only because the
-/// user asked for it has to be the one on screen — the agent updater closes the
-/// settings panel to make room for it, and landing back on the terminal that was
-/// already there makes the click look like it did nothing at all.
+/// user asked for it has to be the one on screen. Set by every path that asks
+/// for one — a new terminal, a fork, a saved terminal, the agent updater —
+/// because landing back on the terminal that was already there makes the click
+/// look like it did nothing at all.
 ///
 /// One shot, and only for a terminal this page did not already have, so a
-/// reconnect that races the request cannot consume it.
-let showNextAttach = false;
+/// reconnect that races the request cannot consume it. It holds the machine the
+/// request went to rather than a plain `true`: a reply for a machine no longer
+/// showing is dropped without a word, and a claim left standing would be handed
+/// to whatever opened next on the machine you had moved to.
+let showNextAttach = null;
 
 function reattachAll() {
   const alive = new Set(state.terminals.filter((t) => t.alive).map((t) => t.id));
@@ -2281,8 +2286,8 @@ function revealNewProject() {
 
 conn.on.onAttached = (msg, m) => {
   if (m !== current) return;
-  const asked = showNextAttach && !terms.has(msg.id);
-  if (asked) showNextAttach = false;
+  const asked = showNextAttach === m && !terms.has(msg.id);
+  if (asked) showNextAttach = null;
   const entry = terms.get(msg.id) || makeTerminal(msg.id);
   entry.awaitingReplay = false;
   entry.term.resize(msg.cols, msg.rows);
@@ -2329,7 +2334,7 @@ conn.on.onExit = (msg, m) => {
 conn.on.onError = (msg, m) => {
   // Whatever was going to open did not. Leaving the claim standing would give it
   // to the next terminal opened for any reason at all.
-  showNextAttach = false;
+  showNextAttach = null;
   if (msg.code === 'pair_failed' || msg.code === 'unknown_remote') {
     machineBar.failed(msg.message);
     if (!machineBar.open) banner(msg.message, true);
