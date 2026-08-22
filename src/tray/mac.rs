@@ -238,7 +238,7 @@ extern "C" fn on_copy(_this: Id, _cmd: Sel, _sender: Id) {
 }
 
 extern "C" fn on_log(_this: Id, _cmd: Sel, _sender: Id) {
-    let _ = crate::open_url(&config::log_path().display().to_string());
+    let _ = crate::open_file(&config::log_path());
 }
 
 /// Stopping ends every live terminal, because they are children of the daemon.

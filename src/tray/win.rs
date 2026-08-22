@@ -260,7 +260,7 @@ unsafe fn show_menu(hwnd: HWND) {
         ID_OPEN => open_ui(),
         ID_COPY => copy_address(hwnd),
         ID_LOG => {
-            let _ = crate::open_url(&config::log_path().display().to_string());
+            let _ = crate::open_file(&config::log_path());
         }
         ID_STOP => stop_daemon(hwnd, status),
         ID_START => start_daemon(hwnd),

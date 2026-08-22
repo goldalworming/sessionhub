@@ -233,6 +233,50 @@ fn open_url(url: &str) -> std::io::Result<()> {
     Ok(())
 }
 
+/// Show a file the way [`open_url`] shows a page — but check that something
+/// took it.
+///
+/// `.log` is an extension Windows does not know unless an editor claimed it,
+/// and `start` on a file with no app behind it fails into the console that was
+/// deliberately never shown. From a menu, that reads as a dead item. So wait
+/// for `start` to say whether it handed the file over, and if it did not, use
+/// the editor that is on every Windows there is.
+#[cfg(windows)]
+fn open_file(path: &std::path::Path) -> std::io::Result<()> {
+    use std::os::windows::process::CommandExt;
+    use std::process::{Command, Stdio};
+
+    // `start` returns as soon as it has launched something, so this waits on
+    // cmd's own exit, not on whatever opened the file.
+    let handed_over = Command::new("cmd")
+        .raw_arg(format!("/C start \"\" \"{}\"", path.display()))
+        .creation_flags(0x0800_0000)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    if handed_over {
+        return Ok(());
+    }
+
+    Command::new("notepad.exe")
+        .arg(path)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map(|_| ())
+}
+
+/// On macOS `open` asks Launch Services, which offers a chooser rather than
+/// failing when nothing owns the extension. There is nothing to fall back to.
+#[cfg(target_os = "macos")]
+fn open_file(path: &std::path::Path) -> std::io::Result<()> {
+    open_url(&path.display().to_string())
+}
+
 /// True when this process is the only one attached to its console — the shape
 /// of a double-click from Explorer, where the console was made for us alone and
 /// dies with us. Started from a terminal there is a shell attached as well.
