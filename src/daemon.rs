@@ -81,9 +81,52 @@ pub fn spawn_detached(cfg: &Config, home_override: Option<&PathBuf>) -> io::Resu
     ))
 }
 
+/// Start the tray icon beside the daemon, detached the same way. It is a
+/// separate process on purpose: a daemon installed as a service or a launchd
+/// job runs where there is no notification area to draw in at all, and the
+/// icon has to live where the person looking for it is.
+///
+/// Only one icon ever shows — a second copy finds the first and steps aside —
+/// so this is safe to call on every `start`.
+#[cfg(any(windows, target_os = "macos"))]
+pub fn spawn_tray(home_override: Option<&PathBuf>) -> io::Result<()> {
+    let exe = std::env::current_exe()?;
+    let mut cmd = Command::new(exe);
+    cmd.arg("tray");
+    if let Some(h) = home_override {
+        cmd.arg("--home").arg(h);
+    }
+    cmd.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+    platform_detach(&mut cmd)
+}
+
+/// A detached child inherits every inheritable handle this process holds, and
+/// the ones that matter are the pipes a shell may have handed us. The daemon
+/// and the tray both outlive the command that started them, so `sessionhubd
+/// start | tee log` would sit there forever waiting for an end-of-file that
+/// only arrives when they exit. Nothing spawned here needs those handles.
+#[cfg(windows)]
+fn disinherit_std_handles() {
+    use windows_sys::Win32::Foundation::{SetHandleInformation, HANDLE_FLAG_INHERIT, INVALID_HANDLE_VALUE};
+    use windows_sys::Win32::System::Console::{
+        GetStdHandle, STD_ERROR_HANDLE, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE,
+    };
+
+    for which in [STD_INPUT_HANDLE, STD_OUTPUT_HANDLE, STD_ERROR_HANDLE] {
+        unsafe {
+            let handle = GetStdHandle(which);
+            if !handle.is_null() && handle != INVALID_HANDLE_VALUE {
+                SetHandleInformation(handle, HANDLE_FLAG_INHERIT, 0);
+            }
+        }
+    }
+}
+
 #[cfg(windows)]
 fn platform_detach(cmd: &mut Command) -> io::Result<()> {
     use std::os::windows::process::CommandExt;
+
+    disinherit_std_handles();
 
     const DETACHED_PROCESS: u32 = 0x0000_0008;
     const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;

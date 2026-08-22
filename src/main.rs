@@ -18,6 +18,7 @@ mod remote;
 mod ring;
 mod service;
 mod state;
+mod tray;
 mod tunnel;
 mod typed;
 mod webpack;
@@ -58,7 +59,7 @@ fn main() -> ExitCode {
             run_daemon(home);
             ExitCode::SUCCESS
         }
-        "start" => cmd_start(home),
+        "start" => cmd_start(&argv, home, true),
         "stop" => cmd_stop(),
         "restart" => cmd_restart(&argv, home),
         "status" => cmd_status(),
@@ -78,6 +79,7 @@ fn main() -> ExitCode {
                 ExitCode::from(2)
             }
         },
+        "tray" => tray::run(home),
         "tunnel" => cmd_tunnel(),
         "bundle-web" => cmd_bundle_web(&argv),
         "revert-web" => cmd_revert_web(),
@@ -88,6 +90,7 @@ fn main() -> ExitCode {
         other => {
             eprintln!("Unknown command `{other}`.\n");
             print_help();
+            hold_console_open();
             ExitCode::from(2)
         }
     }
@@ -97,25 +100,46 @@ fn print_help() {
     println!(
         "sessionhubd — keeps coding agent terminals alive independently of the UI\n\
          \n\
-         sessionhubd start [--foreground]   run; detaches and exits by default\n\
+         sessionhubd start [--foreground] [--no-open]  run; detaches and exits by default\n\
          sessionhubd stop                   stop the running daemon\n\
          sessionhubd restart [--force]      stop and start again, to load a new build\n\
          sessionhubd status                 port, live terminal count, uptime\n\
          sessionhubd token rotate           replace the token; the old one stops working\n\
+         sessionhubd tray                   show the tray icon; `start` does this too\n\
          sessionhubd tunnel                 expose it externally through cloudflared\n\
          sessionhubd bundle-web FILE [--raw]  pack the frontend for a release\n\
          sessionhubd revert-web             drop an installed interface, back to the built-in\n\
          sessionhubd install [--account NAME --password SECRET]\n\
          sessionhubd uninstall\n\
          \n\
-         --home PATH   use a specific home directory (used by service mode)\n"
+         --home PATH   use a specific home directory (used by service mode)\n\
+         --no-open     do not open a browser at the address it just printed\n\
+         --no-tray     do not put an icon in the tray or the menu bar\n"
     );
 }
 
 // ------------------------------------------------------------------ commands
 
-fn cmd_start(home: Option<PathBuf>) -> ExitCode {
+/// `open_browser` is what the command wants by default: `start` opens the
+/// address, `restart` does not — the tab that prompted the restart is already
+/// sitting there. `--no-open` overrides either way.
+fn cmd_start(argv: &[String], home: Option<PathBuf>, open_browser: bool) -> ExitCode {
     let Some(cfg) = load_config() else { return ExitCode::FAILURE };
+    let open = open_browser && !has_flag(argv, "--no-open");
+
+    // Running it again is how someone who lost the address asks for it back —
+    // most likely after double-clicking the exe and watching the window vanish
+    // with the url still in it. So this is not an error: say where the daemon
+    // is and open it.
+    let running = daemon::read_pid_file().map(|p| p.port).unwrap_or(cfg.port);
+    if let Some(s) = daemon::probe(running, &cfg.token) {
+        println!("sessionhubd is already running.");
+        println!("  pid    : {}", s.pid);
+        print_access(&cfg, s.port, open, argv, home.as_ref());
+        println!("\nStop it with: sessionhubd stop");
+        hold_console_open();
+        return ExitCode::SUCCESS;
+    }
 
     match daemon::spawn_detached(&cfg, home.as_ref()) {
         Ok(port) => {
@@ -124,18 +148,120 @@ fn cmd_start(home: Option<PathBuf>) -> ExitCode {
             if let Some(s) = status {
                 println!("  pid    : {}", s.pid);
             }
-            println!("  url    : http://127.0.0.1:{port}/?token={}", cfg.token);
-            println!("  log    : {}", config::log_path().display());
-            print_lan_access(&cfg, port);
+            print_access(&cfg, port, open, argv, home.as_ref());
             println!("\nClose this terminal any time — the daemon keeps running.");
             println!("Stop it with: sessionhubd stop");
+            hold_console_open();
             ExitCode::SUCCESS
         }
         Err(e) => {
             eprintln!("Could not start the daemon: {e}");
+            eprintln!("See {}", config::log_path().display());
+            hold_console_open();
             ExitCode::FAILURE
         }
     }
+}
+
+/// The address, the log, and — when asked — a browser pointed at it. Printing
+/// the url is not enough on its own: a double-clicked exe prints into a console
+/// window that closes half a second later, so the line nobody could read has to
+/// arrive somewhere that stays.
+fn print_access(
+    cfg: &config::Config,
+    port: u16,
+    open: bool,
+    argv: &[String],
+    home: Option<&PathBuf>,
+) {
+    let url = format!("http://127.0.0.1:{port}/?token={}", cfg.token);
+    println!("  url    : {url}");
+    println!("  log    : {}", config::log_path().display());
+    ensure_tray(argv, home);
+    print_lan_access(cfg, port);
+    if open {
+        match open_url(&url) {
+            Ok(()) => println!("\nOpening it in your browser…"),
+            Err(e) => println!("\nCould not open a browser ({e}); open the url above by hand."),
+        }
+    }
+}
+
+/// A window that closes itself is a poor place to keep the only copy of the
+/// address. The icon stays: it is a second process, it outlives this command,
+/// and it answers both of the questions a vanished console left behind.
+fn ensure_tray(argv: &[String], home: Option<&PathBuf>) {
+    #[cfg(any(windows, target_os = "macos"))]
+    if !has_flag(argv, "--no-tray") && daemon::spawn_tray(home).is_ok() {
+        let where_ = if cfg!(windows) { "the notification area" } else { "the menu bar" };
+        println!("  tray   : in {where_} — open or stop it from there");
+    }
+    #[cfg(not(any(windows, target_os = "macos")))]
+    let _ = (argv, home);
+}
+
+/// Hand the url to whatever the desktop opens one with. Nothing here waits for
+/// the browser: it is a request, not a child process this command owns.
+fn open_url(url: &str) -> std::io::Result<()> {
+    use std::process::{Command, Stdio};
+
+    #[cfg(windows)]
+    let mut cmd = {
+        use std::os::windows::process::CommandExt;
+        let mut c = Command::new("cmd");
+        // One raw argument, so the url keeps its `?` and `&` instead of being
+        // taken apart by cmd's own quoting. The empty `""` is the window title
+        // `start` would otherwise read the url as.
+        c.raw_arg(format!("/C start \"\" \"{url}\""));
+        c.creation_flags(0x0800_0000); // CREATE_NO_WINDOW — no console flash
+        c
+    };
+    #[cfg(target_os = "macos")]
+    let mut cmd = {
+        let mut c = Command::new("open");
+        c.arg(url);
+        c
+    };
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let mut cmd = {
+        let mut c = Command::new("xdg-open");
+        c.arg(url);
+        c
+    };
+
+    cmd.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn()?;
+    Ok(())
+}
+
+/// True when this process is the only one attached to its console — the shape
+/// of a double-click from Explorer, where the console was made for us alone and
+/// dies with us. Started from a terminal there is a shell attached as well.
+#[cfg(windows)]
+fn owns_console() -> bool {
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn GetConsoleProcessList(list: *mut u32, count: u32) -> u32;
+    }
+    let mut pids = [0u32; 8];
+    // The count of processes attached, or 0 when there is no console at all.
+    unsafe { GetConsoleProcessList(pids.as_mut_ptr(), pids.len() as u32) == 1 }
+}
+
+#[cfg(not(windows))]
+fn owns_console() -> bool {
+    // Finder opens a binary through Terminal.app, and that window stays after
+    // the process exits. There is nothing to hold.
+    false
+}
+
+/// Keep a double-clicked window on screen long enough to read. From a terminal
+/// this does nothing — a shell is not a window that needs holding.
+fn hold_console_open() {
+    if !owns_console() {
+        return;
+    }
+    println!("\nPress Enter to close this window. The daemon keeps running without it.");
+    let _ = std::io::stdin().read_line(&mut String::new());
 }
 
 /// When network access is on, show the address other devices can really open —
@@ -285,7 +411,7 @@ fn cmd_restart(argv: &[String], home: Option<PathBuf>) -> ExitCode {
         }
         None => println!("sessionhubd was not running; starting it."),
     }
-    cmd_start(home)
+    cmd_start(argv, home, false)
 }
 
 fn cmd_install(argv: &[String], home: Option<PathBuf>) -> ExitCode {

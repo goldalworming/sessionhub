@@ -109,13 +109,19 @@ sessionhubd stop
 sessionhubd restart        # stop and start again, to load a new build
 ```
 
-`start` shows the full address with the token:
+`start` shows the full address with the token, and opens it in your browser:
 
 ```
 http://127.0.0.1:7717/?token=…
 ```
 
-Open it once with the token in the URL. After that, `http://127.0.0.1:7717/` is enough. The token is stored in the browser in a cookie that survives closing the browser. So this is once per device, not once per session.
+Pass `--no-open` if you would rather it did not. Running `start` while the daemon is already up is not an error — it prints the address again and opens it again, which is the shortest way to get the link back when you have lost it.
+
+Double-clicking `sessionhubd.exe` does the same thing as `start`, and the window it opens waits for Enter before closing, so the address stays readable. On macOS, Finder runs it in Terminal.app, whose window stays on its own.
+
+`start` also leaves an icon behind — the notification area on Windows, the menu bar on macOS. It carries what the console window used to: the port, how many terminals are live, the address to open or copy, the log, and a way to stop the daemon that first says how many terminals go with it. It is its own process, `sessionhubd tray`, for the same reason the browser is: a daemon installed as a service or a launchd job runs where nothing can draw an icon, and the icon has to be where you are. Hiding it does not touch the daemon, and `--no-tray` skips it entirely.
+
+Open the address once with the token in the URL. After that, `http://127.0.0.1:7717/` is enough. The token is stored in the browser in a cookie that survives closing the browser. So this is once per device, not once per session.
 
 `restart` exists because a running process cannot load a new binary. `token rotate` can reach a live daemon to re-read its config. But changed Rust, or the `web/` assets baked into a release build, needs the process replaced. It **ends every live terminal**, because shells and agents are children of the daemon and cannot outlive it. So it refuses while any are running:
 

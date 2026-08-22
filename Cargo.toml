@@ -1,6 +1,6 @@
 [package]
 name = "sessionhubd"
-version = "0.0.6"
+version = "0.0.7"
 edition = "2021"
 
 [dependencies]
@@ -19,6 +19,19 @@ tungstenite = "0.30.0"
 
 [target."cfg(windows)".dependencies]
 windows-service = "0.8.1"
+# The tray icon and the handles a detached child must not inherit:
+# Shell_NotifyIcon, a hidden window, a popup menu, the clipboard.
+windows-sys = { version = "0.61.2", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Gdi",
+    "Win32_System_DataExchange",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Console",
+    "Win32_System_Memory",
+    "Win32_System_Ole",
+    "Win32_UI_Shell",
+    "Win32_UI_WindowsAndMessaging",
+] }
 
 [target."cfg(unix)".dependencies]
 libc = "0.2.189"
