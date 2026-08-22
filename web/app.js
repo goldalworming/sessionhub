@@ -804,8 +804,12 @@ function visibleTerminals() {
   return state.terminals.filter((t) => ids.has(t.id) || (t.alive && !isClosed(t)));
 }
 
-/// The menu behind a right-click, or a long press, on a tab.
-function tabMenu(t) {
+/// The menu behind a right-click, or a long press, on anything that stands for
+/// one terminal — its tab, or any of its rows in the sidebar.
+///
+/// `ordering` is the tab strip's alone: moving a tab left is meaningless from a
+/// sidebar row, which is not in that strip and does not move with it.
+function terminalMenu(t, { ordering = false } = {}) {
   const items = TAB_COLORS.map((c) => ({
     label: c,
     swatch: c,
@@ -818,10 +822,14 @@ function tabMenu(t) {
 
   // Reordering for a screen with no mouse to drag with. Offered only in the
   // direction there is somewhere to go.
-  const order = inTabOrder(visibleTerminals()).map((x) => x.id);
-  const at = order.indexOf(t.id);
-  if (at > 0) items.push({ label: 'Move left', run: () => nudgeTab(t.id, -1) });
-  if (at >= 0 && at < order.length - 1) items.push({ label: 'Move right', run: () => nudgeTab(t.id, 1) });
+  if (ordering) {
+    const order = inTabOrder(visibleTerminals()).map((x) => x.id);
+    const at = order.indexOf(t.id);
+    if (at > 0) items.push({ label: 'Move left', run: () => nudgeTab(t.id, -1) });
+    if (at >= 0 && at < order.length - 1) {
+      items.push({ label: 'Move right', run: () => nudgeTab(t.id, 1) });
+    }
+  }
 
   // The same switch is on the saved row in the sidebar — but that row only
   // exists while nothing is running under the name, and something set to start
@@ -988,30 +996,7 @@ function renderTabs() {
     }
 
     tab.onclick = () => (terms.has(t.id) ? show(t.id) : attach(t.id));
-    const menuFor = (x, y) => openMenu(x, y, tabMenu(t));
-    tab.oncontextmenu = (e) => {
-      e.preventDefault();
-      menuFor(e.clientX, e.clientY);
-    };
-    // A phone has no right-click. A long press on the tab opens the same menu,
-    // and a press that turns into a scroll of the strip does not.
-    let hold = null;
-    let held = false;
-    tab.addEventListener('touchstart', (e) => {
-      held = false;
-      const p = e.touches[0];
-      hold = setTimeout(() => {
-        held = true;
-        menuFor(p.clientX, p.clientY);
-      }, 500);
-    }, { passive: true });
-    const drop = () => clearTimeout(hold);
-    tab.addEventListener('touchmove', drop, { passive: true });
-    tab.addEventListener('touchend', (e) => {
-      drop();
-      // The menu is already open; letting the tap through would also switch tabs.
-      if (held) e.preventDefault();
-    });
+    bindMenu(tab, () => terminalMenu(t, { ordering: true }));
 
     // Dragging to reorder, with a mouse only. On a touch screen the strip
     // scrolls sideways and a long press already belongs to this tab's menu, so
@@ -1300,6 +1285,8 @@ function sidebarCtx() {
     show,
     focusProject,
     openMenu,
+    bindMenu,
+    terminalMenu,
     killTerminal,
     forkSession,
     closeDrawerIfNarrow,
@@ -1469,6 +1456,47 @@ function openMenu(x, y, items) {
 }
 function closeMenu() {
   el.menu.hidden = true;
+}
+
+/// Open `items()` where the pointer is: a right-click, or a long press where
+/// there is no right button to click.
+///
+/// One implementation for the tab strip and the sidebar both. It is the same
+/// question asked of the same terminal, and a phone that learns the gesture in
+/// one place should not find nothing in the other.
+function bindMenu(node, items) {
+  const menuFor = (x, y) => {
+    const list = items();
+    // A terminal can end between the press and the release. An empty box that
+    // opens where a menu was expected is worse than no menu at all.
+    if (list.length) openMenu(x, y, list);
+  };
+  node.oncontextmenu = (e) => {
+    e.preventDefault();
+    menuFor(e.clientX, e.clientY);
+  };
+  let hold = null;
+  let held = false;
+  node.addEventListener(
+    'touchstart',
+    (e) => {
+      held = false;
+      const p = e.touches[0];
+      hold = setTimeout(() => {
+        held = true;
+        menuFor(p.clientX, p.clientY);
+      }, 500);
+    },
+    { passive: true },
+  );
+  const drop = () => clearTimeout(hold);
+  node.addEventListener('touchmove', drop, { passive: true });
+  node.addEventListener('touchend', (e) => {
+    drop();
+    // The menu is already open; letting the tap through would also act on what
+    // was pressed — switching tabs, or opening a session.
+    if (held) e.preventDefault();
+  });
 }
 document.addEventListener('click', (e) => {
   if (!el.menu.hidden && !el.menu.contains(e.target)) closeMenu();

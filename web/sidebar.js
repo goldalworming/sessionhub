@@ -174,6 +174,7 @@ function recentRows(ctx, liveSession) {
           project: hit.p.name,
           agent: hit.s.agent,
           live: true,
+          color: t.color,
           tid: t.id,
           selected: t.id === ctx.activeId,
           open: () => ctx.attach(t.id),
@@ -226,6 +227,20 @@ function recentRows(ctx, liveSession) {
   return out;
 }
 
+/// Colour, relaunch and kill, on every row that stands for a running terminal.
+///
+/// They already exist on the tab, which is the trouble: on a phone the strip is
+/// often scrolled somewhere else, and the sidebar is where you were looking. The
+/// terminal is looked up when the menu opens rather than captured here, so a row
+/// rendered a minute ago still offers the truth.
+function bindTerminalMenu(ctx, node, id) {
+  if (id === null || id === undefined) return;
+  ctx.bindMenu(node, () => {
+    const t = ctx.state.terminals.find((x) => x.id === id);
+    return t ? ctx.terminalMenu(t) : [];
+  });
+}
+
 function zoneRow(ctx, o) {
   const r = el('div', 'zrow' + (o.selected ? ' selected' : ''));
   r.title = `${o.project} · ${o.agent}\n${o.title}`;
@@ -254,6 +269,7 @@ function zoneRow(ctx, o) {
     o.open();
     ctx.closeDrawerIfNarrow();
   };
+  bindTerminalMenu(ctx, r, o.live ? o.tid : null);
   return r;
 }
 
@@ -406,6 +422,11 @@ function sessionRow(ctx, p, s, liveSession, positions, mixed) {
   item.title = `${s.title}\n${s.agent}`;
   if (live !== null) item.dataset.tid = String(live);
 
+  // The same tag as on its tab, while something is running under this session.
+  // A colour set from this row is not a mark if the row cannot show it.
+  const running = live !== null ? ctx.state.terminals.find((x) => x.id === live) : null;
+  if (running && running.color) item.dataset.color = running.color;
+
   item.appendChild(el('span', 'dot' + (live !== null ? ' live' : '')));
   item.appendChild(el('span', 'when', absoluteDate(s.updated_at)));
   if (mixed) item.appendChild(el('span', 'badge', s.agent));
@@ -447,6 +468,7 @@ function sessionRow(ctx, p, s, liveSession, positions, mixed) {
     else ctx.spawn(p.path, s.agent, s.session_id);
     ctx.closeDrawerIfNarrow();
   };
+  bindTerminalMenu(ctx, item, live);
   return item;
 }
 
@@ -536,6 +558,7 @@ function looseRow(ctx, t) {
     else ctx.attach(t.id);
     ctx.closeDrawerIfNarrow();
   };
+  bindTerminalMenu(ctx, item, t.id);
   return item;
 }
 
