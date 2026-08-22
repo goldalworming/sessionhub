@@ -218,6 +218,111 @@ pub fn install(bytes: &[u8], daemon: &str) -> Result<WebVersion, String> {
     Ok(version)
 }
 
+/// What bundling the modules cost and saved, for the release log.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Bundled {
+    pub modules: usize,
+    pub before: usize,
+    pub after: usize,
+}
+
+/// Squash the frontend's ES modules into one `app.js`, with bun.
+///
+/// First load fetches every module separately — twenty-one round trips before
+/// the page can draw, which over a phone tunnel is the slowest thing the app
+/// does. They hold each other's imports, so nothing but a bundler can collapse
+/// them.
+///
+/// Deliberately narrow. `app.css` stays its own file, `vendor/` is not in a
+/// bundle at all — xterm and Monaco are cached for a year and have no business
+/// being re-sent with a CSS fix — and `index.html` is left alone, since it
+/// already points at `/app.js` and nothing else.
+///
+/// This runs when a release is packed, not when the project is built. `cargo
+/// build` still needs only Rust, a debug build still serves `web/` straight
+/// from disk, and editing a module still shows up on reload with no watcher
+/// running. bun is a tool for whoever cuts the release, not a dependency of the
+/// program.
+pub fn bundle_modules(files: &mut BTreeMap<String, Vec<u8>>) -> Result<Bundled, String> {
+    let modules: Vec<String> =
+        files.keys().filter(|n| n.ends_with(".js")).map(|n| n.to_string()).collect();
+    if !modules.iter().any(|n| n == "app.js") {
+        return Err("there is no app.js to bundle from".into());
+    }
+    let before: usize = modules.iter().map(|n| files[n].len()).sum();
+
+    let bun = find_bun()
+        .ok_or("bun is not on PATH, and it is what bundles the frontend. \
+                Install it from https://bun.sh, or pass --raw to pack the modules unbundled.")?;
+
+    // Bundled from the bytes passed in — which come from the binary, not from
+    // `web/` on disk — so the bundle is built out of exactly what this build
+    // would have served. Writing them out is the only way to hand a bundler a
+    // module graph.
+    let dir = std::env::temp_dir().join(format!("sessionhub-webpack-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).map_err(|e| format!("could not create {dir:?}: {e}"))?;
+    let run = build_with_bun(&bun, &dir, &modules, files);
+    let _ = std::fs::remove_dir_all(&dir);
+    let out = run?;
+
+    for name in &modules {
+        files.remove(name);
+    }
+    let after = out.len();
+    files.insert("app.js".to_string(), out);
+    Ok(Bundled { modules: modules.len(), before, after })
+}
+
+/// Find bun, preferring a form Windows can actually start.
+///
+/// npm installs three files side by side: `bun.cmd`, `bun.ps1`, and an
+/// extensionless `bun` that is a shell script. The bare name matches that last
+/// one first, and CreateProcess answers a shell script with "not a valid Win32
+/// application". So the executable forms are asked for by name.
+fn find_bun() -> Option<PathBuf> {
+    let names: &[&str] = if cfg!(windows) { &["bun.exe", "bun.cmd", "bun"] } else { &["bun"] };
+    names.iter().find_map(|n| crate::pty::resolve_command(n))
+}
+
+/// The part that touches the disk and the subprocess, split out so the
+/// temporary directory is removed whether or not any of it worked.
+fn build_with_bun(
+    bun: &std::path::Path,
+    dir: &std::path::Path,
+    modules: &[String],
+    files: &BTreeMap<String, Vec<u8>>,
+) -> Result<Vec<u8>, String> {
+    for name in modules {
+        // Names are already checked to be plain relative files, so joining is
+        // safe here in the same way it is at install time.
+        check_name(name)?;
+        std::fs::write(dir.join(name), &files[name])
+            .map_err(|e| format!("could not stage {name}: {e}"))?;
+    }
+    let out = dir.join("bundle.js");
+    let done = crate::pty::quiet_command(bun)
+        .current_dir(dir)
+        .args(["build", "app.js", "--target=browser", "--minify", "--outfile"])
+        .arg(&out)
+        .output()
+        .map_err(|e| format!("could not run {}: {e}", bun.display()))?;
+    if !done.status.success() {
+        let why = String::from_utf8_lossy(&done.stderr);
+        let why = why.trim();
+        return Err(if why.is_empty() {
+            format!("bun could not bundle the frontend ({})", done.status)
+        } else {
+            format!("bun could not bundle the frontend:\n{why}")
+        });
+    }
+    let bytes = std::fs::read(&out).map_err(|e| format!("bun wrote no bundle: {e}"))?;
+    if bytes.is_empty() {
+        return Err("bun wrote an empty bundle".into());
+    }
+    Ok(bytes)
+}
+
 /// Undo an install: go back to whatever is baked into the binary.
 pub fn remove_installed() -> Result<(), String> {
     let dir = installed_dir();
@@ -330,6 +435,49 @@ mod tests {
         let err = install(&pack(&files), "0.0.4").unwrap_err();
         assert!(err.contains("9.9.9"), "{err}");
         assert!(err.contains("Update sessionhub itself first"), "{err}");
+    }
+
+    #[test]
+    fn bundling_without_an_entry_point_is_refused() {
+        // A frontend with no app.js is not one this can squash: there is no
+        // graph to start from, and picking some other module would be a guess.
+        let mut files = BTreeMap::from([
+            ("conn.js".to_string(), b"export const x = 1;".to_vec()),
+            ("version.json".to_string(), br#"{"version":"1.0.0","needs_daemon":"0.0.4"}"#.to_vec()),
+        ]);
+        assert!(bundle_modules(&mut files).unwrap_err().contains("app.js"));
+    }
+
+    #[test]
+    fn bundling_leaves_one_module_and_keeps_everything_else() {
+        // Needs bun, which is a release-time tool and not on every machine. The
+        // rest of the suite must still pass without it, so this one stands aside
+        // rather than failing.
+        if find_bun().is_none() {
+            eprintln!("skipped: bun is not installed");
+            return;
+        }
+        let mut files = BTreeMap::from([
+            ("app.js".to_string(), b"import { hi } from './greet.js';
+document.title = hi();
+".to_vec()),
+            ("greet.js".to_string(), b"export const hi = () => 'hello';
+".to_vec()),
+            ("app.css".to_string(), b"body { color: red }".to_vec()),
+            ("version.json".to_string(), br#"{"version":"1.0.0","needs_daemon":"0.0.4"}"#.to_vec()),
+        ]);
+        let got = bundle_modules(&mut files).unwrap();
+
+        assert_eq!(got.modules, 2, "both modules went in");
+        assert_eq!(files.len(), 3, "and one came out: {:?}", files.keys());
+        assert!(!files.contains_key("greet.js"), "the imported module is gone from the set");
+        // What it imported has to have come with it, or the page loads nothing.
+        let bundled = String::from_utf8(files["app.js"].clone()).unwrap();
+        assert!(bundled.contains("hello"), "{bundled}");
+        assert!(!bundled.contains("./greet.js"), "nothing left to fetch: {bundled}");
+        // Only the modules are touched.
+        assert_eq!(files["app.css"], b"body { color: red }");
+        assert!(files.contains_key("version.json"));
     }
 
     #[test]

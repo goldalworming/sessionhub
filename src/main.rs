@@ -103,7 +103,7 @@ fn print_help() {
          sessionhubd status                 port, live terminal count, uptime\n\
          sessionhubd token rotate           replace the token; the old one stops working\n\
          sessionhubd tunnel                 expose it externally through cloudflared\n\
-         sessionhubd bundle-web FILE        pack the frontend for a release\n\
+         sessionhubd bundle-web FILE [--raw]  pack the frontend for a release\n\
          sessionhubd revert-web             drop an installed interface, back to the built-in\n\
          sessionhubd install [--account NAME --password SECRET]\n\
          sessionhubd uninstall\n\
@@ -367,13 +367,18 @@ fn cmd_token_rotate() -> ExitCode {
 /// different tree than the bundle is the one mistake this whole scheme must not
 /// make quietly.
 fn cmd_bundle_web(argv: &[String]) -> ExitCode {
-    let Some(out) = argv.get(1) else {
-        eprintln!("Usage: sessionhubd bundle-web FILE");
+    // `--raw` skips the bundler. It exists so this command still works on a
+    // machine without bun — packing a slower frontend is worth more than
+    // refusing to cut a release at all — and so a bundling bug can be stepped
+    // around without unpicking anything.
+    let raw = argv.iter().any(|a| a == "--raw");
+    let Some(out) = argv.iter().skip(1).find(|a| !a.starts_with("--")) else {
+        eprintln!("Usage: sessionhubd bundle-web FILE [--raw]");
         return ExitCode::from(2);
     };
-    let files = http::embedded_app_files();
+    let mut files = http::embedded_app_files();
     let version = match files.get("version.json") {
-        Some(raw) => match webpack::parse_version(raw) {
+        Some(json) => match webpack::parse_version(json) {
             Ok(v) => v,
             Err(e) => {
                 eprintln!("web/version.json is not usable: {e}");
@@ -383,6 +388,18 @@ fn cmd_bundle_web(argv: &[String]) -> ExitCode {
         None => {
             eprintln!("web/version.json is missing — the bundle needs it to declare its version.");
             return ExitCode::FAILURE;
+        }
+    };
+    let squashed = if raw {
+        println!("--raw: packing {} files unbundled", files.len());
+        None
+    } else {
+        match webpack::bundle_modules(&mut files) {
+            Ok(b) => Some(b),
+            Err(e) => {
+                eprintln!("{e}");
+                return ExitCode::FAILURE;
+            }
         }
     };
     let bytes = webpack::pack(&files);
@@ -399,6 +416,14 @@ fn cmd_bundle_web(argv: &[String]) -> ExitCode {
     println!("frontend {} packed into {out}", version.version);
     println!("  files  : {}", files.len());
     println!("  size   : {:.0} KB", bytes.len() as f64 / 1024.0);
+    if let Some(b) = squashed {
+        println!(
+            "  modules: {} squashed into app.js, {:.0} KB → {:.0} KB",
+            b.modules,
+            b.before as f64 / 1024.0,
+            b.after as f64 / 1024.0
+        );
+    }
     println!("  needs  : sessionhub {} or newer", version.needs_daemon);
     ExitCode::SUCCESS
 }

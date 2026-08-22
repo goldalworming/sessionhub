@@ -1769,6 +1769,7 @@ const settings = new Settings(
   (name) => {
     const active = terms.get(activeId);
     const size = (active && proposed(active)) || { cols: 100, rows: 30 };
+    showNextAttach = true;
     conn.send({ t: 'update_agent_cli', name, cols: size.cols, rows: size.rows });
     settings.close();
   },
@@ -2102,6 +2103,19 @@ conn.on.onStatus = (kind, m) => {
 
 let pendingReattach = false;
 
+/// Show the next terminal the daemon opens for us, rather than only tabbing it.
+///
+/// `onAttached` deliberately moves nobody: it fires for every terminal being
+/// reattached after a reconnect too, and being thrown at whichever one answered
+/// first is worse than staying put. But a terminal that exists only because the
+/// user asked for it has to be the one on screen — the agent updater closes the
+/// settings panel to make room for it, and landing back on the terminal that was
+/// already there makes the click look like it did nothing at all.
+///
+/// One shot, and only for a terminal this page did not already have, so a
+/// reconnect that races the request cannot consume it.
+let showNextAttach = false;
+
 function reattachAll() {
   const alive = new Set(state.terminals.filter((t) => t.alive).map((t) => t.id));
   for (const id of [...terms.keys()]) {
@@ -2198,10 +2212,12 @@ function revealNewProject() {
 
 conn.on.onAttached = (msg, m) => {
   if (m !== current) return;
+  const asked = showNextAttach && !terms.has(msg.id);
+  if (asked) showNextAttach = false;
   const entry = terms.get(msg.id) || makeTerminal(msg.id);
   entry.awaitingReplay = false;
   entry.term.resize(msg.cols, msg.rows);
-  if (activeId === null || activeId === msg.id) show(msg.id);
+  if (asked || activeId === null || activeId === msg.id) show(msg.id);
   else renderTabs();
 };
 
@@ -2242,6 +2258,9 @@ conn.on.onExit = (msg, m) => {
 };
 
 conn.on.onError = (msg, m) => {
+  // Whatever was going to open did not. Leaving the claim standing would give it
+  // to the next terminal opened for any reason at all.
+  showNextAttach = false;
   if (msg.code === 'pair_failed' || msg.code === 'unknown_remote') {
     machineBar.failed(msg.message);
     if (!machineBar.open) banner(msg.message, true);

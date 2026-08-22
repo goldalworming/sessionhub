@@ -65,6 +65,7 @@ As I found them in **August 2026**. All three projects move fast, so file an iss
 - Busy/finished colours, a finish chime, and a notice saying which terminal on which machine — click it to go there
 - RAM per terminal, whole process tree
 - Self-update from Settings
+- Installs as an app — its own window, no tab strip, no address bar, nothing compiled
 - Search across projects, session titles and parent folders
 - One binary — no npm, no build step
 
@@ -91,6 +92,13 @@ cargo build --release
 
 The result is a single file, `target/release/sessionhubd.exe`. The `web/` folder is
 embedded inside it, so there are no companion files to carry around.
+
+One thing does want a tool: `sessionhubd bundle-web FILE`, which packs the frontend
+for a release, uses [bun](https://bun.sh) to squash the twenty-one ES modules into a
+single `app.js` — 261 KB and twenty-one round trips on first load become 114 KB and
+one. That is a release-time step, not a build-time one; `cargo build` still needs
+nothing but Rust, a debug build still serves `web/` straight off disk, and
+`bundle-web --raw` packs the modules unbundled on a machine without bun.
 
 ## Run
 
@@ -124,6 +132,31 @@ Run `sessionhubd restart --force` to go ahead anyway.
 Close the launching terminal whenever you like. The daemon does not die with it. That is the whole reason this project exists.
 
 For development, `sessionhubd start --foreground` keeps the process in the terminal, so its log is visible right away.
+
+## Its own window
+
+**⋮ → Install page as app** in Chrome or Edge — or the install icon that appears
+in the address bar. You get a window with no tab strip and no address bar, an
+entry in the Start menu, its own icon, and a window whose size and position are
+remembered.
+
+Nothing is compiled to get it. [Pake](https://github.com/tw93/pake) builds a
+small native shell around each site, which gives a lovely 5 MB app — and a
+toolchain, a build, and a separate binary for every URL you want a window for.
+A [web app manifest](web/manifest.json) asks the browser for the same window
+using the mechanism it has shipped for years, and costs one JSON file and four
+icons — 70 KB, against Pake's 5 MB per site.
+
+One detail that is easy to get wrong here: a manifest is fetched with
+credentials **omitted** by default, and every file this daemon serves needs the
+token cookie. Without `crossorigin="use-credentials"` on the `<link>`, that
+fetch is a 401 and no browser offers to install anything.
+
+On a phone, **Share → Add to Home Screen** does the same job; on iOS that is the
+whole mechanism, since Safari has no install prompt.
+
+Firefox is the exception: it removed site-specific browsers in 2021, and its
+desktop builds cannot install a web app at all. Firefox on Android can.
 
 ## Coming back after a reboot
 

@@ -737,6 +737,36 @@ fn served_asset(rel: &str) -> Option<Vec<u8>> {
     Web::get(rel).map(|f| f.data.to_vec())
 }
 
+/// The app files the page is built out of, sorted, `vendor/` left out.
+///
+/// An installed frontend answers for itself: `install()` replaces its folder
+/// whole, so what is not in there is not part of it. That matters once the
+/// modules are shipped bundled — the binary still carries the twenty
+/// unbundled ones, and listing them in an import map the bundle never imports
+/// would put a kilobyte of dead names in the one file that is never cached.
+/// A file only the binary has still gets served; it just goes unstamped, which
+/// costs a revalidation rather than breaking anything.
+fn app_file_names() -> Vec<String> {
+    let mut names: Vec<String> = if matches!(crate::webpack::installed(), Ok(Some(_))) {
+        std::fs::read_dir(crate::webpack::installed_dir())
+            .map(|entries| {
+                entries
+                    .flatten()
+                    .filter(|e| e.path().is_file())
+                    .map(|e| e.file_name().to_string_lossy().into_owned())
+                    .collect()
+            })
+            .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+    if names.is_empty() {
+        names = Web::iter().filter(|n| !n.starts_with("vendor/")).map(|n| n.to_string()).collect();
+    }
+    names.sort();
+    names
+}
+
 /// Stamp `?v=` onto every app asset the page references.
 ///
 /// Two mechanisms, because assets are reached two ways:
@@ -749,8 +779,7 @@ fn served_asset(rel: &str) -> Option<Vec<u8>> {
 fn stamp_index(html: &str, version: &str) -> String {
     let mut out = html.to_string();
     let mut imports: Vec<String> = Vec::new();
-    let mut names: Vec<_> = Web::iter().filter(|n| !n.starts_with("vendor/")).collect();
-    names.sort();
+    let names = app_file_names();
     for name in &names {
         if name.ends_with(".js") {
             imports.push(format!("\"/{name}\": \"/{name}?v={version}\""));
