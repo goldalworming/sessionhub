@@ -248,13 +248,19 @@ export class Picker {
     this.on.menu(
       r.left,
       r.bottom + 4,
-      agents.map((a) => ({
-        label: `New ${a.name}`,
-        run: () => {
+      agents.flatMap((a) => {
+        const start = (pick) => () => {
           this.note.textContent = `Starting ${a.name}…`;
-          this.on.openWith(path, a.name, is_project);
-        },
-      })),
+          this.on.openWith(path, a.name, is_project, pick);
+        };
+        const rows = [{ label: `New ${a.name}`, run: start(false) }];
+        // An agent that can show its own session list says so; the rest cannot
+        // be asked.
+        if (a.can_pick) {
+          rows.push({ label: `Resume ${a.name}…`, run: start(true) });
+        }
+        return rows;
+      }),
     );
   }
 

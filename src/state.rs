@@ -133,7 +133,7 @@ pub fn run(cfg: Config, rx: Receiver<Cmd>, tx: Sender<Cmd>, registry_cfg: Sender
     // the shell first speaks, not when somebody looks — see `Cmd::Pty`.
     for saved in cfg.saved.clone().iter().filter(|s| s.autostart) {
         match spawn_terminal(
-            &cfg, next_term, next_run, &saved.project, &saved.agent, None, 80, 24, &tx,
+            &cfg, next_term, next_run, &saved.project, &saved.agent, None, false, 80, 24, &tx,
         ) {
             Ok(mut term) => {
                 let tid = term.id;
@@ -182,10 +182,11 @@ pub fn run(cfg: Config, rx: Receiver<Cmd>, tx: Sender<Cmd>, registry_cfg: Sender
             Cmd::ClientMsg { id, msg } => match msg {
                 ClientMsg::List => send_state(&cfg, &projects, &agent_names, scanned, &clients, &terminals, Some(id)),
 
-                ClientMsg::Spawn { project, agent, resume, cols, rows } => {
+                ClientMsg::Spawn { project, agent, resume, pick, cols, rows } => {
                     let (cols, rows) = sane_size(cols, rows);
-                    match spawn_terminal(&cfg, next_term, next_run, &project, &agent, resume, cols, rows, &tx)
-                    {
+                    match spawn_terminal(
+                        &cfg, next_term, next_run, &project, &agent, resume, pick, cols, rows, &tx,
+                    ) {
                         Ok(mut term) => {
                             let tid = term.id;
                             term.viewers.insert(id, (cols, rows));
@@ -348,6 +349,7 @@ pub fn run(cfg: Config, rx: Receiver<Cmd>, tx: Sender<Cmd>, registry_cfg: Sender
                                 is_terminal: a.resume_args.is_empty(),
                                 fork_args: a.fork_args.unwrap_or_default(),
                                 update_args: a.update_args.unwrap_or_default(),
+                                picker_args: a.picker_args.unwrap_or_default(),
                                 // Asked here, on the thread that already resolves
                                 // each command on PATH, because it costs a process
                                 // spawn and the actor must not wait for it.
@@ -449,6 +451,9 @@ pub fn run(cfg: Config, rx: Receiver<Cmd>, tx: Sender<Cmd>, registry_cfg: Sender
                             // somebody's toolchain is worse than offering no
                             // update button at all.
                             update_args: Some(Vec::new()),
+                            // And the same again for a picker: an agent added
+                            // by hand is not known to have one.
+                            picker_args: Some(Vec::new()),
                         }
                     });
                     entry.command = command;
@@ -1064,7 +1069,9 @@ pub fn run(cfg: Config, rx: Receiver<Cmd>, tx: Sender<Cmd>, registry_cfg: Sender
                             .map(|s| crate::typed::runnable(std::path::Path::new(&s.project), &s.command))
                     });
 
-                    match spawn_terminal(&cfg, tid, next_run, &project, &agent, session, cols, rows, &tx) {
+                    match spawn_terminal(
+                        &cfg, tid, next_run, &project, &agent, session, false, cols, rows, &tx,
+                    ) {
                         Ok(mut fresh) => {
                             // Everything that made this tab itself is carried
                             // over; only the process is new.
@@ -1411,7 +1418,8 @@ pub fn run(cfg: Config, rx: Receiver<Cmd>, tx: Sender<Cmd>, registry_cfg: Sender
                     }
 
                     match spawn_terminal(
-                        &cfg, next_term, next_run, &saved.project, &saved.agent, None, cols, rows, &tx,
+                        &cfg, next_term, next_run, &saved.project, &saved.agent, None, false,
+                        cols, rows, &tx,
                     ) {
                         Ok(mut term) => {
                             let tid = term.id;
@@ -1632,6 +1640,7 @@ fn spawn_terminal(
     project: &str,
     agent: &str,
     resume: Option<String>,
+    pick: bool,
     cols: u16,
     rows: u16,
     tx: &Sender<Cmd>,
@@ -1646,12 +1655,25 @@ fn spawn_terminal(
         ));
     }
 
+    // A client that asks for a picker an agent does not have would otherwise
+    // get a brand new session and no hint that it misheard.
+    if pick && resume.is_none() && !agent_cfg.can_pick() {
+        return Err((
+            "no_picker".to_string(),
+            format!("Agent `{agent}` has no session picker. Set `picker_args` for it in config.toml."),
+        ));
+    }
+
     let args: Vec<String> = match &resume {
         Some(sid) => agent_cfg
             .resume_args
             .iter()
             .map(|a| a.replace("{session_id}", sid))
             .collect(),
+        // Nothing to substitute: the agent is being asked to show its own list.
+        // Whichever session it then opens is recognised the same way a brand new
+        // one is — the registry adopts it as soon as the agent writes to it.
+        None if pick => agent_cfg.picker_args.clone().unwrap_or_default(),
         None => Vec::new(),
     };
 
@@ -1804,6 +1826,7 @@ fn enabled_agents(cfg: &Config) -> Vec<AgentBrief> {
         .map(|(name, a)| AgentBrief {
             name: name.clone(),
             can_fork: a.can_fork(),
+            can_pick: a.can_pick(),
             fork_takes_name: a.fork_takes_name(),
         })
         .collect()

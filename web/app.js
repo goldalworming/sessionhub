@@ -709,13 +709,25 @@ async function forkSession(project, session) {
   closeDrawerIfNarrow();
 }
 
-function spawn(project, agent, resume) {
+/// `pick` asks the agent to show its own session list instead of starting a new
+/// conversation — `claude --resume` with nothing after it. Which session it then
+/// opens is not known here; the daemon recognises it once the agent writes to
+/// it, the same way it does for a session started fresh.
+function spawn(project, agent, resume, pick = false) {
   const probe = { fit: null };
   // The starting size is taken from the terminal on show, or from the stage size
   // when there is not one yet.
   const active = terms.get(activeId);
   const size = (active && proposed(active)) || { cols: 100, rows: 30 };
-  conn.send({ t: 'spawn', project, agent, resume: resume || null, cols: size.cols, rows: size.rows });
+  conn.send({
+    t: 'spawn',
+    project,
+    agent,
+    resume: resume || null,
+    pick,
+    cols: size.cols,
+    rows: size.rows,
+  });
   // On a narrow screen the sidebar is a drawer covering the stage: opening a
   // terminal and leaving it open means the terminal is not visible.
   closeDrawerIfNarrow();
@@ -2028,12 +2040,12 @@ const picker = new Picker(document.body, {
   // Adding the project is bookkeeping that comes along — through the same
   // `add_project` path as the add-only button, so the reveal-in-sidebar and
   // the error handling that path already has keep working.
-  openWith: (path, agent, isProject) => {
+  openWith: (path, agent, isProject, pick) => {
     if (!isProject) {
       awaitingProject = path;
       conn.send({ t: 'add_project', path });
     }
-    spawn(path, agent, null);
+    spawn(path, agent, null, pick);
     picker.close();
   },
 });

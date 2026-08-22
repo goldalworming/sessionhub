@@ -349,10 +349,16 @@ function projectNode(ctx, entry, liveSession, searching) {
     ctx.openMenu(
       r.left,
       r.bottom + 2,
-      ctx.state.agents.map((a) => ({
-        label: `New ${a.name}`,
-        run: () => ctx.spawn(p.path, a.name, null),
-      })),
+      ctx.state.agents.flatMap((a) => [
+        { label: `New ${a.name}`, run: () => ctx.spawn(p.path, a.name, null) },
+        // Only for agents that can show a list of their own. The rows below
+        // resume a session you already picked out; this hands the choosing to
+        // the agent, which is what you want when its own list is easier to
+        // recognise a conversation in than a title and a date.
+        ...(a.can_pick
+          ? [{ label: `Resume ${a.name}…`, run: () => ctx.spawn(p.path, a.name, null, true) }]
+          : []),
+      ]),
     );
   };
   row.appendChild(add);

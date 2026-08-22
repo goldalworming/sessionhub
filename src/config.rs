@@ -204,11 +204,27 @@ pub struct Agent {
     /// is offered.
     #[serde(default)]
     pub update_args: Option<Vec<String>>,
+    /// Arguments that resume without naming a session — `claude --resume` with
+    /// no id, which opens the agent's own picker inside the terminal.
+    ///
+    /// The sidebar already resumes a session you point at. This is for the
+    /// other way round: letting the agent ask, which is what you want when the
+    /// session you are after is easier to recognise in its own list.
+    ///
+    /// `None` means never filled in, and is completed from the built-in list on
+    /// read. An empty list means nothing is offered.
+    #[serde(default)]
+    pub picker_args: Option<Vec<String>>,
 }
 
 impl Agent {
     pub fn can_fork(&self) -> bool {
         self.fork_args.as_ref().is_some_and(|a| !a.is_empty())
+    }
+
+    /// Whether this agent can open a session picker of its own.
+    pub fn can_pick(&self) -> bool {
+        self.picker_args.as_ref().is_some_and(|a| !a.is_empty())
     }
 
     /// Some agents can fork but take no session name from the CLI — opencode is
@@ -226,6 +242,20 @@ impl Agent {
 ///   claude   `--fork-session` makes a new session id on resume, `--name`
 ///            sets the display name.
 ///   opencode `--fork` continues as a new session; there is no name flag.
+/// How each agent opens its own session picker, verified against its `--help`:
+///   claude  `-r, --resume [value]` — "Resume a conversation by session ID, or
+///           open interactive picker with optional search term". With no value
+///           it is the picker.
+/// Left empty for the rest. opencode and pi are not installed on either machine
+/// this was written on, and a guessed flag that turns out wrong does not fail
+/// quietly — it starts the agent with an argument it will complain about.
+fn known_picker_args(name: &str) -> Vec<String> {
+    match name {
+        "claude" => vec!["--resume".into()],
+        _ => Vec::new(),
+    }
+}
+
 /// How each agent updates itself, verified against its own `--help` on this
 /// machine:
 ///   claude    `claude update` — "check for updates and install if available"
@@ -394,6 +424,7 @@ fn default_agents() -> BTreeMap<String, Agent> {
             enabled: true,
             fork_args: None,
             update_args: None,
+            picker_args: None,
         },
     );
     m.insert(
@@ -405,6 +436,7 @@ fn default_agents() -> BTreeMap<String, Agent> {
             enabled: true,
             fork_args: None,
             update_args: None,
+            picker_args: None,
         },
     );
     m.insert(
@@ -416,6 +448,7 @@ fn default_agents() -> BTreeMap<String, Agent> {
             enabled: true,
             fork_args: None,
             update_args: None,
+            picker_args: None,
         },
     );
     m
@@ -509,6 +542,7 @@ pub fn load_or_create() -> io::Result<Config> {
                 enabled: true,
                 fork_args: None,
                 update_args: None,
+                picker_args: None,
             },
         );
     }
@@ -524,6 +558,10 @@ pub fn load_or_create() -> io::Result<Config> {
         }
         if agent.update_args.is_none() {
             agent.update_args = Some(known_update_args(name));
+            filled_fork = true;
+        }
+        if agent.picker_args.is_none() {
+            agent.picker_args = Some(known_picker_args(name));
             filled_fork = true;
         }
     }
@@ -661,6 +699,7 @@ mod tests {
             enabled: true,
             fork_args: None,
             update_args: None,
+            picker_args: None,
         };
         assert!(a.resume_args.is_empty());
     }
@@ -714,6 +753,7 @@ mod tests {
             enabled: true,
             fork_args: None,
             update_args: None,
+            picker_args: None,
         };
         assert!(!a.can_fork(), "belum diisi berarti belum diketahui");
 

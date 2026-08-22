@@ -12,6 +12,10 @@ pub enum ClientMsg {
         agent: String,
         #[serde(default)]
         resume: Option<String>,
+        /// Start the agent's own session picker instead: no session named here,
+        /// the agent asks. Ignored when `resume` says which one.
+        #[serde(default)]
+        pick: bool,
         cols: u16,
         rows: u16,
     },
@@ -438,6 +442,9 @@ pub struct AgentInfo {
     /// `true` for agents with no stored sessions (a plain shell).
     pub is_terminal: bool,
     pub fork_args: Vec<String>,
+    /// Arguments that open this agent's own session picker; empty when it has
+    /// none, and then no entry is offered.
+    pub picker_args: Vec<String>,
     /// Arguments that make this agent update itself; empty when it has none, and
     /// then no button is offered.
     pub update_args: Vec<String>,
@@ -465,6 +472,9 @@ pub struct MemInfo {
 pub struct AgentBrief {
     pub name: String,
     pub can_fork: bool,
+    /// Whether this agent can be asked to show a session list of its own, which
+    /// is what the "Resume" entry beside "New" starts.
+    pub can_pick: bool,
     /// `false` for agents that can fork but take no session name from the CLI —
     /// the dialog has to say so rather than promise a name that ends up ignored.
     pub fork_takes_name: bool,
@@ -614,10 +624,11 @@ mod tests {
         )
         .unwrap();
         match m {
-            ClientMsg::Spawn { project, agent, resume, cols, rows } => {
+            ClientMsg::Spawn { project, agent, resume, pick, cols, rows } => {
                 assert_eq!(project, "C:\\data\\code\\notex");
                 assert_eq!(agent, "claude");
                 assert_eq!(resume, None);
+                assert!(!pick, "a message without the field asks for a new session");
                 assert_eq!((cols, rows), (120, 32));
             }
             other => panic!("salah varian: {other:?}"),
