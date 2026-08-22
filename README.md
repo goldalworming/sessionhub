@@ -93,6 +93,13 @@ cargo build --release
 The result is a single file, `target/release/sessionhubd.exe`. The `web/` folder is
 embedded inside it, so there are no companion files to carry around.
 
+`build.rs` puts the logo into that file as a Windows icon resource, read from
+`assets/sessionhub.ico` — the only place Explorer looks, and a PNG in `web/` is
+invisible to it. It needs no resource compiler and no crate, and a missing
+`.ico` costs a warning rather than a build. `assets/make-icons.py` rebuilds that
+`.ico` and the matching `.icns` from `web/icon-512.webp` when the artwork
+changes; `cargo build` never runs it.
+
 One thing does want a tool: `sessionhubd bundle-web FILE`, which packs the frontend
 for a release, uses [bun](https://bun.sh) to squash the twenty-one ES modules into a
 single `app.js` — 261 KB and twenty-one round trips on first load become 114 KB and

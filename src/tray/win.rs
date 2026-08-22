@@ -36,9 +36,9 @@ const ID_STOP: usize = 4;
 const ID_START: usize = 5;
 const ID_HIDE: usize = 6;
 
-/// 16x16, drawn here rather than shipped as a file: this binary carries no
-/// resources and has no build step, and one glyph is not worth starting
-/// one. `#` is the tile, `*` the prompt, `.` is transparent.
+/// 16x16, drawn here rather than taken from the icon the exe now carries.
+/// See the palette below for why. `#` is the tile, `*` the prompt, `.` is
+/// transparent.
 const GLYPH: [&str; 16] = [
     "..############..",
     ".##############.",
@@ -58,10 +58,15 @@ const GLYPH: [&str; 16] = [
     "..############..",
 ];
 
-/// The app's own accent, so the icon reads as the same product as the page.
-const LIVE: [u8; 3] = [0x4C, 0x9A, 0x8A];
-const IDLE: [u8; 3] = [0x6E, 0x6E, 0x6E];
-const INK: [u8; 3] = [0xFF, 0xFF, 0xFF];
+/// The logo's own colours, sampled from `web/icon-512.webp`, so the tray reads
+/// as the same product as the icon now on the exe.
+///
+/// The logo itself is not used here. At 16 pixels the `sh` inside it is a
+/// smudge, and the one thing the tray has to say — running, or not — is said by
+/// the colour of the ink, which a fixed picture cannot say at all.
+const TILE: [u8; 3] = [0x0C, 0x0F, 0x19];
+const LIVE: [u8; 3] = [0x55, 0xDB, 0xF9];
+const IDLE: [u8; 3] = [0x6B, 0x72, 0x80];
 
 struct Tray {
     hwnd: HWND,
@@ -507,14 +512,14 @@ unsafe fn to_clipboard(hwnd: HWND, text: &str) -> bool {
 
 /// Paint [`GLYPH`] into an icon: a colour bitmap plus a 1-bit mask, where a
 /// set mask bit means "leave the desktop showing through here".
-unsafe fn make_icon(hinst: HINSTANCE, tile: [u8; 3]) -> HICON {
+unsafe fn make_icon(hinst: HINSTANCE, ink: [u8; 3]) -> HICON {
     let mut mask = [0u8; 16 * 2];
     let mut color = [0u8; 16 * 16 * 4];
     for (y, row) in GLYPH.iter().enumerate() {
         for (x, ch) in row.bytes().enumerate() {
             let paint = match ch {
-                b'#' => tile,
-                b'*' => INK,
+                b'#' => TILE,
+                b'*' => ink,
                 _ => {
                     mask[y * 2 + x / 8] |= 0x80 >> (x % 8);
                     continue;
