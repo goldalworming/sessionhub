@@ -14,7 +14,7 @@ import { MachineBar } from './machines.js';
 import { SidePanel } from './sidepanel.js';
 import { renderTree as renderSidebar } from './sidebar.js';
 import { KeyBar } from './keybar.js';
-import { attachTouchScroll, touchOnlyDevice } from './touchscroll.js';
+import { attachTouchScroll, hasFinePointer } from './touchscroll.js';
 import { attachScrollPad } from './scrollpad.js';
 import { unlock as unlockAudio, ding } from './chime.js';
 import { Toasts } from './toasts.js';
@@ -958,6 +958,12 @@ function paintTabs() {
 }
 
 function renderTabs() {
+  // Never while a tab is being dragged. This rebuilds every element in the
+  // strip, and the one under the cursor would go with them. The agents in these
+  // terminals touch their session files constantly, each touch a registry scan
+  // and a fresh state, so without this a drag rarely lives long enough to be
+  // dropped. `dragend` draws whatever was missed.
+  if (dragging !== null) return;
   el.tabs.textContent = '';
   // Tabs scroll inside their own strip; the buttons on the right stay put. In one
   // container the buttons would be pushed off screen as soon as there are many
@@ -1026,11 +1032,15 @@ function renderTabs() {
     tab.onclick = () => (terms.has(t.id) ? show(t.id) : attach(t.id));
     bindMenu(tab, () => terminalMenu(t, { ordering: true }));
 
-    // Dragging to reorder, with a mouse only. On a touch screen the strip
-    // scrolls sideways and a long press already belongs to this tab's menu, so
-    // a drag would be competing for both gestures at once; there, the menu
-    // carries "Move left" and "Move right" instead.
-    if (!touchOnlyDevice()) {
+    // Dragging to reorder, wherever there is something that can point. On a
+    // touch screen the strip scrolls sideways and a long press already belongs
+    // to this tab's menu, so a drag would be competing for both gestures at
+    // once; there, the menu carries "Move left" and "Move right" instead.
+    //
+    // The question is "is there a mouse" and not "is this a touch device": a
+    // laptop with a touchscreen answers the second one wrongly on some builds,
+    // and lost dragging while its trackpad sat right there.
+    if (hasFinePointer()) {
       tab.draggable = true;
       tab.addEventListener('dragstart', (e) => {
         dragging = t.id;
@@ -1042,6 +1052,8 @@ function renderTabs() {
       tab.addEventListener('dragend', () => {
         dragging = null;
         strip.querySelectorAll('.tab').forEach((n) => n.classList.remove('drag', 'over'));
+        // Whatever changed while the strip was held still.
+        renderTabs();
       });
       tab.addEventListener('dragover', (e) => {
         if (dragging === null || dragging === t.id) return;
@@ -1062,8 +1074,9 @@ function renderTabs() {
         const order = inTabOrder(visibleTerminals()).map((x) => x.id);
         const at = order.indexOf(t.id);
         const before = after ? (order[at + 1] ?? null) : t.id;
-        moveTabTo(dragging, before === dragging ? null : before);
+        const moved = dragging;
         dragging = null;
+        moveTabTo(moved, before === moved ? null : before);
       });
     }
 

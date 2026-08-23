@@ -80,6 +80,27 @@ export function touchOnlyDevice() {
   return window.matchMedia('(max-width: 820px)').matches;
 }
 
+/// Whether anything attached to this device can point precisely: a mouse, a
+/// trackpad, a stylus.
+///
+/// This is `any-pointer: fine` — the rule the comment above says was tried and
+/// taken back out. It was wrong there and is right here, because the two
+/// questions fail in opposite directions. For the key bar, a phone that once
+/// saw a Bluetooth mouse loses a control it needs. For dragging a tab, the
+/// worst a false "fine" does is mark an element draggable on a device where
+/// touch never starts a drag anyway — and the long press still opens the menu,
+/// which carries Move left and Move right for exactly that case.
+///
+/// What it fixes: a laptop with a touchscreen, whose browser calls the finger
+/// the primary pointer, had no way to drag a tab with the mouse sitting right
+/// there.
+export function hasFinePointer() {
+  if (window.matchMedia('(any-pointer: fine)').matches) return true;
+  if (window.matchMedia('(any-pointer: coarse)').matches) return false;
+  // A browser that understands neither falls back to the primary question.
+  return !touchOnlyDevice();
+}
+
 /// True while the program is reading the mouse. That is both the case xterm
 /// gives up on touch in, and the case where scrolling means asking the program
 /// rather than moving the terminal.
