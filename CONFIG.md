@@ -264,7 +264,7 @@ stamped URLs too.
 
 For a browser that cached the interface **before** this existed (it held old
 copies on heuristics and never asks again), there is a one-time way out. You do
-not need to know what a hard reload is. **⚙ Settings → Network → Refresh app**
+not need to know what a hard reload is. **⚙ Settings → Update → Update Layout**
 refetches every file past the cache and reloads.
 
 ## Many machines in one window

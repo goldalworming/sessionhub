@@ -385,10 +385,6 @@ export class Settings {
       this.onLan(cb.checked);
     };
 
-    // Before the early return below: this row must exist with LAN off too — a
-    // phone reaching this daemon through a tunnel never touched that switch.
-    pane.appendChild(this.refreshRow());
-
     if (!this.lanAccess) return pane;
 
     // The warning comes before the address: what is being shared is a shell, not
@@ -424,8 +420,11 @@ export class Settings {
     return pane;
   }
 
-  /// "Refresh the app": refetch every file this page runs on, past every cache,
+  /// "Update Layout": refetch every file this page runs on, past every cache,
   /// then reload.
+  ///
+  /// It lives on the Update pane, beside the version it is about, and not on
+  /// Network where it began — that was only ever where a phone could reach it.
   ///
   /// This exists because a browser that cached the interface BEFORE the daemon
   /// sent any Cache-Control header will keep that copy on heuristics and never
@@ -443,17 +442,17 @@ export class Settings {
 
     const label = document.createElement('span');
     label.className = 'usage';
-    label.textContent = 'Interface out of date? Fetch it again, past every cache.';
+    label.textContent = 'Fetch every file again, past every cache, and reload.';
     row.appendChild(label);
 
     const btn = document.createElement('button');
     btn.type = 'button';
     btn.id = 'refresh-app';
     btn.className = 'secbtn';
-    btn.textContent = 'Refresh app';
+    btn.textContent = 'Update Layout';
     btn.onclick = async () => {
       btn.disabled = true;
-      btn.textContent = 'Refreshing…';
+      btn.textContent = 'Updating…';
       const own = performance
         .getEntriesByType('resource')
         .map((r) => r.name)
@@ -467,7 +466,7 @@ export class Settings {
         // Offline, or the daemon is gone: reloading now would trade a stale
         // interface for none at all.
         btn.disabled = false;
-        btn.textContent = 'Refresh app';
+        btn.textContent = 'Update Layout';
         this.note.textContent = `Could not refetch ${failed} of ${own.length} files — is the connection up?`;
         return;
       }
@@ -564,6 +563,11 @@ export class Settings {
     };
     now.appendChild(check);
     pane.appendChild(now);
+
+    // Directly under the versions it concerns, and before every early return
+    // below: this is the one thing on this pane that works when the daemon has
+    // nothing to say.
+    pane.appendChild(this.refreshRow());
 
     if (!r) return pane;
 
