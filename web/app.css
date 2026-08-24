@@ -2300,9 +2300,12 @@ html, body {
 .ehead button:hover:not(:disabled) { color: var(--text); background: color-mix(in srgb, var(--text) 10%, transparent); }
 .ehead button:disabled { opacity: 0.4; cursor: default; }
 .ehead .esave.on { color: var(--text); border-color: var(--accent); }
-.ehead .etheme { font-size: 10px; min-width: 40px; }
-.ehead .etheme.on { border-color: var(--accent); }
+.ehead .etheme,
+.ehead .ewrap { font-size: 10px; min-width: 40px; }
+.ehead .etheme.on,
+.ehead .ewrap.on { border-color: var(--accent); }
 #editor.dark .ehead .esave.on,
+#editor.dark .ehead .ewrap.on,
 #editor.dark .ehead .etheme.on { color: #e8eaed; border-color: var(--accent); }
 
 .ebody { flex: 1 1 auto; min-height: 0; }

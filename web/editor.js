@@ -11,6 +11,10 @@
 import { languageFor } from './fileicons.js';
 
 const LS_THEME = 'sh.editor.theme';
+/// Kept in this browser rather than on the daemon: whether a long line should
+/// fold is a question about the window you are reading it in, and a phone and a
+/// laptop do not want the same answer.
+const LS_WRAP = 'sh.editor.wrap';
 /// Dark by default, kept apart from the app theme: code is read for long
 /// stretches, and that is a different preference from the rest of the interface.
 const THEMES = ['dark', 'light', 'auto'];
@@ -62,6 +66,7 @@ export class Editor {
     this.mode = THEMES.includes(localStorage.getItem(LS_THEME))
       ? localStorage.getItem(LS_THEME)
       : 'dark';
+    this.wrap = localStorage.getItem(LS_WRAP) === 'on';
 
     this.el = document.createElement('div');
     this.el.id = 'editor';
@@ -70,6 +75,7 @@ export class Editor {
       '<div class="ehead">' +
       '<span class="ecrumb"></span>' +
       '<span class="enote"></span>' +
+      '<button class="ewrap"></button>' +
       '<button class="etheme"></button>' +
       '<button class="esave" title="Save (Ctrl+S)">Save</button>' +
       '</div>' +
@@ -81,6 +87,7 @@ export class Editor {
     this.noteEl = this.el.querySelector('.enote');
     this.crumbEl = this.el.querySelector('.ecrumb');
     this.saveBtn = this.el.querySelector('.esave');
+    this.wrapBtn = this.el.querySelector('.ewrap');
     this.themeBtn = this.el.querySelector('.etheme');
     this.bodyEl = this.el.querySelector('.ebody');
     this.imgWrap = this.el.querySelector('.eimg');
@@ -108,7 +115,30 @@ export class Editor {
       localStorage.setItem(LS_THEME, this.mode);
       this.applyTheme();
     };
+    this.wrapBtn.onclick = () => {
+      this.wrap = !this.wrap;
+      localStorage.setItem(LS_WRAP, this.wrap ? 'on' : 'off');
+      this.applyWrap();
+    };
     this.paintTheme();
+    this.paintWrap();
+  }
+
+  /// Fold long lines, or let them run off to the right.
+  ///
+  /// An editor option rather than a model one, so it holds for every file
+  /// opened afterwards without being set again on each.
+  applyWrap() {
+    this.paintWrap();
+    if (this.editor) this.editor.updateOptions({ wordWrap: this.wrap ? 'on' : 'off' });
+  }
+
+  paintWrap() {
+    this.wrapBtn.textContent = 'wrap';
+    this.wrapBtn.className = `ewrap${this.wrap ? ' on' : ''}`;
+    this.wrapBtn.title = this.wrap
+      ? 'Long lines are folded to the width of the panel. Click to let them run on.'
+      : 'Long lines run off to the right. Click to fold them into the panel.';
   }
 
   get open() {
@@ -269,6 +299,7 @@ export class Editor {
       fontFamily: getComputedStyle(document.documentElement).getPropertyValue('--mono').trim(),
       minimap: { enabled: false },
       scrollBeyondLastLine: false,
+      wordWrap: this.wrap ? 'on' : 'off',
       renderWhitespace: 'selection',
       // Without a language service, autocomplete only offers words already in
       // the file — a distraction that does not help.
@@ -356,6 +387,9 @@ export class Editor {
     if (this.dirty.has(this.key(this.current))) bits.push('unsaved');
     this.noteEl.textContent = bits.join(' · ');
     this.saveBtn.disabled = meta.truncated || meta.binary || meta.image;
+    // Nothing to fold in a picture, and the same for a binary that is only
+    // being described rather than shown.
+    this.wrapBtn.disabled = meta.binary || meta.image;
     this.saveBtn.classList.toggle('on', this.dirty.has(this.key(this.current)));
   }
 
