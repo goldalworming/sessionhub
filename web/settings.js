@@ -233,6 +233,10 @@ export class Settings {
     }
   }
 
+  /// The small badge beside a section's name. `null` when that section has
+  /// nothing worth saying — which is not the same as zero, and is why every
+  /// section is named here rather than left to a default: Update wore the count
+  /// of enabled agents for a while, purely because it fell through to the end.
   chipFor(key) {
     const chip = document.createElement('span');
     chip.className = 'schip';
@@ -259,6 +263,21 @@ export class Settings {
       chip.classList.add('bad');
       return chip;
     }
+    if (key === 'update') {
+      // Nothing until something has been checked. This pane does not ask on its
+      // own — each check is a call to GitHub — and a number invented before the
+      // answer is known would be a number about nothing.
+      const r = this.release;
+      if (!r) return null;
+      // `installable` as well as `newer`: a release with no build for this
+      // platform is not something anyone here can press, and a badge that
+      // counts it sends you to a pane that only explains why it cannot.
+      const waiting = (r.newer && r.installable ? 1 : 0) + (r.web_newer ? 1 : 0);
+      chip.textContent = waiting ? String(waiting) : 'ok';
+      chip.classList.add(waiting ? 'warn' : 'muted');
+      return chip;
+    }
+    if (key !== 'agents') return null;
     chip.textContent = String(this.agents.filter((a) => a.enabled).length);
     chip.classList.add('muted');
     return chip;
