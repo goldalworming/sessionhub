@@ -52,7 +52,7 @@ export class Settings {
   /// `onRemove(name)` deletes it. `onLan(enabled)` opens or closes network
   /// access. `onDrops(limits|null)` stores the drop folder limits; null = sweep
   /// now.
-  constructor(root, onSave, onLan, onDrops, onRemove, onForget, onUpdate, onUpdateAgent) {
+  constructor(root, onSave, onLan, onDrops, onRemove, onForget, onMoveRemote, onUpdate, onUpdateAgent) {
     /// `onUpdate('check'|'apply'|'apply_web')` asks the daemon to look for a
     /// release, to install it and restart into it, or to install only the
     /// interface — which costs no restart.
@@ -64,6 +64,7 @@ export class Settings {
     this.onDrops = onDrops;
     this.onRemove = onRemove;
     this.onForget = onForget || (() => {});
+    this.onMoveRemote = onMoveRemote || (() => {});
     this.agents = [];
     this.shells = [];
     this.configPath = '';
@@ -144,8 +145,13 @@ export class Settings {
   }
 
   /// The list of paired machines, from the local daemon.
-  setRemotes(list) {
+  ///
+  /// `canMove` is whether that daemon understands being told a new address. An
+  /// older one drops the message without answering, so the address is left as
+  /// plain text there rather than as a field that swallows what is typed.
+  setRemotes(list, canMove) {
     this.remotes = list || [];
+    this.canMove = canMove === true;
     if (this.open) this.paint();
   }
 
@@ -778,8 +784,12 @@ export class Settings {
       head.appendChild(name);
 
       const where = document.createElement('span');
-      where.className = 'awhere';
+      where.className = 'awhere' + (this.canMove ? ' editable' : '');
       setPath(where, r.version ? `${r.addr} · ${r.version}` : r.addr);
+      if (this.canMove) {
+        where.title = `Click to change where ${r.name} is. Its name and its token are kept.`;
+        where.onclick = () => this.moveRow(where, r);
+      }
       head.appendChild(where);
 
       const del = document.createElement('button');
@@ -806,6 +816,68 @@ export class Settings {
   }
 
   /// The same as removing an agent: two clicks, with no dialog covering things up.
+  /// Change where a machine is, in place.
+  ///
+  /// A machine whose address moved — a new DHCP lease, a different network — is
+  /// the same machine, and forgetting it to pair again throws away its name and
+  /// needs a fresh link fetched from the other side. Here its name and its token
+  /// stay put; only the address changes, and the daemon proves the new one
+  /// answers before it is written down.
+  moveRow(where, r) {
+    if (where.dataset.editing) return;
+    where.dataset.editing = '1';
+    where.textContent = '';
+
+    const input = document.createElement('input');
+    input.type = 'text';
+    input.className = 'amove';
+    input.value = r.addr;
+    input.spellcheck = false;
+    input.autocapitalize = 'off';
+    input.title = 'host:port — the port can be left off to keep the one it has';
+    where.appendChild(input);
+    input.focus();
+    input.select();
+
+    let sent = false;
+    const stop = () => {
+      // A repaint is coming either way; letting the blur that follows it undo
+      // the request would put the old address back on screen.
+      if (sent) return;
+      delete where.dataset.editing;
+      this.paint();
+    };
+    input.onkeydown = (e) => {
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        stop();
+        return;
+      }
+      if (e.key !== 'Enter') return;
+      e.preventDefault();
+      const addr = input.value.trim();
+      if (!addr || addr === r.addr) {
+        stop();
+        return;
+      }
+      sent = true;
+      input.disabled = true;
+      this.note.textContent = `Asking ${addr} whether it is ${r.name}…`;
+      this.onMoveRemote(r.name, addr);
+    };
+    input.onblur = stop;
+  }
+
+  /// The daemon refused the new address. The row is drawn again so it can be
+  /// tried once more, with what went wrong left on the line below.
+  moveFailed(message) {
+    // After the repaint, not before: `paint` writes its own line into the note
+    // and would wipe this one out.
+    if (this.open) this.paint();
+    this.note.textContent = message;
+    this.note.className = 'note bad';
+  }
+
   confirmForget(r, btn) {
     if (btn.dataset.armed) {
       this.note.textContent = 'Forgetting…';

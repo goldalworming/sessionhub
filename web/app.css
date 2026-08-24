@@ -1748,6 +1748,26 @@ html, body {
   text-align: left;
 }
 .awhere.bad { color: var(--bad); direction: ltr; }
+/* An address that can be changed says so on hover, and only there: a machine
+   list should read as a list, not as a row of fields. */
+.awhere.editable { cursor: text; direction: ltr; }
+.awhere.editable:hover { color: var(--text); text-decoration: underline dotted; }
+/* While it is being changed the row gives the field its whole width, so a long
+   address is not read through a keyhole. */
+.awhere:has(.amove) { direction: ltr; overflow: visible; }
+.amove {
+  width: 100%;
+  font: inherit;
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--text);
+  background: var(--bg);
+  border: 1px solid var(--accent);
+  border-radius: var(--radius);
+  padding: 2px 6px;
+  min-width: 0;
+}
+.amove:disabled { color: var(--muted); }
 .agent.off .aname { color: var(--muted); }
 
 .abody {

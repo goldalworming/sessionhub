@@ -824,6 +824,103 @@ pub fn run(cfg: Config, rx: Receiver<Cmd>, tx: Sender<Cmd>, registry_cfg: Sender
                     }
                 }
 
+                ClientMsg::SetRemoteAddr { name, addr } => {
+                    let Some(current) = crate::remote::find(&cfg.remotes, &name).cloned() else {
+                        send_to(
+                            &clients,
+                            id,
+                            json(&ServerMsg::Error {
+                                code: "unknown_remote".into(),
+                                message: format!("There is no paired machine called `{name}`."),
+                            }),
+                        );
+                        continue;
+                    };
+
+                    let wanted = match full_addr(addr.trim(), &current.addr) {
+                        Ok(a) => a,
+                        Err(message) => {
+                            send_to(
+                                &clients,
+                                id,
+                                json(&ServerMsg::Error { code: "bad_addr".into(), message }),
+                            );
+                            continue;
+                        }
+                    };
+                    if crate::remote::is_self(&wanted, cfg.port) {
+                        send_to(
+                            &clients,
+                            id,
+                            json(&ServerMsg::Error {
+                                code: "bad_addr".into(),
+                                message: format!("{wanted} is this machine."),
+                            }),
+                        );
+                        continue;
+                    }
+                    if let Some(other) = cfg.remotes.iter().find(|r| r.addr == wanted && r.name != name) {
+                        send_to(
+                            &clients,
+                            id,
+                            json(&ServerMsg::Error {
+                                code: "bad_addr".into(),
+                                message: format!("{wanted} is already paired, as `{}`.", other.name),
+                            }),
+                        );
+                        continue;
+                    }
+
+                    // Answered before it is stored, exactly as pairing does: an
+                    // address that does not know this token is not the machine
+                    // that was meant, and finding that out later means a tab
+                    // that fails to open with nothing to explain it. Off the
+                    // actor, because it calls another machine.
+                    let token = current.token.clone();
+                    let probing = wanted.clone();
+                    let (done, wait) = crossbeam_channel::bounded(1);
+                    std::thread::spawn(move || {
+                        let _ = done.send(crate::remote::probe(&probing, &token));
+                    });
+                    let outcome = wait
+                        .recv_timeout(std::time::Duration::from_secs(20))
+                        .unwrap_or_else(|_| Err("The other machine did not answer in time.".into()));
+
+                    let status = match outcome {
+                        Ok(s) => s,
+                        Err(message) => {
+                            // Its own code, not `pair_failed`: that one is
+                            // shown in the ＋ Connect box, and this was asked
+                            // for from the Settings panel.
+                            send_to(
+                                &clients,
+                                id,
+                                json(&ServerMsg::Error { code: "move_failed".into(), message }),
+                            );
+                            continue;
+                        }
+                    };
+
+                    if let Some(slot) = cfg.remotes.iter_mut().find(|r| r.name == name) {
+                        slot.addr = wanted.clone();
+                        slot.version = status.version;
+                    }
+                    if let Err(e) = crate::config::save(&cfg) {
+                        warn!(error = %e, "could not save config");
+                        send_to(
+                            &clients,
+                            id,
+                            json(&ServerMsg::Error {
+                                code: "config_write_failed".into(),
+                                message: format!("Could not write config.toml: {e}"),
+                            }),
+                        );
+                        continue;
+                    }
+                    info!(%name, from = %current.addr, to = %wanted, "a paired machine moved");
+                    send_to(&clients, id, json(&remotes_msg(&cfg)));
+                }
+
                 ClientMsg::Forget { name } => {
                     let before = cfg.remotes.len();
                     cfg.remotes.retain(|r| r.name != name);
@@ -1782,12 +1879,47 @@ fn remotes_msg(cfg: &Config) -> ServerMsg {
                 version: r.version.clone(),
             })
             .collect(),
+        can_move: true,
     }
 }
 
 /// Parse the link, prove the machine answers, and only then return an entry
 /// worth storing. Storing what is unproven only defers the failure until you
 /// actually need it.
+/// `host:port` from what someone typed, borrowing the port already in use when
+/// none was given — an address that moved usually moved only in front of the
+/// colon.
+fn full_addr(typed: &str, current: &str) -> Result<String, String> {
+    let typed = typed.trim().trim_start_matches("http://").trim_end_matches('/');
+    if typed.is_empty() {
+        return Err("An address is needed, like 192.168.0.101:7717.".into());
+    }
+    // A bracketed IPv6 literal carries colons of its own; only a `]:port` tail
+    // counts as a port there.
+    let has_port = match typed.rsplit_once(':') {
+        Some((host, port)) => {
+            !port.is_empty() && port.chars().all(|c| c.is_ascii_digit()) && !host.ends_with(':')
+        }
+        None => false,
+    };
+    let out = if has_port {
+        typed.to_string()
+    } else {
+        let port = current.rsplit_once(':').map(|(_, p)| p).unwrap_or("7717");
+        format!("{typed}:{port}")
+    };
+    let Some((host, port)) = out.rsplit_once(':') else {
+        return Err(format!("`{typed}` is not an address."));
+    };
+    if host.is_empty() {
+        return Err(format!("`{typed}` has no host in front of the port."));
+    }
+    if port.parse::<u16>().is_err() {
+        return Err(format!("`{port}` is not a port number."));
+    }
+    Ok(out)
+}
+
 fn pair_remote(
     link: &str,
     wanted: &str,
@@ -2253,6 +2385,32 @@ mod tests {
         for good in ["claude", "my-harness", "aider_v2", "gpt5"] {
             assert!(check_agent_name(good, true).is_ok(), "{good:?} seharusnya diterima");
         }
+    }
+
+    #[test]
+    fn an_address_that_moved_keeps_the_port_it_had() {
+        // What someone actually types when a DHCP lease moves: the host alone.
+        assert_eq!(full_addr("192.168.0.105", "192.168.0.101:7717").unwrap(), "192.168.0.105:7717");
+        assert_eq!(full_addr("mac.local", "192.168.0.101:7788").unwrap(), "mac.local:7788");
+        // And when a port is given, it wins.
+        assert_eq!(full_addr("192.168.0.105:9000", "1.2.3.4:7717").unwrap(), "192.168.0.105:9000");
+    }
+
+    #[test]
+    fn an_address_is_read_the_way_it_gets_pasted() {
+        assert_eq!(full_addr("  192.168.0.105:7717  ", "x:7717").unwrap(), "192.168.0.105:7717");
+        assert_eq!(full_addr("http://192.168.0.105:7717/", "x:7717").unwrap(), "192.168.0.105:7717");
+        // IPv6 carries colons of its own; only a `]:port` tail is a port.
+        assert_eq!(full_addr("[fe80::1]", "x:7717").unwrap(), "[fe80::1]:7717");
+        assert_eq!(full_addr("[fe80::1]:7788", "x:7717").unwrap(), "[fe80::1]:7788");
+    }
+
+    #[test]
+    fn an_address_that_says_nothing_useful_is_refused() {
+        assert!(full_addr("", "x:7717").is_err());
+        assert!(full_addr("   ", "x:7717").is_err(), "spasi saja bukan alamat");
+        assert!(full_addr(":7717", "x:7717").is_err(), "port tanpa host");
+        assert!(full_addr("host:99999", "x:7717").is_err(), "port di luar u16");
     }
 
     #[test]

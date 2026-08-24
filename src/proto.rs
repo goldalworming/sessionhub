@@ -154,6 +154,20 @@ pub enum ClientMsg {
         #[serde(default)]
         name: String,
     },
+    /// Point an already paired machine at a different address.
+    ///
+    /// A machine whose IP moved is still the same machine: its name and its
+    /// token are kept, so nothing that refers to it by name — tabs, stored
+    /// projects — is disturbed. Without this the only way through was to forget
+    /// it and pair again, which throws the name away and asks the other side
+    /// for a fresh link.
+    ///
+    /// A bare host with no `:port` keeps the port it already had, since the
+    /// thing that moves is almost always the address in front of it.
+    SetRemoteAddr {
+        name: String,
+        addr: String,
+    },
     /// Forget a machine. This is the only thing that deletes its token.
     Forget {
         name: String,
@@ -309,6 +323,13 @@ pub enum ServerMsg {
     /// the token never leaves this daemon.
     Remotes {
         remotes: Vec<RemoteInfo>,
+        /// That this daemon understands `set_remote_addr`.
+        ///
+        /// A daemon that does not drops an unknown message with a line in its
+        /// log and no answer, so a client that offered the control anyway would
+        /// leave someone waiting on a reply that is never coming. Read the same
+        /// way `can_pick` is: absent means no.
+        can_move: bool,
     },
     /// One folder's contents, for the folder picker in the "New project" panel.
     Dir(DirList),

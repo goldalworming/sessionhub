@@ -1832,6 +1832,9 @@ const settings = new Settings(
   // Forgetting a machine always goes to the LOCAL daemon: the paired list is its
   // own, not that of the machine being looked at.
   (name) => local.conn.send({ t: 'forget', name }),
+  // And so does moving one: the address being changed is the one this machine
+  // dials, whoever is on screen at the time.
+  (name, addr) => local.conn.send({ t: 'set_remote_addr', name, addr }),
   // Updating goes to the machine whose settings are on screen, through the
   // facade — so the Update section of a remote's panel updates that remote.
   (what) =>
@@ -2348,6 +2351,13 @@ conn.on.onError = (msg, m) => {
   // Whatever was going to open did not. Leaving the claim standing would give it
   // to the next terminal opened for any reason at all.
   showNextAttach = null;
+  // Asked for from the Settings panel, so answered there — the ＋ Connect box
+  // this would otherwise land in may not even be open.
+  if (msg.code === 'move_failed' || msg.code === 'bad_addr') {
+    settings.moveFailed(msg.message || msg.code);
+    if (!settings.open) banner(msg.message, true);
+    return;
+  }
   if (msg.code === 'pair_failed' || msg.code === 'unknown_remote') {
     machineBar.failed(msg.message);
     if (!machineBar.open) banner(msg.message, true);
@@ -2499,7 +2509,7 @@ conn.on.onRemotes = (msg, m) => {
     dropMachine(gone);
   }
   machineBar.paint(current);
-  settings.setRemotes(want);
+  settings.setRemotes(want, msg.can_move === true);
 };
 
 /// Drop a machine along with everything it displays.
