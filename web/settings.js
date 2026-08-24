@@ -426,7 +426,7 @@ export class Settings {
     return pane;
   }
 
-  /// "Update Layout": refetch every file this page runs on, past every cache,
+  /// "Refresh": refetch every file this page runs on, past every cache,
   /// then reload.
   ///
   /// It lives on the Update pane, beside the version it is about, and not on
@@ -455,10 +455,10 @@ export class Settings {
     btn.type = 'button';
     btn.id = 'refresh-app';
     btn.className = 'secbtn';
-    btn.textContent = 'Update Layout';
+    btn.textContent = 'Refresh';
     btn.onclick = async () => {
       btn.disabled = true;
-      btn.textContent = 'Updating…';
+      btn.textContent = 'Refreshing…';
       const own = performance
         .getEntriesByType('resource')
         .map((r) => r.name)
@@ -472,7 +472,7 @@ export class Settings {
         // Offline, or the daemon is gone: reloading now would trade a stale
         // interface for none at all.
         btn.disabled = false;
-        btn.textContent = 'Update Layout';
+        btn.textContent = 'Refresh';
         this.note.textContent = `Could not refetch ${failed} of ${own.length} files — is the connection up?`;
         return;
       }
