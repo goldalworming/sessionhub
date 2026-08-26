@@ -69,7 +69,7 @@ As I found them in **August 2026**. All three projects move fast, so file an iss
 - Busy/finished colours, a finish chime, and a notice saying which terminal on which machine — click it to go there
 - RAM per terminal, whole process tree
 - Self-update from Settings
-- Installs as an app — its own window, no tab strip, no address bar, nothing compiled
+- Give a port a way in from outside, through Cloudflare
 - Search across projects, session titles and parent folders
 - One binary — no npm, no build step
 
@@ -88,30 +88,17 @@ that ends.
 
 ## Install
 
-Needs stable Rust. The frontend has no build step — no npm, no bundler.
+Download the binary for your machine from
+[Releases](https://github.com/goldalworming/sessionhub/releases/latest), and run
+it. One file — the interface is inside it. On macOS there is a `.app` for
+Applications; it is unsigned, so open it the first time with right-click → Open.
 
-```
-cargo build --release
-```
-
-The result is a single file, `target/release/sessionhubd.exe`. The `web/` folder is
-embedded inside it, so there are no companion files to carry around.
-
-`build.rs` puts the logo into that file as a Windows icon resource, read from
-`assets/sessionhub.ico` — the only place Explorer looks, and a PNG in `web/` is
-invisible to it. It needs no resource compiler and no crate, and a missing
-`.ico` costs a warning rather than a build. `assets/make-icons.py` rebuilds that
-`.ico` and the matching `.icns` from `web/icon-512.webp` when the artwork
-changes; `cargo build` never runs it.
-
-One thing does want a tool: `sessionhubd bundle-web FILE`, which packs the frontend
-for a release, uses [bun](https://bun.sh) to squash the twenty-one ES modules into a
-single `app.js` — 261 KB and twenty-one round trips on first load become 114 KB and
-one. That is a release-time step, not a build-time one; `cargo build` still needs
-nothing but Rust, a debug build still serves `web/` straight off disk, and
-`bundle-web --raw` packs the modules unbundled on a machine without bun.
+To build it yourself instead: stable Rust, `cargo build --release`, and nothing
+else. The frontend has no build step.
 
 ## Run
+
+Double-click it, or:
 
 ```
 sessionhubd start          # detaches from this terminal, then exits
@@ -120,90 +107,42 @@ sessionhubd stop
 sessionhubd restart        # stop and start again, to load a new build
 ```
 
-`start` shows the full address with the token, and opens it in your browser:
+`start` prints the address with the token and opens it:
 
 ```
 http://127.0.0.1:7717/?token=…
 ```
 
-Pass `--no-open` if you would rather it did not. Running `start` while the daemon is already up is not an error — it prints the address again and opens it again, which is the shortest way to get the link back when you have lost it.
+Open it once with the token; a cookie carries it after that, once per device.
+Running `start` again when it is already up prints the address and opens it
+again — the shortest way back to a link you lost. `--no-open` skips the browser.
 
-Double-clicking `sessionhubd.exe` does the same thing as `start`, and the window it opens waits for Enter before closing, so the address stays readable. On macOS, Finder runs it in Terminal.app, whose window stays on its own.
+It leaves an icon in the notification area, or the menu bar on macOS: the port,
+how many terminals are live, the address to copy, the log, and a way to stop it
+that first says how many terminals go with it. `--no-tray` skips it.
 
-`start` also leaves an icon behind — the notification area on Windows, the menu bar on macOS. It carries what the console window used to: the port, how many terminals are live, the address to open or copy, the log, and a way to stop the daemon that first says how many terminals go with it. It is its own process, `sessionhubd tray`, for the same reason the browser is: a daemon installed as a service or a launchd job runs where nothing can draw an icon, and the icon has to be where you are. Hiding it does not touch the daemon, and `--no-tray` skips it entirely.
+Closing the terminal you started it from does nothing to it. That is the whole
+reason this project exists.
 
-Open the address once with the token in the URL. After that, `http://127.0.0.1:7717/` is enough. The token is stored in the browser in a cookie that survives closing the browser. So this is once per device, not once per session.
-
-`restart` exists because a running process cannot load a new binary. `token rotate` can reach a live daemon to re-read its config. But changed Rust, or the `web/` assets baked into a release build, needs the process replaced. It **ends every live terminal**, because shells and agents are children of the daemon and cannot outlive it. So it refuses while any are running:
-
-```
-$ sessionhubd restart
-1 live terminal(s) would be killed: they are children of the daemon
-and cannot outlive it. Nothing has been stopped.
-
-Run `sessionhubd restart --force` to go ahead anyway.
-```
-
-> On Windows, the running `.exe` is locked. So a rebuild cannot replace it while the daemon is up. There, the order is `stop`, then build, then `start`. `restart` is for a binary that is already in place.
-
-Close the launching terminal whenever you like. The daemon does not die with it. That is the whole reason this project exists.
-
-For development, `sessionhubd start --foreground` keeps the process in the terminal, so its log is visible right away.
-
-## Its own window
-
-**⋮ → Install page as app** in Chrome or Edge — or the install icon that appears
-in the address bar. You get a window with no tab strip and no address bar, an
-entry in the Start menu, its own icon, and a window whose size and position are
-remembered.
-
-Nothing is compiled to get it. [Pake](https://github.com/tw93/pake) builds a
-small native shell around each site, which gives a lovely 5 MB app — and a
-toolchain, a build, and a separate binary for every URL you want a window for.
-A [web app manifest](web/manifest.json) asks the browser for the same window
-using the mechanism it has shipped for years, and costs one JSON file and four
-icons — 70 KB, against Pake's 5 MB per site.
-
-One detail that is easy to get wrong here: a manifest is fetched with
-credentials **omitted** by default, and every file this daemon serves needs the
-token cookie. Without `crossorigin="use-credentials"` on the `<link>`, that
-fetch is a 401 and no browser offers to install anything.
-
-On a phone, **Share → Add to Home Screen** does the same job; on iOS that is the
-whole mechanism, since Safari has no install prompt.
-
-Firefox is the exception: it removed site-specific browsers in 2021, and its
-desktop builds cannot install a web app at all. Firefox on Android can.
-
-## Coming back after a reboot
-
-```
-sessionhubd install --account "DOMAIN\name" --password "…"
-sessionhubd uninstall
-```
-
-You need an Administrator terminal. Without `--account`, the service runs as
-LocalSystem and **the agents run as SYSTEM too** — you likely cannot read your
-own credentials and agent config. For daily use, install it under your own
-account.
-
-On Linux/macOS, `install` writes a systemd user unit or a launchd plist and then
-tells you the command that enables it.
+`restart` **ends every live terminal** — they are children of the daemon — so it
+refuses while any are running unless told `--force`.
 
 ## Access from outside
 
-Off by default: the daemon listens on loopback only. **⚙ Settings → Network
-access** opens it to the LAN, and `sessionhubd tunnel` puts it on the internet
-through `cloudflared` — or point a Cloudflare tunnel of your own at
-`localhost:7717` for an address that stays put.
+**⚙ Settings → Cloudflare.** Give an address a way in — a dev server here, or
+something on your network that cannot run a tunnel of its own — and it comes
+back as a hostname you can open from anywhere. With a Cloudflare API token the
+names are yours and stay put; without one they are throwaway and change each
+time. What is behind them stays behind the sessionhub token.
 
-> **Either one exposes a shell.** Anyone with the address and the token can run
-> any command on that computer, as you. The token is not authentication — put
-> **Cloudflare Access** in front of a tunnel hostname, close the tunnel when it
-> is not in use, and run `sessionhubd token rotate` if the URL ever leaked. The
-> traffic is not encrypted on the LAN either.
+**⚙ Settings → Network access** opens the daemon itself to the LAN, and
+`sessionhubd tunnel` puts it on the internet.
 
-Setup, pairing a second machine, and what is stored where: [CONFIG.md](CONFIG.md).
+> **This exposes a shell.** Anyone with the address and the token can run any
+> command on that computer, as you. Put **Cloudflare Access** in front of it if
+> it is more than a moment, and run `sessionhubd token rotate` if a URL leaked.
+
+How it fits together, from a phone inward: [ACCESS.md](ACCESS.md).
 
 ## Known limits
 
@@ -216,3 +155,4 @@ Setup, pairing a second machine, and what is stored where: [CONFIG.md](CONFIG.md
 - [CONFIG.md](CONFIG.md) — config.toml, agents, network access, pairing.
 - [PROTOCOL.md](PROTOCOL.md) — the WebSocket protocol, enough to write your own client.
 - [TESTING.md](TESTING.md) — the acceptance criteria results, along with what is not tested.
+- [ACCESS.md](ACCESS.md) — reaching it from outside, drawn out.
