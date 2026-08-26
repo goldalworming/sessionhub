@@ -46,16 +46,18 @@ pub struct Found {
 pub fn discover(api_token: &str) -> Result<Found, String> {
     let mut found = Found::default();
 
-    let accounts = call(api_token, "GET", &format!("{API}/accounts?per_page=50"), None)?;
-    let first = accounts.as_array().and_then(|a| a.first()).ok_or(
-        "That token cannot see any account. It needs Account → Cloudflare Tunnel → Edit.",
-    )?;
-    found.account = Named { id: text(first, "id"), name: text(first, "name") };
-
+    // The domains first, and the account read off one of them.
+    //
+    // `/accounts` is the obvious place to ask for the account and it is the
+    // wrong one: enumerating accounts needs a permission of its own, and a
+    // token scoped to Cloudflare Tunnel and DNS does not carry it. It does not
+    // fail either — it answers `success` with an empty list, which reads as
+    // "you have no account" when it means "you may not list them". Every zone
+    // names the account it belongs to, and reading zones is something this
+    // token can do by definition, or it could not edit their DNS.
     let zones = call(api_token, "GET", &format!("{API}/zones?per_page=50"), None)?;
-    found.zones = zones
-        .as_array()
-        .unwrap_or(&Vec::new())
+    let zone_list = zones.as_array().cloned().unwrap_or_default();
+    found.zones = zone_list
         .iter()
         .map(|z| Named { id: text(z, "id"), name: text(z, "name") })
         .filter(|z| !z.id.is_empty())
@@ -63,6 +65,27 @@ pub fn discover(api_token: &str) -> Result<Found, String> {
     if found.zones.is_empty() {
         return Err("That token cannot see any domain. It needs Zone → DNS → Edit.".into());
     }
+
+    let from_zone = zone_list.iter().find_map(|z| {
+        let a = z.get("account")?;
+        let id = text(a, "id");
+        (!id.is_empty()).then(|| Named { id, name: text(a, "name") })
+    });
+
+    // Only if a zone somehow did not name its account: ask the endpoint meant
+    // for it after all. It is the fallback and not the first move because it is
+    // the one that came back empty and started this.
+    found.account = match from_zone {
+        Some(a) => a,
+        None => {
+            let accounts = call(api_token, "GET", &format!("{API}/accounts?per_page=50"), None)?;
+            let first = accounts.as_array().and_then(|a| a.first()).ok_or(
+                "The domains this token can see do not name an account, and the account list \
+                 came back empty. Check that the token covers Account → Cloudflare Tunnel → Edit.",
+            )?;
+            Named { id: text(first, "id"), name: text(first, "name") }
+        }
+    };
 
     let tunnels = call(
         api_token,
@@ -78,11 +101,15 @@ pub fn discover(api_token: &str) -> Result<Found, String> {
         .filter(|t| !t.id.is_empty())
         .collect();
     if found.tunnels.is_empty() {
-        return Err(
-            "That account has no tunnel. sessionhub arranges hostnames on a tunnel that already \
-             runs, so one has to exist first."
-                .into(),
-        );
+        // Empty means one of two things and the answer cannot tell them apart:
+        // the account really has no tunnel, or the token may not list them.
+        // Say both rather than pick one.
+        return Err(format!(
+            "No tunnel found in {}. Either that account has none — sessionhub arranges \
+             hostnames on a tunnel that already runs — or the token is missing \
+             Account → Cloudflare Tunnel → Edit.",
+            found.account.name
+        ));
     }
     Ok(found)
 }
