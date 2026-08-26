@@ -1851,6 +1851,10 @@ const settings = new Settings(
     conn.send({ t: 'update_agent_cli', name, cols: size.cols, rows: size.rows });
     settings.close();
   },
+  // Through the facade, so a remote machine's panel arranges hostnames on that
+  // machine's own tunnel — every machine has its own.
+  (api_token, hostname) => conn.send({ t: 'set_cloudflare', api_token, hostname }),
+  (port, on) => conn.send({ t: 'forward_port', port, on }),
 );
 
 document.getElementById('settings-btn').onclick = () => {
@@ -2353,6 +2357,15 @@ conn.on.onError = (msg, m) => {
   showNextAttach = null;
   // Asked for from the Settings panel, so answered there — the ＋ Connect box
   // this would otherwise land in may not even be open.
+  if (
+    msg.code === 'cloudflare_failed'
+    || msg.code === 'bad_hostname'
+    || msg.code === 'bad_port'
+  ) {
+    settings.moveFailed(msg.message || msg.code);
+    if (!settings.open) banner(msg.message, true);
+    return;
+  }
   if (msg.code === 'move_failed' || msg.code === 'bad_addr') {
     settings.moveFailed(msg.message || msg.code);
     if (!settings.open) banner(msg.message, true);
@@ -2400,6 +2413,13 @@ conn.on.onError = (msg, m) => {
 };
 
 conn.on.onConfig = (msg) => settings.update(msg);
+
+conn.on.onCloudflare = (msg, m) => {
+  // Only for the machine on screen: an answer from a background machine must
+  // not redraw the panel someone is looking at.
+  if (m !== current) return;
+  settings.setCloudflare(msg.cloudflare);
+};
 
 conn.on.onUpdate = (msg, m) => {
   // Only for the machine being looked at: a check answered by a background

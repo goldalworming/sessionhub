@@ -44,6 +44,10 @@ const SECTIONS = [
   // by the LOCAL daemon, and remotes are never chained. Showing it while looking
   // at a remote machine would promise something that is not there.
   { key: 'machines', label: 'Machines', localOnly: true },
+  // Not `localOnly`: every machine has its own tunnel, so this belongs to the
+  // one the panel is showing. Hidden entirely by a daemon that does not know
+  // how to forward a port — see `can_forward`.
+  { key: 'cloudflare', label: 'Cloudflare' },
   { key: 'update', label: 'Update' },
 ];
 
@@ -52,7 +56,19 @@ export class Settings {
   /// `onRemove(name)` deletes it. `onLan(enabled)` opens or closes network
   /// access. `onDrops(limits|null)` stores the drop folder limits; null = sweep
   /// now.
-  constructor(root, onSave, onLan, onDrops, onRemove, onForget, onMoveRemote, onUpdate, onUpdateAgent) {
+  constructor(
+    root,
+    onSave,
+    onLan,
+    onDrops,
+    onRemove,
+    onForget,
+    onMoveRemote,
+    onUpdate,
+    onUpdateAgent,
+    onCloudflare,
+    onForward,
+  ) {
     /// `onUpdate('check'|'apply'|'apply_web')` asks the daemon to look for a
     /// release, to install it and restart into it, or to install only the
     /// interface — which costs no restart.
@@ -65,6 +81,9 @@ export class Settings {
     this.onRemove = onRemove;
     this.onForget = onForget || (() => {});
     this.onMoveRemote = onMoveRemote || (() => {});
+    this.onCloudflare = onCloudflare || (() => {});
+    this.onForward = onForward || (() => {});
+    this.cf = null;
     this.agents = [];
     this.shells = [];
     this.configPath = '';
@@ -179,8 +198,16 @@ export class Settings {
     this.lanUrl = msg.lan_url || '';
     this.pairUrl = msg.pair_url || '';
     this.drops = msg.drops || null;
+    this.setCloudflare(msg.cloudflare, false);
     setPath(this.el.querySelector('.path'), this.configPath);
     this.paint();
+  }
+
+  /// The forwarding settings, from the config message or on their own after one
+  /// of them changed.
+  setCloudflare(info, repaint = true) {
+    this.cf = info || null;
+    if (repaint && this.open) this.paint();
   }
 
   // ------------------------------------------------------------------ frame
@@ -191,6 +218,7 @@ export class Settings {
     if (this.section === 'network') this.pane.appendChild(this.networkPane());
     else if (this.section === 'files') this.pane.appendChild(this.filesPane());
     else if (this.section === 'machines') this.pane.appendChild(this.machinesPane());
+    else if (this.section === 'cloudflare') this.pane.appendChild(this.cloudflarePane());
     else if (this.section === 'update') this.pane.appendChild(this.updatePane());
     else this.pane.appendChild(this.agentsPane());
 
@@ -211,7 +239,12 @@ export class Settings {
   /// needs looking at shows before the section is opened.
   paintRail() {
     this.rail.textContent = '';
-    for (const s of SECTIONS.filter((x) => !x.localOnly || !this.machine.via)) {
+    const shown = SECTIONS.filter((x) => !x.localOnly || !this.machine.via).filter(
+      // A daemon too old to forward a port says nothing about it, and a pane
+      // whose every control is refused is worse than no pane.
+      (x) => x.key !== 'cloudflare' || this.cf?.can_forward,
+    );
+    for (const s of shown) {
       const b = document.createElement('button');
       b.type = 'button';
       b.className = 'sitem' + (s.key === this.section ? ' on' : '');
@@ -261,6 +294,12 @@ export class Settings {
       chip.textContent = String(broken);
       chip.title = `${broken} agent command(s) not found`;
       chip.classList.add('bad');
+      return chip;
+    }
+    if (key === 'cloudflare') {
+      const n = this.cf?.ports?.length || 0;
+      chip.textContent = this.cf?.connected ? String(n) : 'off';
+      chip.classList.add(this.cf?.connected && n ? 'warn' : 'muted');
       return chip;
     }
     if (key === 'update') {
@@ -912,6 +951,191 @@ export class Settings {
       btn.classList.remove('armed');
       btn.textContent = 'Forget';
     }, 4000);
+  }
+
+  // -------------------------------------------------------------- cloudflare
+
+  /// Giving a local port a hostname of its own, through the tunnel this machine
+  /// is already reached by.
+  ///
+  /// Its own pane rather than a row under Network: there is a credential, a
+  /// hostname pattern, three things that were found and a list of ports, and
+  /// Network is one switch and one address.
+  cloudflarePane() {
+    const pane = document.createElement('div');
+    pane.className = 'sec cloudflare';
+    const cf = this.cf || {};
+    pane.appendChild(
+      this.head(
+        'Cloudflare',
+        'Give a port on this machine a hostname of its own, so a dev server can be ' +
+          'opened from anywhere this tunnel reaches.',
+      ),
+    );
+
+    if (!cf.connected) {
+      pane.appendChild(
+        Settings.stat(
+          'muted',
+          'Paste an API token that may edit Cloudflare Tunnel on your account and DNS on ' +
+            'the zone. The account, the zone and the tunnel already carrying sessionhub ' +
+            'are found from it — there are no ids to look up.',
+        ),
+      );
+    }
+
+    pane.appendChild(this.cfConnectRow(cf));
+
+    if (cf.connected) {
+      if (cf.account_name || cf.zone_name || cf.tunnel_name) {
+        pane.appendChild(
+          Settings.stat(
+            'ok',
+            `Account ${cf.account_name} · zone ${cf.zone_name} · tunnel ${cf.tunnel_name}`,
+          ),
+        );
+      }
+      pane.appendChild(this.cfPorts(cf));
+      pane.appendChild(
+        Settings.stat(
+          'warn',
+          'Anyone holding one of these addresses and its token reaches that port. A dev ' +
+            'server is not built to sit on the internet — Vite will hand out files from ' +
+            'outside the project.',
+        ),
+      );
+    }
+    return pane;
+  }
+
+  /// The token and the pattern. The token only ever travels one way: what comes
+  /// back from the daemon says whether one is stored, never what it is.
+  cfConnectRow(cf) {
+    const wrap = document.createElement('div');
+    wrap.className = 'abody cfconnect';
+
+    const tokenLabel = document.createElement('label');
+    tokenLabel.textContent = 'API token';
+    const token = document.createElement('input');
+    token.type = 'password';
+    token.spellcheck = false;
+    token.autocomplete = 'off';
+    token.placeholder = cf.connected ? 'stored — type a new one to replace it' : 'paste it here';
+    wrap.appendChild(tokenLabel);
+    wrap.appendChild(token);
+
+    const hostLabel = document.createElement('label');
+    hostLabel.textContent = 'Hostname';
+    const host = document.createElement('input');
+    host.type = 'text';
+    host.spellcheck = false;
+    host.value = cf.hostname || '';
+    host.placeholder = '{port}-sbox.example.com';
+    host.title =
+      '{port} stands in for the number. A hyphen rather than a dot keeps it one level ' +
+      'deep, which is as far as the free certificate from Cloudflare reaches.';
+    wrap.appendChild(hostLabel);
+    wrap.appendChild(host);
+
+    const bar = document.createElement('div');
+    bar.className = 'usagebar cfbar';
+    const go = document.createElement('button');
+    go.type = 'button';
+    go.className = 'secbtn';
+    go.textContent = cf.connected ? 'Check again' : 'Connect';
+    go.onclick = () => {
+      const t = token.value.trim();
+      if (!t && !cf.connected) {
+        this.note.textContent = 'An API token is needed first.';
+        return;
+      }
+      go.disabled = true;
+      go.textContent = 'Asking Cloudflare…';
+      this.note.textContent = 'Looking for the account, the zone and the tunnel…';
+      this.onCloudflare(t, host.value.trim());
+    };
+    bar.appendChild(go);
+
+    if (cf.connected) {
+      const off = document.createElement('button');
+      off.type = 'button';
+      off.className = 'del';
+      off.textContent = 'Disconnect';
+      off.title = 'Forget the token. Hostnames already arranged are left exactly as they are.';
+      off.onclick = () => {
+        this.note.textContent = 'Forgetting…';
+        this.onCloudflare('', host.value.trim());
+      };
+      bar.appendChild(off);
+    }
+    wrap.appendChild(document.createElement('span'));
+    wrap.appendChild(bar);
+    return wrap;
+  }
+
+  cfPorts(cf) {
+    const wrap = document.createElement('div');
+    wrap.className = 'cfports';
+
+    for (const p of cf.ports || []) {
+      // The same closed row a pairing link gets: the address carries a token,
+      // and a token on screen is a token in the next screenshot.
+      wrap.appendChild(
+        this.secretRow(p.url, {
+          label: `Port ${p.port}`,
+          hint: 'Open it once with the token; the cookie carries it after that.',
+        }),
+      );
+
+      const bar = document.createElement('div');
+      bar.className = 'usagebar';
+      const del = document.createElement('button');
+      del.type = 'button';
+      del.className = 'del';
+      del.textContent = 'Close';
+      del.title = `Take the hostname away. Whatever runs on ${p.port} is untouched.`;
+      del.onclick = () => {
+        del.disabled = true;
+        this.note.textContent = 'Taking it away…';
+        this.onForward(p.port, false);
+      };
+      bar.appendChild(del);
+      wrap.appendChild(bar);
+    }
+
+    const add = document.createElement('div');
+    add.className = 'usagebar cfadd';
+    const field = document.createElement('input');
+    field.type = 'text';
+    field.className = 'amove';
+    field.placeholder = 'port, e.g. 5173';
+    field.spellcheck = false;
+    add.appendChild(field);
+
+    const go = document.createElement('button');
+    go.type = 'button';
+    go.className = 'secbtn';
+    go.textContent = 'Give it a hostname';
+    const send = () => {
+      const port = Number(field.value.trim());
+      if (!Number.isInteger(port) || port < 1 || port > 65535) {
+        this.note.textContent = 'That is not a port number.';
+        return;
+      }
+      go.disabled = true;
+      this.note.textContent = 'Arranging it with Cloudflare…';
+      this.onForward(port, true);
+    };
+    field.onkeydown = (e) => {
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        send();
+      }
+    };
+    go.onclick = send;
+    add.appendChild(go);
+    wrap.appendChild(add);
+    return wrap;
   }
 
   // ------------------------------------------------------------------ agents

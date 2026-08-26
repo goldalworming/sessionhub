@@ -1768,6 +1768,15 @@ html, body {
   min-width: 0;
 }
 .amove:disabled { color: var(--muted); }
+
+/* Cloudflare: a two-column form for the credential, then one closed row per
+   port with its own Close beneath it. */
+.cfconnect { margin-top: 10px; }
+.cfconnect .cfbar { padding: 0; background: none; border: 0; }
+.cfports { display: flex; flex-direction: column; gap: 6px; margin-top: 12px; }
+.cfports .usagebar { justify-content: flex-end; padding-top: 0; }
+.cfadd { justify-content: flex-start; gap: 8px; }
+.cfadd .amove { max-width: 160px; }
 .agent.off .aname { color: var(--muted); }
 
 .abody {

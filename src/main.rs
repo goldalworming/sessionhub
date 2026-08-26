@@ -6,6 +6,7 @@
 
 mod config;
 mod browse;
+mod cloudflare;
 mod daemon;
 mod drops;
 mod files;

@@ -108,6 +108,7 @@ export class Conn {
         saved: 'onSaved',
         last_command: 'onLastCommand',
         remotes: 'onRemotes',
+        cloudflare: 'onCloudflare',
         update: 'onUpdate',
       };
       const fn = map[msg.t];

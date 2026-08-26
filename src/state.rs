@@ -52,6 +52,11 @@ pub enum Cmd {
     /// config; the HTTP layer's snapshot is taken once at start and is already
     /// stale the moment a new machine is paired.
     Remote { name: String, reply: Sender<Option<crate::config::Remote>> },
+    /// Answer with the live Cloudflare settings, for the same reason: the
+    /// forwarder decides on every connection which ports are allowed, and a
+    /// snapshot taken at start-up would still be answering for a port that was
+    /// closed an hour ago.
+    Cloudflare { reply: Sender<crate::config::Cloudflare> },
     /// Kill every terminal, then end the actor.
     Shutdown,
 }
@@ -323,6 +328,7 @@ pub fn run(cfg: Config, rx: Receiver<Cmd>, tx: Sender<Cmd>, registry_cfg: Sender
                     let lan_access = cfg.lan_access;
                     let token = cfg.token.clone();
                     let limits = cfg.drops.clone();
+                    let cloudflare = cloudflare_info(&cfg.cloudflare, &cfg.token);
                     // Counted here while the terminal list is still in hand; the
                     // thread below must not touch it.
                     let live: Vec<(String, usize)> = cfg
@@ -403,6 +409,7 @@ pub fn run(cfg: Config, rx: Receiver<Cmd>, tx: Sender<Cmd>, registry_cfg: Sender
                             lan_access,
                             lan_url,
                             pair_url,
+                            cloudflare,
                         };
                         if let Ok(text) = serde_json::to_string(&msg) {
                             let _ = out.try_send(Out::Text(text));
@@ -822,6 +829,158 @@ pub fn run(cfg: Config, rx: Receiver<Cmd>, tx: Sender<Cmd>, registry_cfg: Sender
                             }));
                         }
                     }
+                }
+
+                ClientMsg::SetCloudflare { api_token, hostname } => {
+                    let api_token = api_token.trim().to_string();
+                    let hostname = hostname.trim().to_lowercase();
+
+                    // An empty token forgets everything, including the ports —
+                    // leaving them listed would promise hostnames that nothing
+                    // can arrange any more.
+                    if api_token.is_empty() {
+                        cfg.cloudflare = crate::config::Cloudflare {
+                            forward_port: cfg.cloudflare.forward_port,
+                            ..Default::default()
+                        };
+                        let _ = crate::http::set_forwarding(false, 0);
+                        if let Err(e) = crate::config::save(&cfg) {
+                            warn!(error = %e, "could not save config");
+                        }
+                        info!("cloudflare settings cleared");
+                        send_to(&clients, id, json(&cloudflare_msg(&cfg)));
+                        continue;
+                    }
+
+                    if !hostname.contains("{port}") {
+                        send_to(
+                            &clients,
+                            id,
+                            json(&ServerMsg::Error {
+                                code: "bad_hostname".into(),
+                                message: "The hostname needs a `{port}` in it, like \
+                                          `{port}-sbox.example.com`."
+                                    .into(),
+                            }),
+                        );
+                        continue;
+                    }
+
+                    // Off the actor: this calls Cloudflare three or four times,
+                    // and nothing else can be answered while it waits.
+                    let (done, wait) = crossbeam_channel::bounded(1);
+                    let (t, h) = (api_token.clone(), hostname.clone());
+                    std::thread::spawn(move || {
+                        let _ = done.send(crate::cloudflare::discover(&t, &h));
+                    });
+                    let found = match wait
+                        .recv_timeout(std::time::Duration::from_secs(60))
+                        .unwrap_or_else(|_| Err("Cloudflare did not answer in time.".into()))
+                    {
+                        Ok(f) => f,
+                        Err(message) => {
+                            send_to(
+                                &clients,
+                                id,
+                                json(&ServerMsg::Error { code: "cloudflare_failed".into(), message }),
+                            );
+                            continue;
+                        }
+                    };
+
+                    cfg.cloudflare.api_token = api_token;
+                    cfg.cloudflare.hostname = hostname;
+                    cfg.cloudflare.account_id = found.account_id;
+                    cfg.cloudflare.account_name = found.account_name;
+                    cfg.cloudflare.zone_id = found.zone_id;
+                    cfg.cloudflare.zone_name = found.zone_name;
+                    cfg.cloudflare.tunnel_id = found.tunnel_id;
+                    cfg.cloudflare.tunnel_name = found.tunnel_name;
+                    if let Err(e) = crate::config::save(&cfg) {
+                        warn!(error = %e, "could not save config");
+                    }
+                    info!(
+                        zone = %cfg.cloudflare.zone_name,
+                        tunnel = %cfg.cloudflare.tunnel_name,
+                        "cloudflare settings stored"
+                    );
+                    send_to(&clients, id, json(&cloudflare_msg(&cfg)));
+                }
+
+                ClientMsg::ForwardPort { port, on } => {
+                    if !cfg.cloudflare.ready() {
+                        send_to(
+                            &clients,
+                            id,
+                            json(&ServerMsg::Error {
+                                code: "cloudflare_failed".into(),
+                                message: "Connect Cloudflare first: a token and a hostname."
+                                    .into(),
+                            }),
+                        );
+                        continue;
+                    }
+                    if on && (port == cfg.port || port == cfg.cloudflare.forward_port || port == 0) {
+                        send_to(
+                            &clients,
+                            id,
+                            json(&ServerMsg::Error {
+                                code: "bad_port".into(),
+                                message: format!("Port {port} is sessionhub's own."),
+                            }),
+                        );
+                        continue;
+                    }
+
+                    // The listener has to be up before the hostname points at
+                    // it, and the port on the list before the listener will
+                    // answer for it. Both are undone if Cloudflare refuses.
+                    let had = cfg.cloudflare.ports.clone();
+                    if on {
+                        if !cfg.cloudflare.ports.contains(&port) {
+                            cfg.cloudflare.ports.push(port);
+                            cfg.cloudflare.ports.sort_unstable();
+                        }
+                    } else {
+                        cfg.cloudflare.ports.retain(|p| *p != port);
+                    }
+                    if let Err(e) =
+                        crate::http::set_forwarding(!cfg.cloudflare.ports.is_empty(), cfg.cloudflare.forward_port)
+                    {
+                        warn!(error = %e, "could not open the forwarding listener");
+                    }
+
+                    let (done, wait) = crossbeam_channel::bounded(1);
+                    let cf = cfg.cloudflare.clone();
+                    std::thread::spawn(move || {
+                        let out = if on {
+                            crate::cloudflare::expose(&cf, port).map(|_| ())
+                        } else {
+                            crate::cloudflare::withdraw(&cf, port)
+                        };
+                        let _ = done.send(out);
+                    });
+                    if let Err(message) = wait
+                        .recv_timeout(std::time::Duration::from_secs(60))
+                        .unwrap_or_else(|_| Err("Cloudflare did not answer in time.".into()))
+                    {
+                        cfg.cloudflare.ports = had;
+                        let _ = crate::http::set_forwarding(
+                            !cfg.cloudflare.ports.is_empty(),
+                            cfg.cloudflare.forward_port,
+                        );
+                        send_to(
+                            &clients,
+                            id,
+                            json(&ServerMsg::Error { code: "cloudflare_failed".into(), message }),
+                        );
+                        continue;
+                    }
+
+                    if let Err(e) = crate::config::save(&cfg) {
+                        warn!(error = %e, "could not save config");
+                    }
+                    send_to(&clients, id, json(&cloudflare_msg(&cfg)));
                 }
 
                 ClientMsg::SetRemoteAddr { name, addr } => {
@@ -1666,6 +1825,10 @@ pub fn run(cfg: Config, rx: Receiver<Cmd>, tx: Sender<Cmd>, registry_cfg: Sender
                 send_state(&cfg, &projects, &agent_names, scanned, &clients, &terminals, None);
             }
 
+            Cmd::Cloudflare { reply } => {
+                let _ = reply.send(cfg.cloudflare.clone());
+            }
+
             Cmd::Remote { name, reply } => {
                 let _ = reply.send(crate::remote::find(&cfg.remotes, &name).cloned());
             }
@@ -1949,6 +2112,35 @@ fn pair_remote(
     };
 
     Ok(crate::config::Remote { name, addr, token: parsed.token, version: status.version })
+}
+
+/// What the panel is told about port forwarding — everything except the token
+/// itself, which never leaves this process.
+fn cloudflare_msg(cfg: &Config) -> ServerMsg {
+    ServerMsg::Cloudflare { cloudflare: cloudflare_info(&cfg.cloudflare, &cfg.token) }
+}
+
+fn cloudflare_info(cf: &crate::config::Cloudflare, token: &str) -> crate::proto::CloudflareInfo {
+    crate::proto::CloudflareInfo {
+        can_forward: true,
+        connected: !cf.api_token.is_empty(),
+        hostname: cf.hostname.clone(),
+        account_name: cf.account_name.clone(),
+        zone_name: cf.zone_name.clone(),
+        tunnel_name: cf.tunnel_name.clone(),
+        ports: cf
+            .ports
+            .iter()
+            .map(|p| crate::proto::ForwardedPort {
+                port: *p,
+                // With the token on it, the way `lan_url` carries one: a tunnel
+                // hostname is its own origin, so the first visit has to bring
+                // one before the cookie can take over. Shown through the same
+                // closed row a pairing link uses.
+                url: format!("https://{}/?token={token}", cf.host_for(*p)),
+            })
+            .collect(),
+    }
 }
 
 fn enabled_agents(cfg: &Config) -> Vec<AgentBrief> {

@@ -44,6 +44,15 @@ struct ServeCtx {
 
 static CTX: OnceLock<ServeCtx> = OnceLock::new();
 static LAN: Mutex<Option<LanListener>> = Mutex::new(None);
+static FORWARD: Mutex<Option<PortForwarder>> = Mutex::new(None);
+
+/// The one socket every forwarded port arrives on. Which port a request wants
+/// is read from its `Host:` header, so one listener serves them all and the
+/// tunnel needs one rule per hostname and nothing else.
+struct PortForwarder {
+    addr: SocketAddr,
+    stop: Arc<AtomicBool>,
+}
 
 struct LanListener {
     /// Every address a socket was actually opened on — a machine on Wi-Fi and a
@@ -67,6 +76,8 @@ pub fn serve(
     info!(port = cfg.port, "listening on 127.0.0.1");
 
     let lan_wanted = cfg.lan_access;
+    let forwarding_wanted = !cfg.cloudflare.ports.is_empty() && cfg.cloudflare.ready();
+    let forward_port = cfg.cloudflare.forward_port;
     let ctx = ServeCtx {
         cfg: Arc::new(cfg),
         token,
@@ -75,6 +86,16 @@ pub fn serve(
         next_id: Arc::new(AtomicU64::new(1)),
     };
     let _ = CTX.set(ctx.clone());
+
+    // Ports given a hostname keep it across a restart: the tunnel still has the
+    // rules, so the listener they point at has to come back with the daemon.
+    if forwarding_wanted {
+        match set_forwarding(true, forward_port) {
+            Ok(Some(addr)) => info!(%addr, "forwarding ports"),
+            Ok(None) => {}
+            Err(e) => warn!(error = %e, "could not open the forwarding listener"),
+        }
+    }
 
     if lan_wanted {
         match set_lan_access(true) {
@@ -86,6 +107,121 @@ pub fn serve(
 
     accept_loop(listener, ctx, None);
     Ok(())
+}
+
+/// Open or close the socket that forwarded ports arrive on.
+///
+/// Loopback only, always: what reaches it comes from cloudflared running on this
+/// machine, and a forwarder listening on the network would be a second way in
+/// that nobody asked for.
+pub fn set_forwarding(on: bool, port: u16) -> Result<Option<SocketAddr>, String> {
+    let Some(ctx) = CTX.get() else {
+        return Err("server is not running yet".into());
+    };
+    let mut slot = FORWARD.lock().map_err(|_| "forwarder state is poisoned".to_string())?;
+
+    if let Some(existing) = slot.take() {
+        existing.stop.store(true, Ordering::Relaxed);
+        // Accept blocks; one brief connection wakes it so it sees the flag.
+        let _ = TcpStream::connect_timeout(&existing.addr, Duration::from_millis(500));
+        info!(addr = %existing.addr, "stopped forwarding ports");
+    }
+    if !on {
+        return Ok(None);
+    }
+
+    let addr = SocketAddr::from((Ipv4Addr::LOCALHOST, port));
+    let listener = TcpListener::bind(addr).map_err(|e| format!("could not open {addr}: {e}"))?;
+    let stop = Arc::new(AtomicBool::new(false));
+    let flag = Arc::clone(&stop);
+    let ctx = ctx.clone();
+    thread::spawn(move || forward_loop(listener, ctx, flag));
+    info!(%addr, "forwarding ports");
+    *slot = Some(PortForwarder { addr, stop });
+    Ok(Some(addr))
+}
+
+fn forward_loop(listener: TcpListener, ctx: ServeCtx, stop: Arc<AtomicBool>) {
+    for conn in listener.incoming() {
+        if stop.load(Ordering::Relaxed) {
+            return;
+        }
+        let Ok(sock) = conn else { continue };
+        let ctx = ctx.clone();
+        thread::spawn(move || {
+            if let Err(e) = forward(sock, ctx) {
+                debug!(error = %e, "forwarded connection finished");
+            }
+        });
+    }
+}
+
+/// One connection to a forwarded port.
+///
+/// The head is read and judged, then written through untouched and the rest
+/// pumped — so a WebSocket upgrade passes as readily as a GET, which is what a
+/// dev server's hot reload needs.
+fn forward(mut sock: TcpStream, ctx: ServeCtx) -> io::Result<()> {
+    sock.set_nodelay(true)?;
+    let head = read_head(&mut sock)?;
+    let req = Request::parse(&head).ok_or_else(|| io::Error::other("malformed request head"))?;
+
+    let cf = ask_cloudflare(&ctx.tx).unwrap_or_default();
+    let host = req.header("host").unwrap_or_default();
+    let Some(port) = cf.port_for(&host) else {
+        // Either a hostname that is not one of ours, or a port nobody opened.
+        // Both get the same answer: this is not a door.
+        return respond(&mut sock, 404, "text/plain; charset=utf-8", b"404 not forwarded here\n");
+    };
+    if port == ctx.cfg.port {
+        return respond(&mut sock, 400, "text/plain; charset=utf-8", b"400 that is sessionhub\n");
+    }
+
+    let secret = ctx.token.read().map(|t| t.clone()).unwrap_or_default();
+    let from_query = req.query_param("token");
+    if !token_ok(&secret, from_query.as_deref())
+        && !token_ok(&secret, req.cookie("sh_token").as_deref())
+    {
+        return respond(&mut sock, 401, "text/plain; charset=utf-8", b"401 invalid token
+");
+    }
+
+    // The token arrived in the address bar. A tunnel hostname is its own origin,
+    // so the cookie sessionhub already holds does not reach here — this is that
+    // first visit. Answer it ourselves with the cookie and a redirect to the
+    // same path without the token: from the next request on, the dev server sees
+    // nothing but its own URLs, and nothing has to be rewritten on the way back.
+    if from_query.is_some() {
+        let clean = req.path_without_token();
+        let head = format!(
+            "HTTP/1.1 302 Found\r\nLocation: {clean}\r\n{}\
+             Content-Length: 0\r\nConnection: close\r\n\r\n",
+            cookie_header(&secret)
+        );
+        sock.write_all(head.as_bytes())?;
+        return sock.flush();
+    }
+
+    let target = SocketAddr::from((Ipv4Addr::LOCALHOST, port));
+    let mut far = match TcpStream::connect_timeout(&target, Duration::from_secs(5)) {
+        Ok(f) => f,
+        Err(e) => {
+            warn!(port, error = %e, "nothing is listening on a forwarded port");
+            let msg = format!("502 nothing is listening on port {port} here\n");
+            return respond(&mut sock, 502, "text/plain; charset=utf-8", msg.as_bytes());
+        }
+    };
+    far.set_nodelay(true)?;
+    far.write_all(head.as_bytes())?;
+    far.flush()?;
+    crate::remote::pump(sock, far);
+    Ok(())
+}
+
+fn ask_cloudflare(tx: &Sender<Cmd>) -> Option<crate::config::Cloudflare> {
+    let (reply, wait) = bounded(1);
+    tx.send(Cmd::Cloudflare { reply }).ok()?;
+    wait.recv_timeout(Duration::from_secs(3)).ok()
 }
 
 /// Turn the network listener on or off. Returns the address used.
@@ -980,6 +1116,22 @@ impl Request {
             .filter_map(|kv| kv.split_once('='))
             .find(|(k, _)| *k == name)
             .map(|(_, v)| percent_decode(v))
+    }
+
+    /// The same address with the token taken out of it, for the redirect that
+    /// follows setting the cookie. A token left in the bar is a token in every
+    /// screenshot and every history list.
+    fn path_without_token(&self) -> String {
+        let rest: Vec<&str> = self
+            .query
+            .split('&')
+            .filter(|kv| !kv.is_empty() && !kv.starts_with("token="))
+            .collect();
+        if rest.is_empty() {
+            self.path.clone()
+        } else {
+            format!("{}?{}", self.path, rest.join("&"))
+        }
     }
 }
 

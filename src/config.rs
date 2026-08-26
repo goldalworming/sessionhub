@@ -41,6 +41,100 @@ pub struct Config {
     /// Terminals given a name, so they outlive the daemon.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub saved: Vec<SavedTerminal>,
+    /// Giving a local port a hostname of its own through the Cloudflare tunnel
+    /// this machine is already reached by.
+    #[serde(default)]
+    pub cloudflare: Cloudflare,
+}
+
+/// Reaching a dev server from outside, at a hostname of its own.
+///
+/// A dev server believes it owns the root of its host — Vite asks for
+/// `/@vite/client` and `/src/main.tsx` — so a path prefix cannot carry one and a
+/// subdomain has to. Everything here exists to arrange that subdomain and then
+/// stand in front of it, because a dev server is not a hardened thing and this
+/// puts it on the internet.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct Cloudflare {
+    /// A Cloudflare API token: Account → Cloudflare Tunnel → Edit, and Zone →
+    /// DNS → Edit. Kept here beside the machine tokens and never sent to a
+    /// browser.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub api_token: String,
+    /// Where a forwarded port appears, with `{port}` standing in for the number:
+    /// `{port}-sbox.example.com`.
+    ///
+    /// A hyphen and not a dot in the usual case, because Cloudflare's free
+    /// certificate covers `example.com` and one level below it and no further —
+    /// `5173.sbox.example.com` would resolve and then fail on its certificate.
+    /// Anyone with Advanced Certificate Manager can write the dotted form here
+    /// instead; this only ever creates what the pattern says.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub hostname: String,
+    /// Found from the token rather than asked for, and kept so the lookup is not
+    /// repeated on every change.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub account_id: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub zone_id: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub tunnel_id: String,
+    /// The names behind those ids. Kept so the panel can say which account,
+    /// which zone and which tunnel were found, rather than showing three
+    /// hexadecimal strings and asking for trust.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub account_name: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub zone_name: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub tunnel_name: String,
+    /// What the tunnel is told to send those hostnames to. The forwarder listens
+    /// here, on loopback, and is the only thing that ever answers them.
+    #[serde(default = "default_forward_port")]
+    pub forward_port: u16,
+    /// The ports allowed through, and nothing else. A token that leaks must not
+    /// turn this into a way to reach every port on the machine.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ports: Vec<u16>,
+}
+
+fn default_forward_port() -> u16 {
+    7718
+}
+
+impl Cloudflare {
+    /// Ready to arrange a hostname: a token, a pattern, and the three ids that
+    /// were found from them.
+    pub fn ready(&self) -> bool {
+        !self.api_token.is_empty()
+            && self.hostname.contains("{port}")
+            && !self.account_id.is_empty()
+            && !self.zone_id.is_empty()
+            && !self.tunnel_id.is_empty()
+    }
+
+    /// The hostname one port appears at.
+    pub fn host_for(&self, port: u16) -> String {
+        self.hostname.replace("{port}", &port.to_string())
+    }
+
+    /// The port a request is asking for, from its `Host:` header.
+    ///
+    /// Matched against the pattern rather than by splitting on a dot: the
+    /// pattern decides whether the number is followed by a hyphen or a dot, and
+    /// only the exact shape it describes is answered. Anything else — the
+    /// daemon's own hostname included — is not a forwarding request.
+    pub fn port_for(&self, host: &str) -> Option<u16> {
+        let host = host.split(':').next()?.trim().to_lowercase();
+        let pattern = self.hostname.to_lowercase();
+        let (before, after) = pattern.split_once("{port}")?;
+        let digits = host.strip_prefix(before)?.strip_suffix(after)?;
+        if digits.is_empty() || !digits.chars().all(|c| c.is_ascii_digit()) {
+            return None;
+        }
+        let port: u16 = digits.parse().ok()?;
+        self.ports.contains(&port).then_some(port)
+    }
 }
 
 /// A terminal you named, and the command it runs.
@@ -466,6 +560,7 @@ impl Default for Config {
             drops: Drops::default(),
             remotes: Vec::new(),
             saved: Vec::new(),
+            cloudflare: Cloudflare::default(),
         }
     }
 }
@@ -742,6 +837,66 @@ mod tests {
         assert!(!text.contains("bind"), "{text}");
         let back: Config = toml::from_str(&text).unwrap();
         assert!(back.lan_access);
+    }
+
+    #[test]
+    fn a_forwarded_port_is_read_off_the_host_header() {
+        let cf = Cloudflare {
+            hostname: "{port}-sbox.example.com".into(),
+            ports: vec![5173, 3000],
+            ..Cloudflare::default()
+        };
+        assert_eq!(cf.host_for(5173), "5173-sbox.example.com");
+        assert_eq!(cf.port_for("5173-sbox.example.com"), Some(5173));
+        // A port arrives with the header more often than not.
+        assert_eq!(cf.port_for("3000-sbox.example.com:443"), Some(3000));
+        assert_eq!(cf.port_for("5173-SBOX.EXAMPLE.COM"), Some(5173));
+    }
+
+    #[test]
+    fn only_the_shape_the_pattern_describes_is_answered() {
+        let cf = Cloudflare {
+            hostname: "{port}-sbox.example.com".into(),
+            ports: vec![5173],
+            ..Cloudflare::default()
+        };
+        // The daemon's own hostname is not a forwarding request.
+        assert_eq!(cf.port_for("sbox.example.com"), None);
+        assert_eq!(cf.port_for("notaport-sbox.example.com"), None);
+        assert_eq!(cf.port_for("-sbox.example.com"), None, "kosong bukan nomor");
+        assert_eq!(cf.port_for("5173-sbox.example.com.evil.test"), None);
+        // On the list or nowhere: a port nobody opened is not reachable.
+        assert_eq!(cf.port_for("9999-sbox.example.com"), None);
+    }
+
+    #[test]
+    fn a_dotted_pattern_works_the_same_way() {
+        // For anyone whose certificate covers a second level.
+        let cf = Cloudflare {
+            hostname: "{port}.sbox.example.com".into(),
+            ports: vec![5173],
+            ..Cloudflare::default()
+        };
+        assert_eq!(cf.host_for(5173), "5173.sbox.example.com");
+        assert_eq!(cf.port_for("5173.sbox.example.com"), Some(5173));
+        assert_eq!(cf.port_for("5173-sbox.example.com"), None);
+    }
+
+    #[test]
+    fn nothing_is_arranged_until_every_piece_is_known() {
+        let mut cf = Cloudflare {
+            api_token: "t".into(),
+            hostname: "{port}-sbox.example.com".into(),
+            ..Cloudflare::default()
+        };
+        assert!(!cf.ready(), "belum ada id yang ditemukan");
+        cf.account_id = "a".into();
+        cf.zone_id = "z".into();
+        cf.tunnel_id = "u".into();
+        assert!(cf.ready());
+        // A pattern with no place for the number cannot name anything.
+        cf.hostname = "sbox.example.com".into();
+        assert!(!cf.ready());
     }
 
     #[test]

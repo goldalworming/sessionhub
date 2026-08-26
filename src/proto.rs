@@ -154,6 +154,21 @@ pub enum ClientMsg {
         #[serde(default)]
         name: String,
     },
+    /// Store a Cloudflare API token and hostname pattern, then follow them to
+    /// the account, zone and tunnel they reach. Nothing is arranged here; this
+    /// only looks, so a wrong token or pattern is found out before any hostname
+    /// exists. An empty token forgets what was stored.
+    SetCloudflare {
+        api_token: String,
+        hostname: String,
+    },
+    /// Give a local port a hostname of its own, or take it away again.
+    ForwardPort {
+        port: u16,
+        /// `false` withdraws it: the ingress rule and then the DNS record.
+        #[serde(default)]
+        on: bool,
+    },
     /// Point an already paired machine at a different address.
     ///
     /// A machine whose IP moved is still the same machine: its name and its
@@ -321,6 +336,13 @@ pub enum ServerMsg {
     },
     /// Paired machines. **Without tokens** — a client only ever names them, and
     /// the token never leaves this daemon.
+    /// The forwarding settings on their own, after one of them changed. The
+    /// whole `config` message would do, but building that one resolves every
+    /// agent command on PATH and asks each for its version — far too much work
+    /// to redraw one pane.
+    Cloudflare {
+        cloudflare: CloudflareInfo,
+    },
     Remotes {
         remotes: Vec<RemoteInfo>,
         /// That this daemon understands `set_remote_addr`.
@@ -361,7 +383,36 @@ pub enum ServerMsg {
         /// access is on — without it nothing could reach us anyway.
         #[serde(skip_serializing_if = "Option::is_none")]
         pair_url: Option<String>,
+        /// Giving a local port a hostname of its own. **Without the API token**
+        /// — a client only ever sees what was arranged with it, the same rule
+        /// the machine tokens follow.
+        cloudflare: CloudflareInfo,
     },
+}
+
+/// What the panel is told about port forwarding.
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct CloudflareInfo {
+    /// That this daemon understands the messages below at all. Read the way
+    /// `can_pick` and `can_move` are: an older one leaves the field out, and a
+    /// pane that would only offer controls it cannot use is not drawn.
+    pub can_forward: bool,
+    /// Whether a token is stored, never the token itself.
+    pub connected: bool,
+    pub hostname: String,
+    /// What that token turned out to reach, named so a wrong guess can be seen
+    /// and refused rather than discovered later.
+    pub account_name: String,
+    pub zone_name: String,
+    pub tunnel_name: String,
+    /// The ports open now, each with the address it answers at.
+    pub ports: Vec<ForwardedPort>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ForwardedPort {
+    pub port: u16,
+    pub url: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
