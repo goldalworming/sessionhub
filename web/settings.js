@@ -1080,9 +1080,12 @@ export class Settings {
     for (const p of cf.ports || []) {
       // The same closed row a pairing link gets: the address carries a token,
       // and a token on screen is a token in the next screenshot.
+      // A row that leaves this machine says where it goes; one that does not
+      // would only be repeating itself.
+      const away = p.host && p.host !== '127.0.0.1' && p.host !== 'localhost';
       wrap.appendChild(
         this.secretRow(p.url, {
-          label: `Port ${p.port}`,
+          label: away ? `Port ${p.port} on ${p.host}` : `Port ${p.port}`,
           hint: 'Open it once with the token; the cookie carries it after that.',
         }),
       );
@@ -1097,7 +1100,7 @@ export class Settings {
       del.onclick = () => {
         del.disabled = true;
         this.note.textContent = 'Taking it away…';
-        this.onForward(p.port, false);
+        this.onForward(p.port, p.host, false);
       };
       bar.appendChild(del);
       wrap.appendChild(bar);
@@ -1108,7 +1111,10 @@ export class Settings {
     const field = document.createElement('input');
     field.type = 'text';
     field.className = 'amove';
-    field.placeholder = 'port, e.g. 5173';
+    field.placeholder = '5173, or 192.168.0.104:3100';
+    field.title =
+      'A port on this machine, or host:port for something on your network that ' +
+      'cannot run a tunnel of its own.';
     field.spellcheck = false;
     add.appendChild(field);
 
@@ -1117,14 +1123,19 @@ export class Settings {
     go.className = 'secbtn';
     go.textContent = 'Give it a hostname';
     const send = () => {
-      const port = Number(field.value.trim());
+      // `5173` or `192.168.0.104:3100`. The number after the last colon is the
+      // port; anything before it is where that port lives.
+      const raw = field.value.trim();
+      const at = raw.lastIndexOf(':');
+      const host = at > 0 ? raw.slice(0, at) : '';
+      const port = Number(at > 0 ? raw.slice(at + 1) : raw);
       if (!Number.isInteger(port) || port < 1 || port > 65535) {
         this.note.textContent = 'That is not a port number.';
         return;
       }
       go.disabled = true;
       this.note.textContent = 'Arranging it with Cloudflare…';
-      this.onForward(port, true);
+      this.onForward(port, host, true);
     };
     field.onkeydown = (e) => {
       if (e.key === 'Enter') {

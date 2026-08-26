@@ -1788,6 +1788,7 @@ html, body {
 }
 .flabel { font-size: 11px; color: var(--muted); }
 .abody input[type="text"],
+.abody input[type="password"],
 .abody select {
   font: inherit;
   font-family: var(--mono);
@@ -1800,7 +1801,10 @@ html, body {
   min-width: 0;
 }
 .abody select { font-family: var(--ui); }
+/* The password field is styled with the text ones above and here: without it
+   the browser keeps its own white box, which on a dark theme reads as a hole. */
 .abody input[type="text"]:focus,
+.abody input[type="password"]:focus,
 .abody select:focus { outline: 1px solid var(--accent); }
 .abody input::placeholder { color: var(--muted); }
 .span2 { grid-column: 1 / -1; }

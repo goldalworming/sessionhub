@@ -907,7 +907,7 @@ pub fn run(cfg: Config, rx: Receiver<Cmd>, tx: Sender<Cmd>, registry_cfg: Sender
                     send_to(&clients, id, json(&cloudflare_msg(&cfg)));
                 }
 
-                ClientMsg::ForwardPort { port, on } => {
+                ClientMsg::ForwardPort { port, host, on } => {
                     if !cfg.cloudflare.ready() {
                         send_to(
                             &clients,
@@ -920,7 +920,27 @@ pub fn run(cfg: Config, rx: Receiver<Cmd>, tx: Sender<Cmd>, registry_cfg: Sender
                         );
                         continue;
                     }
-                    if on && (port == cfg.port || port == cfg.cloudflare.forward_port || port == 0) {
+                    // Where it lives, and whether we are willing to dial there.
+                    let where_ = if host.trim().is_empty() {
+                        "127.0.0.1".to_string()
+                    } else {
+                        host.trim().to_lowercase()
+                    };
+                    if on && !reachable_target(&where_) {
+                        send_to(
+                            &clients,
+                            id,
+                            json(&ServerMsg::Error {
+                                code: "bad_host".into(),
+                                message: format!(
+                                    "{where_} is not an address on your own network. sessionhub                                      will forward to this machine or to a private address, and                                      nowhere else."
+                                ),
+                            }),
+                        );
+                        continue;
+                    }
+                    let own = where_ == "127.0.0.1" || where_ == "localhost";
+                    if on && own && (port == cfg.port || port == cfg.cloudflare.forward_port || port == 0) {
                         send_to(
                             &clients,
                             id,
@@ -937,12 +957,26 @@ pub fn run(cfg: Config, rx: Receiver<Cmd>, tx: Sender<Cmd>, registry_cfg: Sender
                     // answer for it. Both are undone if Cloudflare refuses.
                     let had = cfg.cloudflare.ports.clone();
                     if on {
-                        if !cfg.cloudflare.ports.contains(&port) {
-                            cfg.cloudflare.ports.push(port);
-                            cfg.cloudflare.ports.sort_unstable();
+                        // One hostname per port number, whatever machine it
+                        // points at: the name is built from the number, so two
+                        // entries sharing it would be one name meaning two
+                        // things.
+                        if let Some(taken) = cfg.cloudflare.ports.iter().find(|f| f.port == port) {
+                            let message = format!(
+                                "Port {port} is already open, pointing at {}.",
+                                taken.target()
+                            );
+                            send_to(
+                                &clients,
+                                id,
+                                json(&ServerMsg::Error { code: "bad_port".into(), message }),
+                            );
+                            continue;
                         }
+                        cfg.cloudflare.ports.push(crate::config::Forwarded { port, host: where_ });
+                        cfg.cloudflare.ports.sort_by_key(|f| f.port);
                     } else {
-                        cfg.cloudflare.ports.retain(|p| *p != port);
+                        cfg.cloudflare.ports.retain(|f| f.port != port);
                     }
                     if let Err(e) =
                         crate::http::set_forwarding(!cfg.cloudflare.ports.is_empty(), cfg.cloudflare.forward_port)
@@ -2114,6 +2148,34 @@ fn pair_remote(
     Ok(crate::config::Remote { name, addr, token: parsed.token, version: status.version })
 }
 
+/// Whether sessionhub is willing to dial an address at all.
+///
+/// This machine, or something on a private network. Never a public address: the
+/// forwarder exists to reach a dev server sitting beside you, and one typo that
+/// turned it into an open proxy to the internet would be a different program
+/// entirely. The `via` relay carries the same rule for the same reason.
+fn reachable_target(host: &str) -> bool {
+    if host == "localhost" {
+        return true;
+    }
+    let Ok(ip) = host.parse::<std::net::IpAddr>() else {
+        // A name rather than a number. It could resolve anywhere, and nothing
+        // here can promise where.
+        return false;
+    };
+    match ip {
+        std::net::IpAddr::V4(v4) => {
+            v4.is_loopback() || v4.is_private() || v4.is_link_local()
+        }
+        std::net::IpAddr::V6(v6) => {
+            // Loopback, link-local (fe80::/10) and unique-local (fc00::/7).
+            v6.is_loopback()
+                || (v6.segments()[0] & 0xffc0) == 0xfe80
+                || (v6.segments()[0] & 0xfe00) == 0xfc00
+        }
+    }
+}
+
 /// What the panel is told about port forwarding — everything except the token
 /// itself, which never leaves this process.
 fn cloudflare_msg(cfg: &Config) -> ServerMsg {
@@ -2131,13 +2193,14 @@ fn cloudflare_info(cf: &crate::config::Cloudflare, token: &str) -> crate::proto:
         ports: cf
             .ports
             .iter()
-            .map(|p| crate::proto::ForwardedPort {
-                port: *p,
+            .map(|f| crate::proto::ForwardedPort {
+                port: f.port,
+                host: f.host.clone(),
                 // With the token on it, the way `lan_url` carries one: a tunnel
                 // hostname is its own origin, so the first visit has to bring
                 // one before the cookie can take over. Shown through the same
                 // closed row a pairing link uses.
-                url: format!("https://{}/?token={token}", cf.host_for(*p)),
+                url: format!("https://{}/?token={token}", cf.host_for(f.port)),
             })
             .collect(),
     }

@@ -8,7 +8,7 @@
 //! writes (auto-pong), so their frames can interleave.
 
 use std::io::{self, Read, Write};
-use std::net::{Ipv4Addr, Shutdown, SocketAddr, TcpListener, TcpStream};
+use std::net::{Ipv4Addr, Shutdown, SocketAddr, TcpListener, TcpStream, ToSocketAddrs};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, RwLock};
 use std::thread;
@@ -173,17 +173,12 @@ fn forward(mut sock: TcpStream, ctx: ServeCtx) -> io::Result<()> {
         // Both get the same answer: this is not a door.
         return respond(&mut sock, 404, "text/plain; charset=utf-8", b"404 not forwarded here\n");
     };
-    if port == ctx.cfg.port {
-        return respond(&mut sock, 400, "text/plain; charset=utf-8", b"400 that is sessionhub\n");
-    }
-
     let secret = ctx.token.read().map(|t| t.clone()).unwrap_or_default();
     let from_query = req.query_param("token");
     if !token_ok(&secret, from_query.as_deref())
         && !token_ok(&secret, req.cookie("sh_token").as_deref())
     {
-        return respond(&mut sock, 401, "text/plain; charset=utf-8", b"401 invalid token
-");
+        return respond(&mut sock, 401, "text/plain; charset=utf-8", b"401 invalid token\n");
     }
 
     // The token arrived in the address bar. A tunnel hostname is its own origin,
@@ -202,12 +197,26 @@ fn forward(mut sock: TcpStream, ctx: ServeCtx) -> io::Result<()> {
         return sock.flush();
     }
 
-    let target = SocketAddr::from((Ipv4Addr::LOCALHOST, port));
-    let mut far = match TcpStream::connect_timeout(&target, Duration::from_secs(5)) {
+    // Usually this machine, but a port on the network is allowed too — for
+    // something that cannot run a tunnel of its own. The allow-list decided that
+    // when the port was opened; nothing here can widen it.
+    let target = cf.target_for(port).unwrap_or_else(|| format!("127.0.0.1:{port}"));
+    // Refused only when it really is this machine: port 7717 on another one is
+    // somebody else's daemon, and wanting to reach that is ordinary.
+    let here = target.starts_with("127.0.0.1:") || target.starts_with("localhost:");
+    if here && port == ctx.cfg.port {
+        return respond(&mut sock, 400, "text/plain; charset=utf-8", b"400 that is sessionhub\n");
+    }
+
+    let Some(addr) = target.to_socket_addrs().ok().and_then(|mut a| a.next()) else {
+        let msg = format!("502 {target} is not an address this machine can resolve\n");
+        return respond(&mut sock, 502, "text/plain; charset=utf-8", msg.as_bytes());
+    };
+    let mut far = match TcpStream::connect_timeout(&addr, Duration::from_secs(5)) {
         Ok(f) => f,
         Err(e) => {
-            warn!(port, error = %e, "nothing is listening on a forwarded port");
-            let msg = format!("502 nothing is listening on port {port} here\n");
+            warn!(%target, error = %e, "nothing is listening on a forwarded port");
+            let msg = format!("502 nothing is listening on {target}\n");
             return respond(&mut sock, 502, "text/plain; charset=utf-8", msg.as_bytes());
         }
     };

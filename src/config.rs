@@ -92,10 +92,32 @@ pub struct Cloudflare {
     /// here, on loopback, and is the only thing that ever answers them.
     #[serde(default = "default_forward_port")]
     pub forward_port: u16,
-    /// The ports allowed through, and nothing else. A token that leaks must not
-    /// turn this into a way to reach every port on the machine.
+    /// What is allowed through, and nothing else. A token that leaks must not
+    /// turn this into a way to reach every port on the machine, let alone every
+    /// machine on the network.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub ports: Vec<u16>,
+    pub ports: Vec<Forwarded>,
+}
+
+/// One port given a hostname, and where it actually lives.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Forwarded {
+    pub port: u16,
+    /// Loopback unless the thing being reached is on another machine — one that
+    /// cannot run a tunnel of its own because a VPN is in the way, say. The
+    /// tunnel runs here; only the last hop crosses the network.
+    #[serde(default = "loopback")]
+    pub host: String,
+}
+
+fn loopback() -> String {
+    "127.0.0.1".to_string()
+}
+
+impl Forwarded {
+    pub fn target(&self) -> String {
+        format!("{}:{}", self.host, self.port)
+    }
 }
 
 fn default_forward_port() -> u16 {
@@ -118,6 +140,11 @@ impl Cloudflare {
         self.hostname.replace("{port}", &port.to_string())
     }
 
+    /// Where a port actually is, if it was opened at all.
+    pub fn target_for(&self, port: u16) -> Option<String> {
+        self.ports.iter().find(|f| f.port == port).map(|f| f.target())
+    }
+
     /// The port a request is asking for, from its `Host:` header.
     ///
     /// Matched against the pattern rather than by splitting on a dot: the
@@ -133,7 +160,7 @@ impl Cloudflare {
             return None;
         }
         let port: u16 = digits.parse().ok()?;
-        self.ports.contains(&port).then_some(port)
+        self.ports.iter().any(|f| f.port == port).then_some(port)
     }
 }
 
@@ -839,11 +866,15 @@ mod tests {
         assert!(back.lan_access);
     }
 
+    fn fwd(port: u16) -> Forwarded {
+        Forwarded { port, host: loopback() }
+    }
+
     #[test]
     fn a_forwarded_port_is_read_off_the_host_header() {
         let cf = Cloudflare {
             hostname: "{port}-sbox.example.com".into(),
-            ports: vec![5173, 3000],
+            ports: vec![fwd(5173), fwd(3000)],
             ..Cloudflare::default()
         };
         assert_eq!(cf.host_for(5173), "5173-sbox.example.com");
@@ -857,7 +888,7 @@ mod tests {
     fn only_the_shape_the_pattern_describes_is_answered() {
         let cf = Cloudflare {
             hostname: "{port}-sbox.example.com".into(),
-            ports: vec![5173],
+            ports: vec![fwd(5173)],
             ..Cloudflare::default()
         };
         // The daemon's own hostname is not a forwarding request.
@@ -874,12 +905,29 @@ mod tests {
         // For anyone whose certificate covers a second level.
         let cf = Cloudflare {
             hostname: "{port}.sbox.example.com".into(),
-            ports: vec![5173],
+            ports: vec![fwd(5173)],
             ..Cloudflare::default()
         };
         assert_eq!(cf.host_for(5173), "5173.sbox.example.com");
         assert_eq!(cf.port_for("5173.sbox.example.com"), Some(5173));
         assert_eq!(cf.port_for("5173-sbox.example.com"), None);
+    }
+
+    #[test]
+    fn a_port_can_live_on_another_machine() {
+        // The hostname is built from the number either way; only the last hop
+        // changes, which is what lets a machine with no tunnel of its own be
+        // reached through this one.
+        let cf = Cloudflare {
+            hostname: "{port}-sbox.example.com".into(),
+            ports: vec![fwd(5173), Forwarded { port: 3100, host: "192.168.0.104".into() }],
+            ..Cloudflare::default()
+        };
+        assert_eq!(cf.target_for(5173).as_deref(), Some("127.0.0.1:5173"));
+        assert_eq!(cf.target_for(3100).as_deref(), Some("192.168.0.104:3100"));
+        assert_eq!(cf.target_for(9999), None, "yang tidak dibuka tidak punya tujuan");
+        // Both are still answered for by name.
+        assert_eq!(cf.port_for("3100-sbox.example.com"), Some(3100));
     }
 
     #[test]

@@ -1854,7 +1854,7 @@ const settings = new Settings(
   // Through the facade, so a remote machine's panel arranges hostnames on that
   // machine's own tunnel — every machine has its own.
   (api_token, hostname) => conn.send({ t: 'set_cloudflare', api_token, hostname }),
-  (port, on) => conn.send({ t: 'forward_port', port, on }),
+  (port, host, on) => conn.send({ t: 'forward_port', port, host, on }),
 );
 
 document.getElementById('settings-btn').onclick = () => {

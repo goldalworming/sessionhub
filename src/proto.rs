@@ -162,9 +162,14 @@ pub enum ClientMsg {
         api_token: String,
         hostname: String,
     },
-    /// Give a local port a hostname of its own, or take it away again.
+    /// Give a port a hostname of its own, or take it away again.
     ForwardPort {
         port: u16,
+        /// Where that port actually is. Empty means this machine — the usual
+        /// case. A machine on the network is named here instead, for the ones
+        /// that cannot run a tunnel themselves.
+        #[serde(default)]
+        host: String,
         /// `false` withdraws it: the ingress rule and then the DNS record.
         #[serde(default)]
         on: bool,
@@ -413,6 +418,8 @@ pub struct CloudflareInfo {
 pub struct ForwardedPort {
     pub port: u16,
     pub url: String,
+    /// Shown beside the address, so a row that leaves this machine says so.
+    pub host: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
