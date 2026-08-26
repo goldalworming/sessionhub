@@ -154,25 +154,29 @@ pub enum ClientMsg {
         #[serde(default)]
         name: String,
     },
-    /// Store a Cloudflare API token and hostname pattern, then follow them to
-    /// the account, zone and tunnel they reach. Nothing is arranged here; this
-    /// only looks, so a wrong token or pattern is found out before any hostname
-    /// exists. An empty token forgets what was stored.
+    /// Hand over a Cloudflare API token, or choose from what one already
+    /// found.
+    ///
+    /// Sent twice in the usual flow: once with a token, which comes back with
+    /// the domains and tunnels it can see, and once with the two ids chosen
+    /// from that list. An empty token with no ids forgets the account, and
+    /// every address falls back to a throwaway tunnel.
     SetCloudflare {
+        #[serde(default)]
         api_token: String,
-        hostname: String,
+        #[serde(default)]
+        zone_id: String,
+        #[serde(default)]
+        tunnel_id: String,
     },
-    /// Give a port a hostname of its own, or take it away again.
-    ForwardPort {
-        port: u16,
-        /// Where that port actually is. Empty means this machine — the usual
-        /// case. A machine on the network is named here instead, for the ones
-        /// that cannot run a tunnel themselves.
-        #[serde(default)]
-        host: String,
-        /// `false` withdraws it: the ingress rule and then the DNS record.
-        #[serde(default)]
-        on: bool,
+    /// Give an address a way in from outside: `localhost:5173`,
+    /// `192.168.0.104:3100`, or the same with a scheme in front.
+    AddForward {
+        url: String,
+    },
+    /// Close one again. Whatever is running behind it is untouched.
+    RemoveForward {
+        name: String,
     },
     /// Point an already paired machine at a different address.
     ///
@@ -395,31 +399,37 @@ pub enum ServerMsg {
     },
 }
 
-/// What the panel is told about port forwarding.
+/// What the panel is told about reaching this machine from outside.
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct CloudflareInfo {
-    /// That this daemon understands the messages below at all. Read the way
+    /// That this daemon understands the messages above at all. Read the way
     /// `can_pick` and `can_move` are: an older one leaves the field out, and a
-    /// pane that would only offer controls it cannot use is not drawn.
+    /// pane whose every control is refused is not drawn.
     pub can_forward: bool,
-    /// Whether a token is stored, never the token itself.
+    /// Whether a token is stored — never the token itself.
     pub connected: bool,
-    pub hostname: String,
-    /// What that token turned out to reach, named so a wrong guess can be seen
-    /// and refused rather than discovered later.
+    /// Whether hostnames can be arranged on a domain of your own. When false,
+    /// everything still works through throwaway tunnels.
+    pub ready: bool,
     pub account_name: String,
     pub zone_name: String,
     pub tunnel_name: String,
-    /// The ports open now, each with the address it answers at.
-    pub ports: Vec<ForwardedPort>,
+    /// The domains and tunnels that token can see, to choose between. Empty
+    /// until a token has been handed over in this session.
+    pub zones: Vec<crate::cloudflare::Named>,
+    pub tunnels: Vec<crate::cloudflare::Named>,
+    pub forwards: Vec<ForwardedPort>,
 }
 
 #[derive(Debug, Clone, Serialize)]
 pub struct ForwardedPort {
-    pub port: u16,
+    /// The label in front of the domain; also how one is closed again.
+    pub name: String,
+    /// What it reaches, as it was typed.
+    pub target: String,
+    /// Where to open it, token and all. Empty while a throwaway tunnel is still
+    /// coming up.
     pub url: String,
-    /// Shown beside the address, so a row that leaves this machine says so.
-    pub host: String,
 }
 
 #[derive(Debug, Clone, Serialize)]

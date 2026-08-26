@@ -1776,7 +1776,10 @@ html, body {
 .cfports { display: flex; flex-direction: column; gap: 6px; margin-top: 12px; }
 .cfports .usagebar { justify-content: flex-end; padding-top: 0; }
 .cfadd { justify-content: flex-start; gap: 8px; }
-.cfadd .amove { max-width: 160px; }
+.cfadd .amove { max-width: 260px; }
+/* A note that belongs to the whole form rather than to one label and field. */
+.cfspan { grid-column: 1 / -1; }
+.cfspan .sstat { margin: 0 0 4px; }
 .agent.off .aname { color: var(--muted); }
 
 .abody {

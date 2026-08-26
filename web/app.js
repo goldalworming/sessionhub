@@ -1853,8 +1853,10 @@ const settings = new Settings(
   },
   // Through the facade, so a remote machine's panel arranges hostnames on that
   // machine's own tunnel — every machine has its own.
-  (api_token, hostname) => conn.send({ t: 'set_cloudflare', api_token, hostname }),
-  (port, host, on) => conn.send({ t: 'forward_port', port, host, on }),
+  (api_token, zone_id, tunnel_id) =>
+    conn.send({ t: 'set_cloudflare', api_token, zone_id, tunnel_id }),
+  (url) => conn.send({ t: 'add_forward', url }),
+  (name) => conn.send({ t: 'remove_forward', name }),
 );
 
 document.getElementById('settings-btn').onclick = () => {
@@ -2357,11 +2359,7 @@ conn.on.onError = (msg, m) => {
   showNextAttach = null;
   // Asked for from the Settings panel, so answered there — the ＋ Connect box
   // this would otherwise land in may not even be open.
-  if (
-    msg.code === 'cloudflare_failed'
-    || msg.code === 'bad_hostname'
-    || msg.code === 'bad_port'
-  ) {
+  if (msg.code === 'cloudflare_failed' || msg.code === 'bad_target') {
     settings.moveFailed(msg.message || msg.code);
     if (!settings.open) banner(msg.message, true);
     return;

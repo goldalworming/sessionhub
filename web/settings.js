@@ -67,7 +67,8 @@ export class Settings {
     onUpdate,
     onUpdateAgent,
     onCloudflare,
-    onForward,
+    onAddForward,
+    onRemoveForward,
   ) {
     /// `onUpdate('check'|'apply'|'apply_web')` asks the daemon to look for a
     /// release, to install it and restart into it, or to install only the
@@ -82,7 +83,8 @@ export class Settings {
     this.onForget = onForget || (() => {});
     this.onMoveRemote = onMoveRemote || (() => {});
     this.onCloudflare = onCloudflare || (() => {});
-    this.onForward = onForward || (() => {});
+    this.onAddForward = onAddForward || (() => {});
+    this.onRemoveForward = onRemoveForward || (() => {});
     this.cf = null;
     this.agents = [];
     this.shells = [];
@@ -955,12 +957,11 @@ export class Settings {
 
   // -------------------------------------------------------------- cloudflare
 
-  /// Giving a local port a hostname of its own, through the tunnel this machine
-  /// is already reached by.
+  /// Reaching something on this machine — or on your network — from outside.
   ///
   /// Its own pane rather than a row under Network: there is a credential, a
-  /// hostname pattern, three things that were found and a list of ports, and
-  /// Network is one switch and one address.
+  /// domain, a tunnel and a list of addresses, and Network is one switch and one
+  /// address.
   cloudflarePane() {
     const pane = document.createElement('div');
     pane.className = 'sec cloudflare';
@@ -968,51 +969,46 @@ export class Settings {
     pane.appendChild(
       this.head(
         'Cloudflare',
-        'Give a port on this machine a hostname of its own, so a dev server can be ' +
-          'opened from anywhere this tunnel reaches.',
+        'Give something a way in from outside — a dev server here, or a machine ' +
+          'on your network that cannot run a tunnel of its own.',
       ),
     );
 
-    if (!cf.connected) {
-      pane.appendChild(
-        Settings.stat(
-          'muted',
-          'Paste an API token that may edit Cloudflare Tunnel on your account and DNS on ' +
-            'the zone. The account, the zone and the tunnel already carrying sessionhub ' +
-            'are found from it — there are no ids to look up.',
-        ),
-      );
-    }
-
-    pane.appendChild(this.cfConnectRow(cf));
-
-    if (cf.connected) {
-      if (cf.account_name || cf.zone_name || cf.tunnel_name) {
-        pane.appendChild(
-          Settings.stat(
-            'ok',
-            `Account ${cf.account_name} · zone ${cf.zone_name} · tunnel ${cf.tunnel_name}`,
-          ),
-        );
-      }
-      pane.appendChild(this.cfPorts(cf));
-      pane.appendChild(
-        Settings.stat(
-          'warn',
-          'Anyone holding one of these addresses and its token reaches that port. A dev ' +
-            'server is not built to sit on the internet — Vite will hand out files from ' +
-            'outside the project.',
-        ),
-      );
-    }
+    pane.appendChild(this.cfAccount(cf));
+    pane.appendChild(this.cfForwards(cf));
+    pane.appendChild(
+      Settings.stat(
+        'warn',
+        'Anyone holding one of these addresses and its token reaches what is behind ' +
+          'it. A dev server is not built to sit on the internet — Vite will hand out ' +
+          'files from outside the project.',
+      ),
+    );
     return pane;
   }
 
-  /// The token and the pattern. The token only ever travels one way: what comes
-  /// back from the daemon says whether one is stored, never what it is.
-  cfConnectRow(cf) {
+  /// The token, and then what it turned out to reach.
+  ///
+  /// The token only ever travels one way: what comes back says whether one is
+  /// stored, never what it is.
+  cfAccount(cf) {
     const wrap = document.createElement('div');
     wrap.className = 'abody cfconnect';
+
+    if (!cf.connected) {
+      const note = document.createElement('div');
+      note.className = 'cfspan';
+      note.appendChild(
+        Settings.stat(
+          'muted',
+          'Without a token every address gets a throwaway trycloudflare name, which ' +
+            'works the same and changes every time it starts. Paste a token that may ' +
+            'edit Cloudflare Tunnel on your account and DNS on the zone, and the names ' +
+            'become yours and stay put.',
+        ),
+      );
+      wrap.appendChild(note);
+    }
 
     const tokenLabel = document.createElement('label');
     tokenLabel.textContent = 'API token';
@@ -1020,22 +1016,9 @@ export class Settings {
     token.type = 'password';
     token.spellcheck = false;
     token.autocomplete = 'off';
-    token.placeholder = cf.connected ? 'stored — type a new one to replace it' : 'paste it here';
+    token.placeholder = cf.connected ? 'stored — type a new one to replace it' : 'optional';
     wrap.appendChild(tokenLabel);
     wrap.appendChild(token);
-
-    const hostLabel = document.createElement('label');
-    hostLabel.textContent = 'Hostname';
-    const host = document.createElement('input');
-    host.type = 'text';
-    host.spellcheck = false;
-    host.value = cf.hostname || '';
-    host.placeholder = '{port}-sbox.example.com';
-    host.title =
-      '{port} stands in for the number. A hyphen rather than a dot keeps it one level ' +
-      'deep, which is as far as the free certificate from Cloudflare reaches.';
-    wrap.appendChild(hostLabel);
-    wrap.appendChild(host);
 
     const bar = document.createElement('div');
     bar.className = 'usagebar cfbar';
@@ -1046,13 +1029,14 @@ export class Settings {
     go.onclick = () => {
       const t = token.value.trim();
       if (!t && !cf.connected) {
-        this.note.textContent = 'An API token is needed first.';
+        this.note.textContent = 'Paste a token first, or leave this and add an address — ' +
+          'those get throwaway names.';
         return;
       }
       go.disabled = true;
       go.textContent = 'Asking Cloudflare…';
-      this.note.textContent = 'Looking for the account, the zone and the tunnel…';
-      this.onCloudflare(t, host.value.trim());
+      this.note.textContent = 'Looking for the account, the domains and the tunnels…';
+      this.onCloudflare(t, '', '');
     };
     bar.appendChild(go);
 
@@ -1060,35 +1044,83 @@ export class Settings {
       const off = document.createElement('button');
       off.type = 'button';
       off.className = 'del';
-      off.textContent = 'Disconnect';
-      off.title = 'Forget the token. Hostnames already arranged are left exactly as they are.';
+      off.textContent = 'Forget token';
+      off.title = 'Back to throwaway names. Addresses already arranged are left as they are.';
       off.onclick = () => {
         this.note.textContent = 'Forgetting…';
-        this.onCloudflare('', host.value.trim());
+        this.onCloudflare('', '', '');
       };
       bar.appendChild(off);
     }
     wrap.appendChild(document.createElement('span'));
     wrap.appendChild(bar);
+
+    // Chosen from what the token can see, rather than typed from memory.
+    if (cf.zones?.length || cf.tunnels?.length) {
+      wrap.appendChild(this.cfChoice('Domain', cf.zones || [], cf.zone_name, (id) =>
+        this.onCloudflare('', id, ''),
+      ));
+      wrap.appendChild(this.cfChoice('Tunnel', cf.tunnels || [], cf.tunnel_name, (id) =>
+        this.onCloudflare('', '', id),
+      ));
+    } else if (cf.connected && cf.ready) {
+      const found = document.createElement('div');
+      found.className = 'cfspan';
+      found.appendChild(
+        Settings.stat('ok', `${cf.zone_name} · tunnel ${cf.tunnel_name} · ${cf.account_name}`),
+      );
+      wrap.appendChild(found);
+    }
     return wrap;
   }
 
-  cfPorts(cf) {
+  cfChoice(label, options, chosen, pick) {
+    const l = document.createElement('label');
+    l.textContent = label;
+    const sel = document.createElement('select');
+    if (!options.some((o) => o.name === chosen)) {
+      const blank = document.createElement('option');
+      blank.textContent = 'Select…';
+      blank.value = '';
+      sel.appendChild(blank);
+    }
+    for (const o of options) {
+      const opt = document.createElement('option');
+      opt.value = o.id;
+      opt.textContent = o.name;
+      if (o.name === chosen) opt.selected = true;
+      sel.appendChild(opt);
+    }
+    sel.onchange = () => {
+      if (!sel.value) return;
+      this.note.textContent = 'Saving…';
+      pick(sel.value);
+    };
+    const row = document.createDocumentFragment();
+    row.appendChild(l);
+    row.appendChild(sel);
+    return row;
+  }
+
+  cfForwards(cf) {
     const wrap = document.createElement('div');
     wrap.className = 'cfports';
 
-    for (const p of cf.ports || []) {
-      // The same closed row a pairing link gets: the address carries a token,
-      // and a token on screen is a token in the next screenshot.
-      // A row that leaves this machine says where it goes; one that does not
-      // would only be repeating itself.
-      const away = p.host && p.host !== '127.0.0.1' && p.host !== 'localhost';
-      wrap.appendChild(
-        this.secretRow(p.url, {
-          label: away ? `Port ${p.port} on ${p.host}` : `Port ${p.port}`,
-          hint: 'Open it once with the token; the cookie carries it after that.',
-        }),
-      );
+    for (const f of cf.forwards || []) {
+      if (f.url) {
+        // The same closed row a pairing link gets: the address carries a token,
+        // and a token on screen is a token in the next screenshot.
+        wrap.appendChild(
+          this.secretRow(f.url, {
+            label: f.target,
+            hint: 'Open it once with the token; the cookie carries it after that.',
+          }),
+        );
+      } else {
+        wrap.appendChild(
+          Settings.stat('muted', `${f.target} — waiting for a tunnel to come up…`),
+        );
+      }
 
       const bar = document.createElement('div');
       bar.className = 'usagebar';
@@ -1096,11 +1128,11 @@ export class Settings {
       del.type = 'button';
       del.className = 'del';
       del.textContent = 'Close';
-      del.title = `Take the hostname away. Whatever runs on ${p.port} is untouched.`;
+      del.title = `Take the way in away. Whatever runs on ${f.target} is untouched.`;
       del.onclick = () => {
         del.disabled = true;
-        this.note.textContent = 'Taking it away…';
-        this.onForward(p.port, p.host, false);
+        this.note.textContent = `Closing ${f.target}…`;
+        this.onRemoveForward(f.name);
       };
       bar.appendChild(del);
       wrap.appendChild(bar);
@@ -1111,31 +1143,27 @@ export class Settings {
     const field = document.createElement('input');
     field.type = 'text';
     field.className = 'amove';
-    field.placeholder = '5173, or 192.168.0.104:3100';
-    field.title =
-      'A port on this machine, or host:port for something on your network that ' +
-      'cannot run a tunnel of its own.';
+    field.placeholder = 'localhost:5173, or 192.168.0.104:3100';
     field.spellcheck = false;
+    field.title =
+      'Something on this machine, or on your own network. A bare number is a port here.';
     add.appendChild(field);
 
     const go = document.createElement('button');
     go.type = 'button';
     go.className = 'secbtn';
-    go.textContent = 'Give it a hostname';
+    go.textContent = 'Give it a way in';
     const send = () => {
-      // `5173` or `192.168.0.104:3100`. The number after the last colon is the
-      // port; anything before it is where that port lives.
-      const raw = field.value.trim();
-      const at = raw.lastIndexOf(':');
-      const host = at > 0 ? raw.slice(0, at) : '';
-      const port = Number(at > 0 ? raw.slice(at + 1) : raw);
-      if (!Number.isInteger(port) || port < 1 || port > 65535) {
-        this.note.textContent = 'That is not a port number.';
+      const url = field.value.trim();
+      if (!url) {
+        this.note.textContent = 'An address is needed, like localhost:5173.';
         return;
       }
       go.disabled = true;
-      this.note.textContent = 'Arranging it with Cloudflare…';
-      this.onForward(port, host, true);
+      this.note.textContent = cf.ready
+        ? 'Arranging a hostname with Cloudflare…'
+        : 'Starting a throwaway tunnel — this takes a few seconds…';
+      this.onAddForward(url);
     };
     field.onkeydown = (e) => {
       if (e.key === 'Enter') {

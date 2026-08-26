@@ -7,6 +7,7 @@
 //! `tungstenite` instances over the same socket are not safe — `read()` also
 //! writes (auto-pong), so their frames can interleave.
 
+use std::collections::HashMap;
 use std::io::{self, Read, Write};
 use std::net::{Ipv4Addr, Shutdown, SocketAddr, TcpListener, TcpStream, ToSocketAddrs};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -44,13 +45,17 @@ struct ServeCtx {
 
 static CTX: OnceLock<ServeCtx> = OnceLock::new();
 static LAN: Mutex<Option<LanListener>> = Mutex::new(None);
-static FORWARD: Mutex<Option<PortForwarder>> = Mutex::new(None);
+static FORWARDS: Mutex<Option<HashMap<String, ForwardListener>>> = Mutex::new(None);
 
-/// The one socket every forwarded port arrives on. Which port a request wants
-/// is read from its `Host:` header, so one listener serves them all and the
-/// tunnel needs one rule per hostname and nothing else.
-struct PortForwarder {
-    addr: SocketAddr,
+/// One address made reachable: its own loopback socket, and the target it hands
+/// everything to.
+///
+/// One listener per address rather than one shared socket keyed by `Host:`. A
+/// throwaway tunnel answers on a name nobody chose, so there is nothing in the
+/// header to recognise — and this way the two kinds of tunnel take exactly the
+/// same path through here.
+struct ForwardListener {
+    local: u16,
     stop: Arc<AtomicBool>,
 }
 
@@ -76,8 +81,15 @@ pub fn serve(
     info!(port = cfg.port, "listening on 127.0.0.1");
 
     let lan_wanted = cfg.lan_access;
-    let forwarding_wanted = !cfg.cloudflare.ports.is_empty() && cfg.cloudflare.ready();
-    let forward_port = cfg.cloudflare.forward_port;
+    // Addresses that were open before the daemon stopped: the tunnel still
+    // points at them, so their listeners have to come back with it.
+    let reopen: Vec<(String, u16, String)> = cfg
+        .cloudflare
+        .forwards
+        .iter()
+        .map(|f| (f.name.clone(), f.local, f.target()))
+        .collect();
+    let quick_again = !cfg.cloudflare.ready();
     let ctx = ServeCtx {
         cfg: Arc::new(cfg),
         token,
@@ -87,13 +99,20 @@ pub fn serve(
     };
     let _ = CTX.set(ctx.clone());
 
-    // Ports given a hostname keep it across a restart: the tunnel still has the
-    // rules, so the listener they point at has to come back with the daemon.
-    if forwarding_wanted {
-        match set_forwarding(true, forward_port) {
-            Ok(Some(addr)) => info!(%addr, "forwarding ports"),
-            Ok(None) => {}
-            Err(e) => warn!(error = %e, "could not open the forwarding listener"),
+    for (name, local, target) in reopen {
+        if let Err(e) = open_forward(&name, local, target) {
+            warn!(%name, error = %e, "could not reopen a forwarded address");
+            continue;
+        }
+        // A throwaway tunnel does not survive the process that ran it, so it is
+        // started again — under a new name, which is what throwaway means.
+        if quick_again {
+            let name = name.clone();
+            thread::spawn(move || {
+                if let Err(e) = crate::tunnel::quick::start(&name, local) {
+                    warn!(%name, error = %e, "could not start a throwaway tunnel again");
+                }
+            });
         }
     }
 
@@ -109,70 +128,69 @@ pub fn serve(
     Ok(())
 }
 
-/// Open or close the socket that forwarded ports arrive on.
+/// Open the socket that stands in front of one address.
 ///
 /// Loopback only, always: what reaches it comes from cloudflared running on this
 /// machine, and a forwarder listening on the network would be a second way in
 /// that nobody asked for.
-pub fn set_forwarding(on: bool, port: u16) -> Result<Option<SocketAddr>, String> {
+pub fn open_forward(name: &str, local: u16, target: String) -> Result<(), String> {
     let Some(ctx) = CTX.get() else {
         return Err("server is not running yet".into());
     };
-    let mut slot = FORWARD.lock().map_err(|_| "forwarder state is poisoned".to_string())?;
+    close_forward(name);
 
-    if let Some(existing) = slot.take() {
-        existing.stop.store(true, Ordering::Relaxed);
-        // Accept blocks; one brief connection wakes it so it sees the flag.
-        let _ = TcpStream::connect_timeout(&existing.addr, Duration::from_millis(500));
-        info!(addr = %existing.addr, "stopped forwarding ports");
-    }
-    if !on {
-        return Ok(None);
-    }
-
-    let addr = SocketAddr::from((Ipv4Addr::LOCALHOST, port));
+    let addr = SocketAddr::from((Ipv4Addr::LOCALHOST, local));
     let listener = TcpListener::bind(addr).map_err(|e| format!("could not open {addr}: {e}"))?;
     let stop = Arc::new(AtomicBool::new(false));
     let flag = Arc::clone(&stop);
     let ctx = ctx.clone();
-    thread::spawn(move || forward_loop(listener, ctx, flag));
-    info!(%addr, "forwarding ports");
-    *slot = Some(PortForwarder { addr, stop });
-    Ok(Some(addr))
+    let to = target.clone();
+    thread::spawn(move || forward_loop(listener, ctx, flag, to));
+
+    let mut slot = FORWARDS.lock().map_err(|_| "forwarder state is poisoned".to_string())?;
+    slot.get_or_insert_with(HashMap::new)
+        .insert(name.to_string(), ForwardListener { local, stop });
+    info!(%name, %addr, %target, "forwarding");
+    Ok(())
 }
 
-fn forward_loop(listener: TcpListener, ctx: ServeCtx, stop: Arc<AtomicBool>) {
+pub fn close_forward(name: &str) {
+    let Ok(mut slot) = FORWARDS.lock() else { return };
+    let Some(map) = slot.as_mut() else { return };
+    let Some(gone) = map.remove(name) else { return };
+    gone.stop.store(true, Ordering::Relaxed);
+    // Accept blocks; one brief connection wakes it so it sees the flag.
+    let addr = SocketAddr::from((Ipv4Addr::LOCALHOST, gone.local));
+    let _ = TcpStream::connect_timeout(&addr, Duration::from_millis(500));
+    info!(%name, "stopped forwarding");
+}
+
+fn forward_loop(listener: TcpListener, ctx: ServeCtx, stop: Arc<AtomicBool>, target: String) {
     for conn in listener.incoming() {
         if stop.load(Ordering::Relaxed) {
             return;
         }
         let Ok(sock) = conn else { continue };
         let ctx = ctx.clone();
+        let target = target.clone();
         thread::spawn(move || {
-            if let Err(e) = forward(sock, ctx) {
+            if let Err(e) = forward(sock, ctx, target) {
                 debug!(error = %e, "forwarded connection finished");
             }
         });
     }
 }
 
-/// One connection to a forwarded port.
+/// One connection to a forwarded address.
 ///
 /// The head is read and judged, then written through untouched and the rest
 /// pumped — so a WebSocket upgrade passes as readily as a GET, which is what a
 /// dev server's hot reload needs.
-fn forward(mut sock: TcpStream, ctx: ServeCtx) -> io::Result<()> {
+fn forward(mut sock: TcpStream, ctx: ServeCtx, target: String) -> io::Result<()> {
     sock.set_nodelay(true)?;
     let head = read_head(&mut sock)?;
     let req = Request::parse(&head).ok_or_else(|| io::Error::other("malformed request head"))?;
 
-    let cf = ask_cloudflare(&ctx.tx).unwrap_or_default();
-    let host = req.header("host").unwrap_or_default();
-    let Some(port) = cf.port_for(&host) else {
-        // Either a hostname that is not one of ours, or a port nobody opened.
-        // Both get the same answer: this is not a door.
-        return respond(&mut sock, 404, "text/plain; charset=utf-8", b"404 not forwarded here\n");
-    };
     let secret = ctx.token.read().map(|t| t.clone()).unwrap_or_default();
     let from_query = req.query_param("token");
     if !token_ok(&secret, from_query.as_deref())
@@ -184,28 +202,22 @@ fn forward(mut sock: TcpStream, ctx: ServeCtx) -> io::Result<()> {
     // The token arrived in the address bar. A tunnel hostname is its own origin,
     // so the cookie sessionhub already holds does not reach here — this is that
     // first visit. Answer it ourselves with the cookie and a redirect to the
-    // same path without the token: from the next request on, the dev server sees
-    // nothing but its own URLs, and nothing has to be rewritten on the way back.
+    // same path without the token: from the next request on, what is behind this
+    // sees nothing but its own URLs, and nothing has to be rewritten on the way
+    // back.
     if from_query.is_some() {
         let clean = req.path_without_token();
         let head = format!(
-            "HTTP/1.1 302 Found\r\nLocation: {clean}\r\n{}\
-             Content-Length: 0\r\nConnection: close\r\n\r\n",
+            "HTTP/1.1 302 Found
+Location: {clean}
+{}             Content-Length: 0
+Connection: close
+
+",
             cookie_header(&secret)
         );
         sock.write_all(head.as_bytes())?;
         return sock.flush();
-    }
-
-    // Usually this machine, but a port on the network is allowed too — for
-    // something that cannot run a tunnel of its own. The allow-list decided that
-    // when the port was opened; nothing here can widen it.
-    let target = cf.target_for(port).unwrap_or_else(|| format!("127.0.0.1:{port}"));
-    // Refused only when it really is this machine: port 7717 on another one is
-    // somebody else's daemon, and wanting to reach that is ordinary.
-    let here = target.starts_with("127.0.0.1:") || target.starts_with("localhost:");
-    if here && port == ctx.cfg.port {
-        return respond(&mut sock, 400, "text/plain; charset=utf-8", b"400 that is sessionhub\n");
     }
 
     let Some(addr) = target.to_socket_addrs().ok().and_then(|mut a| a.next()) else {
@@ -215,7 +227,7 @@ fn forward(mut sock: TcpStream, ctx: ServeCtx) -> io::Result<()> {
     let mut far = match TcpStream::connect_timeout(&addr, Duration::from_secs(5)) {
         Ok(f) => f,
         Err(e) => {
-            warn!(%target, error = %e, "nothing is listening on a forwarded port");
+            warn!(%target, error = %e, "nothing is listening behind a forwarded address");
             let msg = format!("502 nothing is listening on {target}\n");
             return respond(&mut sock, 502, "text/plain; charset=utf-8", msg.as_bytes());
         }
@@ -225,12 +237,6 @@ fn forward(mut sock: TcpStream, ctx: ServeCtx) -> io::Result<()> {
     far.flush()?;
     crate::remote::pump(sock, far);
     Ok(())
-}
-
-fn ask_cloudflare(tx: &Sender<Cmd>) -> Option<crate::config::Cloudflare> {
-    let (reply, wait) = bounded(1);
-    tx.send(Cmd::Cloudflare { reply }).ok()?;
-    wait.recv_timeout(Duration::from_secs(3)).ok()
 }
 
 /// Turn the network listener on or off. Returns the address used.
@@ -482,8 +488,7 @@ fn api_reload(sock: &mut TcpStream, token: &SharedToken) -> io::Result<()> {
 /// was already checked before routing, exactly like any other asset.
 fn api_file(sock: &mut TcpStream, req: &Request) -> io::Result<()> {
     let Some(raw) = req.query_param("path") else {
-        return respond(sock, 400, "text/plain; charset=utf-8", b"400 missing path
-");
+        return respond(sock, 400, "text/plain; charset=utf-8", b"400 missing path\n");
     };
     let path = crate::browse::normalize(&raw);
     let meta = match std::fs::metadata(&path) {
@@ -493,15 +498,13 @@ fn api_file(sock: &mut TcpStream, req: &Request) -> io::Result<()> {
     };
     // A ceiling so one request cannot pull a 4 GB file into memory.
     if meta.len() > MAX_INLINE {
-        return respond(sock, 413, "text/plain; charset=utf-8", b"413 file too large
-");
+        return respond(sock, 413, "text/plain; charset=utf-8", b"413 file too large\n");
     }
     let body = match std::fs::read(&path) {
         Ok(b) => b,
         Err(e) => {
             warn!(path = %path.display(), error = %e, "could not read file for /api/file");
-            return respond(sock, 500, "text/plain; charset=utf-8", b"500 cannot read
-");
+            return respond(sock, 500, "text/plain; charset=utf-8", b"500 cannot read\n");
         }
     };
     respond(sock, 200, mime_of(&path.to_string_lossy()), &body)

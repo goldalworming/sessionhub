@@ -94,6 +94,84 @@ impl Tunnel {
     }
 }
 
+/// Throwaway tunnels, one per forwarded address, for when there is no API token
+/// to arrange a hostname of your own with.
+///
+/// What they cost is a name that changes: cloudflared invents a new one every
+/// time it starts, so a link saved yesterday is a link to nothing. What they
+/// save is an account, a credential and a DNS record.
+pub mod quick {
+    use std::collections::HashMap;
+    use std::sync::Mutex;
+    use std::time::{Duration, Instant};
+
+    use tracing::{info, warn};
+
+    static QUICK: Mutex<Option<HashMap<String, Running>>> = Mutex::new(None);
+
+    struct Running {
+        tunnel: super::Tunnel,
+        url: String,
+    }
+
+    /// Start one and wait for cloudflared to say where it landed.
+    ///
+    /// Waiting is the point: the address is the whole answer, and returning
+    /// before it exists would leave the panel showing a row with nothing in it.
+    pub fn start(name: &str, local: u16) -> Result<String, String> {
+        let Some(exe) = crate::pty::resolve_command("cloudflared") else {
+            return Err(super::install_hint());
+        };
+        stop(name);
+
+        let mut tunnel = super::Tunnel::spawn(&exe, local)
+            .map_err(|e| format!("could not run cloudflared: {e}"))?;
+
+        let deadline = Instant::now() + Duration::from_secs(45);
+        let mut url = String::new();
+        while Instant::now() < deadline {
+            match tunnel.lines.recv_timeout(Duration::from_millis(500)) {
+                Ok(line) => {
+                    if let Some(found) = super::extract_url(&line) {
+                        url = found;
+                        break;
+                    }
+                }
+                Err(_) if tunnel.try_wait() => break,
+                Err(_) => continue,
+            }
+        }
+        if url.is_empty() {
+            tunnel.kill();
+            return Err("cloudflared did not give an address. Is this machine online?".into());
+        }
+
+        info!(%name, %url, "a throwaway tunnel is up");
+        if let Ok(mut slot) = QUICK.lock() {
+            slot.get_or_insert_with(HashMap::new)
+                .insert(name.to_string(), Running { tunnel, url: url.clone() });
+        } else {
+            warn!("quick tunnel registry is poisoned");
+        }
+        Ok(url)
+    }
+
+    pub fn stop(name: &str) {
+        let Ok(mut slot) = QUICK.lock() else { return };
+        let Some(map) = slot.as_mut() else { return };
+        if let Some(mut gone) = map.remove(name) {
+            gone.tunnel.kill();
+            info!(%name, "throwaway tunnel ended");
+        }
+    }
+
+    /// Where one landed, if it is still up.
+    pub fn url(name: &str) -> Option<String> {
+        let slot = QUICK.lock().ok()?;
+        slot.as_ref()?.get(name).map(|r| r.url.clone())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

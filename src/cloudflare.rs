@@ -1,4 +1,4 @@
-//! Arranging a hostname for a local port, through the Cloudflare API.
+//! Arranging a hostname for a local address, through the Cloudflare API.
 //!
 //! The tunnel this machine is reached by is remotely managed — `cloudflared
 //! tunnel run --token …`, with no config file on this side — so its ingress can
@@ -9,107 +9,88 @@
 //! justify a TLS stack. The API token never appears in an argument, though —
 //! anything on this machine can read a process table — so it rides in a
 //! `--config` file that is written, used and deleted.
+//!
+//! None of this is required. Without a token, `tunnel.rs` gives each address a
+//! throwaway trycloudflare hostname instead; what that costs is a name that
+//! changes every time.
 
 use std::path::PathBuf;
 
 use serde_json::{json, Value};
 use tracing::{info, warn};
 
-use crate::config::Cloudflare;
+use crate::config::{Cloudflare, Forward};
 
 const API: &str = "https://api.cloudflare.com/client/v4";
 
-/// What a token turned out to be able to reach. Named rather than assumed, so
-/// the panel can show it and let a wrong guess be refused.
+/// A thing the token can reach, named so it can be chosen rather than typed.
+#[derive(Debug, Clone, Default, serde::Serialize)]
+pub struct Named {
+    pub id: String,
+    pub name: String,
+}
+
+/// What a token turned out to reach.
 #[derive(Debug, Clone, Default)]
 pub struct Found {
-    pub account_id: String,
-    pub account_name: String,
-    pub zone_id: String,
-    pub zone_name: String,
-    pub tunnel_id: String,
-    pub tunnel_name: String,
+    pub account: Named,
+    pub zones: Vec<Named>,
+    pub tunnels: Vec<Named>,
 }
 
-/// The hostname sessionhub itself is reached at, read out of the pattern: the
-/// place for the number, and the separator in front of it, removed.
-pub fn base_host(pattern: &str) -> String {
-    let (_, after) = pattern.split_once("{port}").unwrap_or(("", pattern));
-    after.trim_start_matches(['-', '.', '_']).to_string()
-}
-
-/// Follow a token to the account, the zone and the tunnel already carrying
-/// sessionhub. Nothing is written here; this only looks.
-pub fn discover(api_token: &str, pattern: &str) -> Result<Found, String> {
-    let host = base_host(pattern);
-    if host.is_empty() {
-        return Err("The hostname pattern needs a `{port}` and a domain after it.".into());
-    }
-
+/// Follow a token to the account, the domains and the tunnels behind it.
+///
+/// Nothing is written here; this only looks. Which domain and which tunnel to
+/// use is then a choice made from a list rather than a string typed from
+/// memory — and a wrong token is found out before any hostname exists.
+pub fn discover(api_token: &str) -> Result<Found, String> {
     let mut found = Found::default();
 
     let accounts = call(api_token, "GET", &format!("{API}/accounts?per_page=50"), None)?;
     let first = accounts.as_array().and_then(|a| a.first()).ok_or(
         "That token cannot see any account. It needs Account → Cloudflare Tunnel → Edit.",
     )?;
-    found.account_id = text(first, "id");
-    found.account_name = text(first, "name");
+    found.account = Named { id: text(first, "id"), name: text(first, "name") };
 
-    // The zone whose name is the longest suffix of the hostname. Matching by
-    // suffix rather than by cutting at the second dot keeps `example.co.uk`
-    // working without carrying a list of public suffixes around.
     let zones = call(api_token, "GET", &format!("{API}/zones?per_page=50"), None)?;
-    let mut best = String::new();
-    for z in zones.as_array().unwrap_or(&Vec::new()) {
-        let name = text(z, "name");
-        let matches = host == name || host.ends_with(&format!(".{name}"));
-        if matches && name.len() > best.len() {
-            best = name.clone();
-            found.zone_id = text(z, "id");
-            found.zone_name = name;
-        }
-    }
-    if found.zone_id.is_empty() {
-        return Err(format!(
-            "No zone in that account covers {host}. Check the hostname, and that the token \
-             carries Zone → DNS → Edit for it."
-        ));
+    found.zones = zones
+        .as_array()
+        .unwrap_or(&Vec::new())
+        .iter()
+        .map(|z| Named { id: text(z, "id"), name: text(z, "name") })
+        .filter(|z| !z.id.is_empty())
+        .collect();
+    if found.zones.is_empty() {
+        return Err("That token cannot see any domain. It needs Zone → DNS → Edit.".into());
     }
 
-    // The tunnel already serving that hostname — the one this browser is
-    // talking through right now. Found rather than asked for, because a UUID is
-    // a poor thing to make someone go and look up.
     let tunnels = call(
         api_token,
         "GET",
-        &format!("{API}/accounts/{}/cfd_tunnel?is_deleted=false&per_page=50", found.account_id),
+        &format!("{API}/accounts/{}/cfd_tunnel?is_deleted=false&per_page=50", found.account.id),
         None,
     )?;
-    for t in tunnels.as_array().unwrap_or(&Vec::new()) {
-        let id = text(t, "id");
-        if id.is_empty() {
-            continue;
-        }
-        let Ok(cfg) = configuration(api_token, &found.account_id, &id) else { continue };
-        if ingress_of(&cfg).iter().any(|r| text(r, "hostname") == host) {
-            found.tunnel_id = id;
-            found.tunnel_name = text(t, "name");
-            break;
-        }
-    }
-    if found.tunnel_id.is_empty() {
-        return Err(format!(
-            "No tunnel in that account serves {host}. sessionhub arranges hostnames on the \
-             tunnel it is already reached through, so that one has to exist first."
-        ));
+    found.tunnels = tunnels
+        .as_array()
+        .unwrap_or(&Vec::new())
+        .iter()
+        .map(|t| Named { id: text(t, "id"), name: text(t, "name") })
+        .filter(|t| !t.id.is_empty())
+        .collect();
+    if found.tunnels.is_empty() {
+        return Err(
+            "That account has no tunnel. sessionhub arranges hostnames on a tunnel that already \
+             runs, so one has to exist first."
+                .into(),
+        );
     }
     Ok(found)
 }
 
-/// Give one port a hostname: a DNS record pointing at the tunnel, and an ingress
-/// rule sending that hostname to the forwarder.
-pub fn expose(cf: &Cloudflare, port: u16) -> Result<String, String> {
-    let host = cf.host_for(port);
+/// Give one address a hostname: a DNS record pointing at the tunnel, and an
+/// ingress rule sending that hostname to the listener standing in front of it.
+pub fn expose(cf: &Cloudflare, f: &Forward) -> Result<String, String> {
+    let host = cf.host_for(f);
     add_dns(cf, &host)?;
 
     let mut config = configuration(&cf.api_token, &cf.account_id, &cf.tunnel_id)?;
@@ -118,13 +99,13 @@ pub fn expose(cf: &Cloudflare, port: u16) -> Result<String, String> {
         info!(%host, "already in the tunnel's ingress");
         return Ok(host);
     }
-    let at = insert_point(&rules, &base_host(&cf.hostname))?;
+    let at = insert_point(&rules)?;
     rules.insert(
         at,
-        json!({ "hostname": host, "service": format!("http://localhost:{}", cf.forward_port) }),
+        json!({ "hostname": host, "service": format!("http://localhost:{}", f.local) }),
     );
     put_ingress(cf, &mut config, rules)?;
-    info!(%host, port, "a port was given a hostname");
+    info!(%host, target = %f.target(), "an address was given a hostname");
     Ok(host)
 }
 
@@ -132,21 +113,20 @@ pub fn expose(cf: &Cloudflare, port: u16) -> Result<String, String> {
 /// — a record still pointing at a tunnel with no rule for it answers with
 /// Cloudflare's own error page, which is a better half-way state than a rule
 /// pointing at nothing.
-pub fn withdraw(cf: &Cloudflare, port: u16) -> Result<(), String> {
-    let host = cf.host_for(port);
+pub fn withdraw(cf: &Cloudflare, f: &Forward) -> Result<(), String> {
+    let host = cf.host_for(f);
 
     let mut config = configuration(&cf.api_token, &cf.account_id, &cf.tunnel_id)?;
     let rules = ingress_of(&config);
     let kept: Vec<Value> = rules.iter().filter(|r| text(r, "hostname") != host).cloned().collect();
     if kept.len() != rules.len() {
-        // Still checked, even while removing: the guard is about what is left
-        // behind, not about what is going.
-        insert_point(&kept, &base_host(&cf.hostname))?;
+        // Checked while removing too: the guard is about what is left behind.
+        insert_point(&kept)?;
         put_ingress(cf, &mut config, kept)?;
     }
 
     remove_dns(cf, &host)?;
-    info!(%host, port, "a port gave its hostname back");
+    info!(%host, "an address gave its hostname back");
     Ok(())
 }
 
@@ -170,25 +150,20 @@ fn ingress_of(config: &Value) -> Vec<Value> {
 /// to be last and which has no hostname of its own.
 ///
 /// This is also where the whole feature is told to stop. Rewriting the ingress
-/// of a live tunnel is the one thing here that can take sessionhub itself off
-/// the internet, so a config that does not look the way it should is left alone
+/// of a live tunnel is the one thing here that can take a machine off the
+/// internet, so an ingress that does not look the way it should is left alone
 /// rather than repaired by guesswork.
-fn insert_point(rules: &[Value], base: &str) -> Result<usize, String> {
+fn insert_point(rules: &[Value]) -> Result<usize, String> {
     let Some(last) = rules.last() else {
-        return Err("That tunnel has no ingress rules at all — sessionhub will not write the \
-                    first one."
-            .into());
+        return Err(
+            "That tunnel has no ingress rules at all — sessionhub will not write the first one."
+                .into(),
+        );
     };
     if !text(last, "hostname").is_empty() {
         return Err("That tunnel's ingress has no catch-all rule at the end. sessionhub will \
                     not rewrite an ingress it does not recognise."
             .into());
-    }
-    if !rules.iter().any(|r| text(r, "hostname") == base) {
-        return Err(format!(
-            "That tunnel no longer has a rule for {base}, which is how sessionhub itself is \
-             reached. Nothing was changed."
-        ));
     }
     Ok(rules.len() - 1)
 }
@@ -206,10 +181,7 @@ fn put_ingress(cf: &Cloudflare, config: &mut Value, rules: Vec<Value>) -> Result
     call(
         &cf.api_token,
         "PUT",
-        &format!(
-            "{API}/accounts/{}/cfd_tunnel/{}/configurations",
-            cf.account_id, cf.tunnel_id
-        ),
+        &format!("{API}/accounts/{}/cfd_tunnel/{}/configurations", cf.account_id, cf.tunnel_id),
         Some(&json!({ "config": config }).to_string()),
     )
     .map(|_| ())
@@ -254,12 +226,7 @@ fn remove_dns(cf: &Cloudflare, host: &str) -> Result<(), String> {
         if id.is_empty() {
             continue;
         }
-        call(
-            &cf.api_token,
-            "DELETE",
-            &format!("{API}/zones/{}/dns_records/{id}", cf.zone_id),
-            None,
-        )?;
+        call(&cf.api_token, "DELETE", &format!("{API}/zones/{}/dns_records/{id}", cf.zone_id), None)?;
     }
     Ok(())
 }
@@ -297,7 +264,10 @@ fn call(api_token: &str, method: &str, url: &str, body: Option<&str>) -> Result<
         .output()
         .map_err(|e| format!("could not run curl: {e}"))?;
     if !out.status.success() {
-        return Err(format!("could not reach Cloudflare: {}", String::from_utf8_lossy(&out.stderr).trim()));
+        return Err(format!(
+            "could not reach Cloudflare: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        ));
     }
 
     let v: Value = serde_json::from_slice(&out.stdout)
@@ -382,13 +352,6 @@ fn curl_path() -> PathBuf {
 mod tests {
     use super::*;
 
-    #[test]
-    fn the_base_hostname_is_read_out_of_the_pattern() {
-        assert_eq!(base_host("{port}-sbox.example.com"), "sbox.example.com");
-        assert_eq!(base_host("{port}.sbox.example.com"), "sbox.example.com");
-        assert_eq!(base_host("{port}_box.example.com"), "box.example.com");
-    }
-
     fn rules(hosts: &[&str], catch_all: bool) -> Vec<Value> {
         let mut out: Vec<Value> = hosts
             .iter()
@@ -403,23 +366,14 @@ mod tests {
     #[test]
     fn a_new_rule_goes_in_front_of_the_catch_all() {
         let r = rules(&["sbox.example.com", "other.example.com"], true);
-        assert_eq!(insert_point(&r, "sbox.example.com").unwrap(), 2);
+        assert_eq!(insert_point(&r).unwrap(), 2);
     }
 
     #[test]
     fn an_ingress_that_looks_wrong_is_left_alone() {
-        // No catch-all: Cloudflare requires one last, so this is not an ingress
-        // we understand.
-        let r = rules(&["sbox.example.com"], false);
-        assert!(insert_point(&r, "sbox.example.com").is_err());
-
-        // Nothing at all.
-        assert!(insert_point(&[], "sbox.example.com").is_err());
-
-        // sessionhub's own rule has gone: writing here could take it off the
-        // internet, so it does not write.
-        let r = rules(&["other.example.com"], true);
-        let why = insert_point(&r, "sbox.example.com").unwrap_err();
-        assert!(why.contains("sbox.example.com"), "{why}");
+        // Cloudflare requires a catch-all last, so an ingress without one is not
+        // an ingress this understands.
+        assert!(insert_point(&rules(&["sbox.example.com"], false)).is_err());
+        assert!(insert_point(&[]).is_err());
     }
 }

@@ -54,113 +54,158 @@ pub struct Config {
 /// subdomain has to. Everything here exists to arrange that subdomain and then
 /// stand in front of it, because a dev server is not a hardened thing and this
 /// puts it on the internet.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Cloudflare {
     /// A Cloudflare API token: Account → Cloudflare Tunnel → Edit, and Zone →
     /// DNS → Edit. Kept here beside the machine tokens and never sent to a
     /// browser.
+    ///
+    /// Empty is a working state, not an unfinished one: without a token each
+    /// address comes from a throwaway trycloudflare tunnel instead. What that
+    /// costs is a name that changes every time.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub api_token: String,
-    /// Where a forwarded port appears, with `{port}` standing in for the number:
-    /// `{port}-sbox.example.com`.
-    ///
-    /// A hyphen and not a dot in the usual case, because Cloudflare's free
-    /// certificate covers `example.com` and one level below it and no further —
-    /// `5173.sbox.example.com` would resolve and then fail on its certificate.
-    /// Anyone with Advanced Certificate Manager can write the dotted form here
-    /// instead; this only ever creates what the pattern says.
-    #[serde(default, skip_serializing_if = "String::is_empty")]
-    pub hostname: String,
-    /// Found from the token rather than asked for, and kept so the lookup is not
-    /// repeated on every change.
-    #[serde(default, skip_serializing_if = "String::is_empty")]
-    pub account_id: String,
+    /// The domain chosen from the ones that token can see. A name sits directly
+    /// under it — `a3f9c1e480b2.example.com` — which is one level deep and so
+    /// inside what Cloudflare's free certificate covers.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub zone_id: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
-    pub tunnel_id: String,
-    /// The names behind those ids. Kept so the panel can say which account,
-    /// which zone and which tunnel were found, rather than showing three
-    /// hexadecimal strings and asking for trust.
+    pub zone_name: String,
+    /// Found from the token rather than asked for.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub account_id: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub account_name: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
-    pub zone_name: String,
+    pub tunnel_id: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub tunnel_name: String,
-    /// What the tunnel is told to send those hostnames to. The forwarder listens
-    /// here, on loopback, and is the only thing that ever answers them.
+    /// Makes each name unguessable while keeping it the same every time.
+    ///
+    /// Without it a name is just a hash of `localhost:5173`, which anyone can
+    /// compute. That is not a way in — the token still stands in front — but it
+    /// announces what exists and invites trying. Written once, on first use.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub salt: String,
+    /// The first loopback port the per-target listeners are taken from.
     #[serde(default = "default_forward_port")]
     pub forward_port: u16,
-    /// What is allowed through, and nothing else. A token that leaks must not
-    /// turn this into a way to reach every port on the machine, let alone every
-    /// machine on the network.
+    /// What is reachable, and nothing else.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub ports: Vec<Forwarded>,
+    pub forwards: Vec<Forward>,
 }
 
-/// One port given a hostname, and where it actually lives.
+/// One address given a way in.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Forwarded {
-    pub port: u16,
-    /// Loopback unless the thing being reached is on another machine — one that
-    /// cannot run a tunnel of its own because a VPN is in the way, say. The
-    /// tunnel runs here; only the last hop crosses the network.
-    #[serde(default = "loopback")]
+pub struct Forward {
+    /// Loopback unless it is something on the network that cannot run a tunnel
+    /// of its own — a machine behind a VPN, say. The tunnel runs here; only the
+    /// last hop crosses the network.
     pub host: String,
+    pub port: u16,
+    /// The label in front of the domain, derived from the address so that the
+    /// same address always comes back to the same name.
+    pub name: String,
+    /// The loopback port its own listener answers on. Stored so a restart puts
+    /// everything back exactly where the tunnel already expects it.
+    pub local: u16,
 }
 
-fn loopback() -> String {
-    "127.0.0.1".to_string()
-}
-
-impl Forwarded {
+impl Forward {
+    /// Where the last hop goes.
     pub fn target(&self) -> String {
         format!("{}:{}", self.host, self.port)
+    }
+
+    /// How it is written in the panel and in the field that made it.
+    pub fn shown(&self) -> String {
+        if self.host == "127.0.0.1" {
+            format!("localhost:{}", self.port)
+        } else {
+            self.target()
+        }
     }
 }
 
 fn default_forward_port() -> u16 {
-    7718
+    7801
+}
+
+/// Written by hand rather than derived: a derived one would leave
+/// `forward_port` at zero, and a listener bound to port zero is whatever the
+/// operating system felt like giving it — different after every restart, while
+/// the tunnel still points at yesterday's number.
+impl Default for Cloudflare {
+    fn default() -> Self {
+        Cloudflare {
+            api_token: String::new(),
+            zone_id: String::new(),
+            zone_name: String::new(),
+            account_id: String::new(),
+            account_name: String::new(),
+            tunnel_id: String::new(),
+            tunnel_name: String::new(),
+            salt: String::new(),
+            forward_port: default_forward_port(),
+            forwards: Vec::new(),
+        }
+    }
 }
 
 impl Cloudflare {
-    /// Ready to arrange a hostname: a token, a pattern, and the three ids that
-    /// were found from them.
+    /// Whether hostnames can be arranged on a domain of your own. Without this
+    /// everything still works, through throwaway tunnels.
     pub fn ready(&self) -> bool {
         !self.api_token.is_empty()
-            && self.hostname.contains("{port}")
-            && !self.account_id.is_empty()
             && !self.zone_id.is_empty()
+            && !self.account_id.is_empty()
             && !self.tunnel_id.is_empty()
     }
 
-    /// The hostname one port appears at.
-    pub fn host_for(&self, port: u16) -> String {
-        self.hostname.replace("{port}", &port.to_string())
+    /// The address one forward answers at, when there is a domain for it.
+    pub fn host_for(&self, f: &Forward) -> String {
+        format!("{}.{}", f.name, self.zone_name)
     }
 
-    /// Where a port actually is, if it was opened at all.
-    pub fn target_for(&self, port: u16) -> Option<String> {
-        self.ports.iter().find(|f| f.port == port).map(|f| f.target())
-    }
-
-    /// The port a request is asking for, from its `Host:` header.
+    /// A name for an address: the same one every time, and derivable by nobody
+    /// who does not hold this machine's salt.
     ///
-    /// Matched against the pattern rather than by splitting on a dot: the
-    /// pattern decides whether the number is followed by a hyphen or a dot, and
-    /// only the exact shape it describes is answered. Anything else — the
-    /// daemon's own hostname included — is not a forwarding request.
-    pub fn port_for(&self, host: &str) -> Option<u16> {
-        let host = host.split(':').next()?.trim().to_lowercase();
-        let pattern = self.hostname.to_lowercase();
-        let (before, after) = pattern.split_once("{port}")?;
-        let digits = host.strip_prefix(before)?.strip_suffix(after)?;
-        if digits.is_empty() || !digits.chars().all(|c| c.is_ascii_digit()) {
-            return None;
+    /// FNV-1a rather than a hash from a crate. Nothing is ever verified with
+    /// this — it names a door, it does not guard one, and what makes it
+    /// unguessable is the salt rather than the mixing.
+    pub fn name_for(&self, host: &str, port: u16) -> String {
+        let seed = format!("{}|{host}:{port}", self.salt);
+        let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+        for b in seed.as_bytes() {
+            h ^= *b as u64;
+            h = h.wrapping_mul(0x1000_0000_01b3);
         }
-        let port: u16 = digits.parse().ok()?;
-        self.ports.iter().any(|f| f.port == port).then_some(port)
+        // A second pass over the digest, so two addresses differing in one byte
+        // do not land next to each other in the alphabet.
+        let mut out = String::with_capacity(12);
+        for i in 0..12 {
+            let nibble = ((h >> ((i * 5) % 60)) ^ (h >> (i * 3))) & 0xf;
+            out.push(char::from_digit(nibble as u32, 16).unwrap_or('0'));
+        }
+        out
+    }
+
+    /// The next free loopback port for a listener.
+    ///
+    /// Zero would mean "whatever the operating system feels like", which is a
+    /// different number after every restart while the tunnel still points at
+    /// the old one. A config written before this had a default falls back here.
+    pub fn next_local(&self) -> u16 {
+        let mut port = if self.forward_port == 0 { default_forward_port() } else { self.forward_port };
+        while self.forwards.iter().any(|f| f.local == port) {
+            port = port.saturating_add(1);
+        }
+        port
+    }
+
+    pub fn find(&self, name: &str) -> Option<&Forward> {
+        self.forwards.iter().find(|f| f.name == name)
     }
 }
 
@@ -715,7 +760,7 @@ pub fn rotate_token() -> io::Result<String> {
     Ok(cfg.token)
 }
 
-fn generate_token() -> io::Result<String> {
+pub fn generate_token() -> io::Result<String> {
     let mut raw = [0u8; 32];
     getrandom::fill(&mut raw).map_err(|e| io::Error::other(e.to_string()))?;
     Ok(base64url(&raw))
@@ -866,85 +911,72 @@ mod tests {
         assert!(back.lan_access);
     }
 
-    fn fwd(port: u16) -> Forwarded {
-        Forwarded { port, host: loopback() }
+    fn cf() -> Cloudflare {
+        Cloudflare { salt: "pepper".into(), zone_name: "example.com".into(), ..Cloudflare::default() }
     }
 
     #[test]
-    fn a_forwarded_port_is_read_off_the_host_header() {
-        let cf = Cloudflare {
-            hostname: "{port}-sbox.example.com".into(),
-            ports: vec![fwd(5173), fwd(3000)],
-            ..Cloudflare::default()
-        };
-        assert_eq!(cf.host_for(5173), "5173-sbox.example.com");
-        assert_eq!(cf.port_for("5173-sbox.example.com"), Some(5173));
-        // A port arrives with the header more often than not.
-        assert_eq!(cf.port_for("3000-sbox.example.com:443"), Some(3000));
-        assert_eq!(cf.port_for("5173-SBOX.EXAMPLE.COM"), Some(5173));
+    fn the_same_address_always_comes_back_to_the_same_name() {
+        let cf = cf();
+        assert_eq!(cf.name_for("127.0.0.1", 5173), cf.name_for("127.0.0.1", 5173));
+        // And two addresses do not share one.
+        assert_ne!(cf.name_for("127.0.0.1", 5173), cf.name_for("127.0.0.1", 5174));
+        assert_ne!(cf.name_for("127.0.0.1", 3100), cf.name_for("192.168.0.104", 3100));
     }
 
     #[test]
-    fn only_the_shape_the_pattern_describes_is_answered() {
-        let cf = Cloudflare {
-            hostname: "{port}-sbox.example.com".into(),
-            ports: vec![fwd(5173)],
-            ..Cloudflare::default()
-        };
-        // The daemon's own hostname is not a forwarding request.
-        assert_eq!(cf.port_for("sbox.example.com"), None);
-        assert_eq!(cf.port_for("notaport-sbox.example.com"), None);
-        assert_eq!(cf.port_for("-sbox.example.com"), None, "kosong bukan nomor");
-        assert_eq!(cf.port_for("5173-sbox.example.com.evil.test"), None);
-        // On the list or nowhere: a port nobody opened is not reachable.
-        assert_eq!(cf.port_for("9999-sbox.example.com"), None);
+    fn a_name_cannot_be_worked_out_without_this_machines_salt() {
+        // The whole point of the salt: `localhost:5173` is a guess anyone can
+        // make, and without this the name would be a guess too.
+        let mine = cf();
+        let yours = Cloudflare { salt: "other".into(), ..cf() };
+        assert_ne!(mine.name_for("127.0.0.1", 5173), yours.name_for("127.0.0.1", 5173));
     }
 
     #[test]
-    fn a_dotted_pattern_works_the_same_way() {
-        // For anyone whose certificate covers a second level.
-        let cf = Cloudflare {
-            hostname: "{port}.sbox.example.com".into(),
-            ports: vec![fwd(5173)],
-            ..Cloudflare::default()
-        };
-        assert_eq!(cf.host_for(5173), "5173.sbox.example.com");
-        assert_eq!(cf.port_for("5173.sbox.example.com"), Some(5173));
-        assert_eq!(cf.port_for("5173-sbox.example.com"), None);
+    fn a_name_is_something_a_hostname_can_hold() {
+        let name = cf().name_for("127.0.0.1", 5173);
+        assert_eq!(name.len(), 12);
+        assert!(name.chars().all(|c| c.is_ascii_hexdigit()), "{name}");
     }
 
     #[test]
-    fn a_port_can_live_on_another_machine() {
-        // The hostname is built from the number either way; only the last hop
-        // changes, which is what lets a machine with no tunnel of its own be
-        // reached through this one.
-        let cf = Cloudflare {
-            hostname: "{port}-sbox.example.com".into(),
-            ports: vec![fwd(5173), Forwarded { port: 3100, host: "192.168.0.104".into() }],
-            ..Cloudflare::default()
-        };
-        assert_eq!(cf.target_for(5173).as_deref(), Some("127.0.0.1:5173"));
-        assert_eq!(cf.target_for(3100).as_deref(), Some("192.168.0.104:3100"));
-        assert_eq!(cf.target_for(9999), None, "yang tidak dibuka tidak punya tujuan");
-        // Both are still answered for by name.
-        assert_eq!(cf.port_for("3100-sbox.example.com"), Some(3100));
+    fn an_address_sits_one_level_under_the_domain() {
+        // One level, so the free certificate covers it.
+        let cf = cf();
+        let f = Forward { host: "127.0.0.1".into(), port: 5173, name: "abc123".into(), local: 7801 };
+        assert_eq!(cf.host_for(&f), "abc123.example.com");
+        assert_eq!(f.target(), "127.0.0.1:5173");
+        assert_eq!(f.shown(), "localhost:5173");
     }
 
     #[test]
-    fn nothing_is_arranged_until_every_piece_is_known() {
-        let mut cf = Cloudflare {
-            api_token: "t".into(),
-            hostname: "{port}-sbox.example.com".into(),
-            ..Cloudflare::default()
-        };
-        assert!(!cf.ready(), "belum ada id yang ditemukan");
-        cf.account_id = "a".into();
+    fn a_target_on_another_machine_says_so() {
+        let f = Forward { host: "192.168.0.104".into(), port: 3100, name: "d".into(), local: 7802 };
+        assert_eq!(f.target(), "192.168.0.104:3100");
+        assert_eq!(f.shown(), "192.168.0.104:3100");
+    }
+
+    #[test]
+    fn listeners_do_not_land_on_each_other() {
+        let mut cf = cf();
+        assert_eq!(cf.next_local(), 7801);
+        cf.forwards.push(Forward { host: "127.0.0.1".into(), port: 1, name: "a".into(), local: 7801 });
+        assert_eq!(cf.next_local(), 7802);
+        cf.forwards.push(Forward { host: "127.0.0.1".into(), port: 2, name: "b".into(), local: 7802 });
+        assert_eq!(cf.next_local(), 7803);
+    }
+
+    #[test]
+    fn a_domain_of_your_own_needs_every_piece() {
+        let mut cf = cf();
+        assert!(!cf.ready(), "tanpa token, tunnel sekali pakai");
+        cf.api_token = "t".into();
         cf.zone_id = "z".into();
+        assert!(!cf.ready());
+        cf.account_id = "a".into();
         cf.tunnel_id = "u".into();
         assert!(cf.ready());
-        // A pattern with no place for the number cannot name anything.
-        cf.hostname = "sbox.example.com".into();
-        assert!(!cf.ready());
     }
 
     #[test]
