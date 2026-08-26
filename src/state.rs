@@ -837,7 +837,13 @@ pub fn run(cfg: Config, rx: Receiver<Cmd>, tx: Sender<Cmd>, registry_cfg: Sender
                     // every address falls back to a throwaway tunnel. What is
                     // already open keeps working, on names that will change the
                     // next time they start.
-                    if api_token.is_empty() && zone_id.is_empty() {
+                    //
+                    // **Every** field empty, and that is the whole condition.
+                    // Choosing a tunnel sends only a tunnel id, and while this
+                    // asked about the token and the zone alone it read that as
+                    // "forget everything" — so picking a tunnel wiped the token
+                    // and the domain that had just been chosen.
+                    if api_token.is_empty() && zone_id.is_empty() && tunnel_id.is_empty() {
                         cfg.cloudflare.api_token.clear();
                         cfg.cloudflare.zone_id.clear();
                         cfg.cloudflare.zone_name.clear();
