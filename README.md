@@ -142,8 +142,6 @@ time. What is behind them stays behind the sessionhub token.
 > command on that computer, as you. Put **Cloudflare Access** in front of it if
 > it is more than a moment, and run `sessionhubd token rotate` if a URL leaked.
 
-How it fits together, from a phone inward: [ACCESS.md](ACCESS.md).
-
 ## Known limits
 
 - The history kept is the last 2 MB per terminal. It is lost when the daemon stops. It is a ring buffer, not terminal grid state.
@@ -155,4 +153,3 @@ How it fits together, from a phone inward: [ACCESS.md](ACCESS.md).
 - [CONFIG.md](CONFIG.md) — config.toml, agents, network access, pairing.
 - [PROTOCOL.md](PROTOCOL.md) — the WebSocket protocol, enough to write your own client.
 - [TESTING.md](TESTING.md) — the acceptance criteria results, along with what is not tested.
-- [ACCESS.md](ACCESS.md) — reaching it from outside, drawn out.
