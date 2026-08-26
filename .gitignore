@@ -17,6 +17,11 @@ web-backup-*/
 /*.jpg
 /*.gif
 
+# Except the two the README shows. They are the only pictures at the root meant
+# to travel with the project, and they are made by hand rather than by a test.
+!/icon.png
+!/screenshot.png
+
 # Left behind by the Python helper scripts used for large mechanical edits.
 __pycache__/
 *.pyc

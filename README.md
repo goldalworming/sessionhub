@@ -1,10 +1,14 @@
 # sessionhub
 
+<img src="icon.png" alt="" width="96" />
+
 One place to open a terminal into a coding agent (Claude Code, opencode, pi) for each project. The session stays alive even when the UI is closed. You can pick it up from another computer through a browser. Several computers at once can be used from a single window, each in its own tab — see [CONFIG.md](CONFIG.md#many-machines-in-one-window).
 
 No chat UI, no diff viewer, no worktree manager. Only a project/session sidebar on the left and a terminal in the middle.
 
 There is one principle: **the UI and the engine are two different processes.** The agent process is never a child of a window or a tab. Closing the browser does not touch the agent process at all.
+
+![The three panes: projects and sessions on the left, an agent running in the middle, the file explorer and an image open on the right](screenshot.png)
 
 ## Why
 
