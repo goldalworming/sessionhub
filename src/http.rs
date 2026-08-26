@@ -181,6 +181,36 @@ fn forward_loop(listener: TcpListener, ctx: ServeCtx, stop: Arc<AtomicBool>, tar
     }
 }
 
+/// Every address worth trying for one target, in order.
+///
+/// Both loopbacks, always, and that is not tidiness. A dev server told to
+/// listen on `localhost` may bind `::1` and nothing else — Vite on Windows
+/// does — while `localhost` in a browser resolves to `::1` first and works
+/// perfectly. Dialling the `127.0.0.1` written in the config then fails against
+/// a server that is plainly running, and the answer says nothing is listening
+/// when something is.
+fn dial_candidates(target: &str) -> Vec<SocketAddr> {
+    let mut out: Vec<SocketAddr> = target.to_socket_addrs().map(|a| a.collect()).unwrap_or_default();
+
+    let loopback = out.iter().any(|a| a.ip().is_loopback())
+        || target.starts_with("localhost:")
+        || target.starts_with("127.0.0.1:");
+    if loopback {
+        if let Some(port) = target.rsplit(':').next().and_then(|p| p.parse::<u16>().ok()) {
+            for ip in [
+                std::net::IpAddr::V4(Ipv4Addr::LOCALHOST),
+                std::net::IpAddr::V6(std::net::Ipv6Addr::LOCALHOST),
+            ] {
+                let addr = SocketAddr::new(ip, port);
+                if !out.contains(&addr) {
+                    out.push(addr);
+                }
+            }
+        }
+    }
+    out
+}
+
 /// One connection to a forwarded address.
 ///
 /// The head is read and judged, then written through untouched and the rest
@@ -220,14 +250,18 @@ Connection: close
         return sock.flush();
     }
 
-    let Some(addr) = target.to_socket_addrs().ok().and_then(|mut a| a.next()) else {
+    let candidates = dial_candidates(&target);
+    if candidates.is_empty() {
         let msg = format!("502 {target} is not an address this machine can resolve\n");
         return respond(&mut sock, 502, "text/plain; charset=utf-8", msg.as_bytes());
-    };
-    let mut far = match TcpStream::connect_timeout(&addr, Duration::from_secs(5)) {
-        Ok(f) => f,
-        Err(e) => {
-            warn!(%target, error = %e, "nothing is listening behind a forwarded address");
+    }
+    let mut far = match candidates
+        .iter()
+        .find_map(|a| TcpStream::connect_timeout(a, Duration::from_secs(5)).ok())
+    {
+        Some(f) => f,
+        None => {
+            warn!(%target, tried = ?candidates, "nothing is listening behind a forwarded address");
             let msg = format!("502 nothing is listening on {target}\n");
             return respond(&mut sock, 502, "text/plain; charset=utf-8", msg.as_bytes());
         }
@@ -1316,6 +1350,29 @@ mod tests {
         assert!(caching_for("app.js", true).contains("immutable"));
         // But the page itself never is — it is where the fresh URLs come from.
         assert_eq!(caching_for("index.html", false), "Cache-Control: no-cache\r\n");
+    }
+
+    #[test]
+    fn both_loopbacks_are_tried_for_a_local_target() {
+        // Vite on Windows binds `::1` and nothing else while the browser, using
+        // `localhost`, reaches it — so dialling only the written `127.0.0.1`
+        // reports nothing listening against a server that is running.
+        let tried = dial_candidates("127.0.0.1:5173");
+        assert!(tried.iter().any(|a| a.is_ipv4() && a.port() == 5173), "{tried:?}");
+        assert!(tried.iter().any(|a| a.is_ipv6() && a.port() == 5173), "{tried:?}");
+
+        let named = dial_candidates("localhost:8001");
+        assert!(named.iter().any(|a| a.is_ipv4()), "{named:?}");
+        assert!(named.iter().any(|a| a.is_ipv6()), "{named:?}");
+    }
+
+    #[test]
+    fn a_target_on_the_network_is_left_as_it_is() {
+        // Only loopback gets the second family added; a machine on the network
+        // answers where it answers.
+        let tried = dial_candidates("192.168.0.104:3100");
+        assert_eq!(tried.len(), 1, "{tried:?}");
+        assert_eq!(tried[0].to_string(), "192.168.0.104:3100");
     }
 
     #[test]
