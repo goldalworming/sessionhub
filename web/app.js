@@ -1128,7 +1128,7 @@ function renderTabs() {
     kbBtn.id = 'kb-btn';
     kbBtn.textContent = '⌨';
     kbBtn.className = keybar.on ? 'on' : '';
-    kbBtn.title = keybar.on ? 'Hide the key bar' : 'Show Esc, Tab, and arrow keys';
+    kbBtn.title = keybar.on ? 'Hide the key bar' : 'Show Esc, Enter, and arrow keys';
     kbBtn.onclick = () => {
       keybar.toggle();
       renderTabs();

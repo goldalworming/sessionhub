@@ -19,12 +19,12 @@ const ESC = '\x1b';
 
 const ROW1 = [
   { label: 'Esc', seq: ESC, title: 'Escape' },
-  { label: 'Tab', seq: '\t' },
-  // On the first row, not behind ⋯: in an agent this is the key that cycles
-  // input modes, pressed all session long — a key used that often must not
-  // cost two taps. It took Alt's seat rather than widening the row: a tenth
-  // button tips the row into scrolling on a 390 px phone, and what scrolls off
-  // the end is the arrows.
+  // ⏎ and ⇧Tab are the two an agent session presses all day — one submits, the
+  // other cycles input modes — so neither may cost two taps. Enter is on the
+  // bar at all, despite every phone keyboard having one, because that keyboard
+  // is usually down: the terminal is a canvas and not a field, so nothing
+  // raises it, and reaching a submit key should not first mean summoning one.
+  { label: '⏎', seq: '\r', title: 'Enter' },
   { label: '⇧Tab', seq: `${ESC}[Z`, title: 'Shift+Tab' },
   { label: 'Ctrl', mod: 'ctrl', title: 'Tap, then press a letter' },
   { label: '←', seq: `${ESC}[D`, title: 'Left' },
@@ -44,9 +44,11 @@ const ROW2 = [
   // opens is the gallery/camera; the file then rides the same route as a drop —
   // saved on the daemon's machine, its path typed into the terminal.
   { label: 'Img', act: 'upload', title: 'Send an image — its path is typed into the terminal' },
-  // Alt lives here now: it arms readline's meta bindings, which is a rare need
-  // from a phone, while ⇧Tab — whose seat it gave up — is pressed all day.
-  { label: 'Alt', mod: 'alt', title: 'Tap, then press a key' },
+  // Completion is a shell need rather than an agent one: worth a seat, but one
+  // that can afford the tap which opens this row. The first row is full at
+  // eight keys and the ⋯ — a tenth tips it into scrolling on a 390 px phone,
+  // and what scrolls off the end is the arrows.
+  { label: 'Tab', seq: '\t', title: 'Complete' },
   { label: '^C', seq: '\x03', title: 'Interrupt' },
   { label: '^D', seq: '\x04', title: 'End of input' },
   { label: '^R', seq: '\x12', title: 'Search history' },
@@ -56,8 +58,8 @@ const ROW2 = [
   { label: 'PgDn', seq: `${ESC}[6~` },
   { label: 'Del', seq: `${ESC}[3~`, title: 'Delete forward' },
   // Cut on purpose, each for its own reason:
-  //  ⏎  — every phone keyboard has Enter, and without that keyboard on screen
-  //       there is nothing typed for an Enter to send anyway;
+  //  Alt — it armed readline's meta bindings, the rarest need on the bar, and
+  //       the seat reads better as Tab;
   //  ^L — redraw-the-screen matters on a teletype, not under an agent that
   //       repaints constantly, and reading back is the scrollback control's job;
   //  ^Z — suspend is a trap here: one stray tap "freezes" the program, and the
@@ -83,7 +85,6 @@ export class KeyBar {
     this.onUpload = onUpload;
     this.onResize = onResize;
     this.ctrl = false;
-    this.alt = false;
     this.expanded = false;
 
     const saved = localStorage.getItem(LS);
@@ -184,10 +185,8 @@ export class KeyBar {
       const b = ctrlByte(data);
       if (b !== null) out = b;
     }
-    if (this.alt) out = ESC + out;
-    if (this.ctrl || this.alt) {
+    if (this.ctrl) {
       this.ctrl = false;
-      this.alt = false;
       // The redraw is deferred: `wrap` is called from the middle of the input stream.
       queueMicrotask(() => this.paint());
     }
