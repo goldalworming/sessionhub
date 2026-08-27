@@ -2043,27 +2043,59 @@ conn.on.onSaved = (msg) => {
   banner(`Saved ${msg.path.split(/[\/]/).pop()}`, true);
 };
 
+/// The width of the screen, which is not `window.innerWidth`.
+///
+/// Once the row is wider than the window it overflows and `innerWidth` grows
+/// with it — so a ceiling computed from it recedes as the panel is dragged, and
+/// stops being a ceiling at all. `documentElement.clientWidth` stays put.
+function screenWidth() {
+  return document.documentElement.clientWidth || window.innerWidth;
+}
+
+/// How wide the file panel is allowed to get: the screen, less the sidebar
+/// beside it and a strip of terminal.
+///
+/// It used to be a flat 900px — most of a laptop screen, and on a tablet a
+/// ceiling that could not be reached without the row overflowing and carrying
+/// the terminal off the edge. What has to be protected is what is beside the
+/// panel, not a number: on a wide screen this is now far past 900, and on a
+/// narrow one it stops before the layout breaks.
+function widestSide() {
+  const rail = el.sidebar.hidden ? 0 : el.sidebar.offsetWidth;
+  return Math.max(200, screenWidth() - rail - 200);
+}
+
 // The panel width is stored so your working layout is not rearranged every time
-// the page opens.
+// the page opens. It is clamped rather than rejected on the way back in: a width
+// dragged out on a wide screen must not be thrown away by a narrow one — or by
+// the same tablet turned on its side.
 {
   const saved = Number(localStorage.getItem(LS.filesWidth));
-  if (saved >= 200 && saved <= 900) el.side.style.width = `${saved}px`;
+  if (saved >= 200) el.side.style.width = `${Math.min(saved, widestSide())}px`;
 }
-el.fsplit.addEventListener('mousedown', (e) => {
+// Pointer events, not mouse events: a finger drag fires neither `mousedown` nor
+// `mousemove`, so on a tablet this handle did nothing at all and the panel was
+// stuck at whatever width it happened to have. Capture keeps the drag with the
+// handle even when the pointer runs ahead of it.
+el.fsplit.addEventListener('pointerdown', (e) => {
   e.preventDefault();
+  el.fsplit.setPointerCapture(e.pointerId);
   const move = (ev) => {
-    const w = Math.min(900, Math.max(200, window.innerWidth - ev.clientX));
+    const w = Math.min(widestSide(), Math.max(200, screenWidth() - ev.clientX));
     el.side.style.width = `${w}px`;
     localStorage.setItem(LS.filesWidth, String(w));
     relayout();
     sidePanel.editor.relayout();
   };
-  const up = () => {
-    document.removeEventListener('mousemove', move);
-    document.removeEventListener('mouseup', up);
+  const up = (ev) => {
+    el.fsplit.releasePointerCapture(ev.pointerId);
+    el.fsplit.removeEventListener('pointermove', move);
+    el.fsplit.removeEventListener('pointerup', up);
+    el.fsplit.removeEventListener('pointercancel', up);
   };
-  document.addEventListener('mousemove', move);
-  document.addEventListener('mouseup', up);
+  el.fsplit.addEventListener('pointermove', move);
+  el.fsplit.addEventListener('pointerup', up);
+  el.fsplit.addEventListener('pointercancel', up);
 });
 
 if (localStorage.getItem(LS.filesOpen) === '1') sidePane.show();
@@ -2136,20 +2168,30 @@ el.expandAll.onclick = () => {
 const savedWidth = Number(localStorage.getItem(LS.width));
 if (savedWidth >= 160 && savedWidth <= 600) el.sidebar.style.width = `${savedWidth}px`;
 
-el.splitter.addEventListener('mousedown', (e) => {
+// Pointer events for the same reason the file panel's handle uses them: a
+// finger drag is not a mouse drag.
+el.splitter.addEventListener('pointerdown', (e) => {
   e.preventDefault();
+  el.splitter.setPointerCapture(e.pointerId);
   const move = (ev) => {
-    const w = Math.min(600, Math.max(160, ev.clientX));
+    // Never past the point where the terminal between the two panes disappears:
+    // the file panel's ceiling accounts for this rail, so this one accounts for
+    // the panel, and whichever is dragged the terminal keeps its strip.
+    const room = screenWidth() - (el.side.hidden ? 0 : el.side.offsetWidth) - 200;
+    const w = Math.min(600, Math.max(160, Math.min(ev.clientX, room)));
     el.sidebar.style.width = `${w}px`;
     localStorage.setItem(LS.width, String(w));
     relayout();
   };
-  const up = () => {
-    document.removeEventListener('mousemove', move);
-    document.removeEventListener('mouseup', up);
+  const up = (ev) => {
+    el.splitter.releasePointerCapture(ev.pointerId);
+    el.splitter.removeEventListener('pointermove', move);
+    el.splitter.removeEventListener('pointerup', up);
+    el.splitter.removeEventListener('pointercancel', up);
   };
-  document.addEventListener('mousemove', move);
-  document.addEventListener('mouseup', up);
+  el.splitter.addEventListener('pointermove', move);
+  el.splitter.addEventListener('pointerup', up);
+  el.splitter.addEventListener('pointercancel', up);
 });
 
 function relayout() {
@@ -2161,7 +2203,21 @@ function relayout() {
   const entry = terms.get(activeId);
   if (entry) pushSize(activeId);
 }
-window.addEventListener('resize', relayout);
+window.addEventListener('resize', () => {
+  // A tablet turned on its side arrives here: a width dragged out in landscape
+  // is wider than the whole screen in portrait and would carry the terminal off
+  // the edge. What was stored is what was ASKED for, and it is left alone; only
+  // what is shown is cut to fit — so turning the tablet back gives the width
+  // back rather than leaving a column that has to be dragged out again.
+  if (!el.side.hidden) {
+    const want = Number(localStorage.getItem(LS.filesWidth)) || el.side.offsetWidth;
+    const fits = Math.min(Math.max(200, want), widestSide());
+    if (Math.round(el.side.offsetWidth) !== Math.round(fits)) {
+      el.side.style.width = `${fits}px`;
+    }
+  }
+  relayout();
+});
 
 // --------------------------------------------------------------- connection
 

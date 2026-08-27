@@ -2032,6 +2032,7 @@ html, body {
 #fsplit::after { content: ""; position: absolute; inset: 0 -3px; }
 #fsplit[hidden] { display: none; }
 
+
 #side {
   width: 320px;
   flex: 0 0 auto;
@@ -2060,6 +2061,25 @@ html, body {
   position: relative;
 }
 .psplit::after { content: ""; position: absolute; inset: 0 -3px; }
+
+/* ---- the three drag handles, once all of them have been defined ----------
+   Kept together and kept here: `.psplit::after` is written further down than
+   the others, and an override placed above it would be undone by it. */
+
+/* The gesture belongs to the handle, not to the page: without this a finger
+   dragging one of them scrolls instead, which is what a touch screen does with
+   any movement it has not been told about. */
+#splitter, #fsplit, .psplit { touch-action: none; }
+/* And they have to be on top, or the hit area either side of the line cannot be
+   reached: the panes beside them paint over it, leaving only the 1px line
+   itself to aim at. A splitter is a 1px line — there is nothing under it to
+   cover. */
+#splitter, #fsplit, .psplit { z-index: 2; }
+/* A finger is not a cursor: 7px of hit area is a cursor target. Widened only
+   where the pointer is coarse, so nothing moves on a desktop. */
+@media (pointer: coarse) {
+  #splitter::after, #fsplit::after, .psplit::after { inset: 0 -10px; }
+}
 .pmain {
   flex: 1 1 auto;
   min-width: 0;
@@ -2560,14 +2580,22 @@ html, body {
   #side {
     position: fixed;
     inset: var(--row) 0 0 0;
-    width: auto;
+    /* `!important` for the same reason the folded Explorer needs it: the width
+       dragged on a wide screen is an inline style, and a fixed panel with a
+       width set is pinned to the left edge instead of covering. A tablet turned
+       on its side lands in this band carrying that width, and would show a
+       column floating over the terminal. */
+    width: auto !important;
     z-index: 26;
     border-left: none;
   }
   #fsplit { display: none; }
   /* Two columns at 390px leave neither readable; the Explorer is narrowed as
      far as needed, and its drag handle is switched off. */
-  .pexp { width: 44vw; max-width: 190px; }
+  /* 190px was a phone's ration. On a small tablet — still inside this band —
+     the panel covers the whole screen and a 190px Explorer wastes most of it,
+     so the cap follows the screen and only bites once there is room to spare. */
+  .pexp { width: 44vw; max-width: 300px; }
   .psplit { display: none; }
 
   /* iOS zooms the page in when focusing an input whose font is under 16px. */

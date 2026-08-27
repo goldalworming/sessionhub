@@ -92,7 +92,7 @@ export class SidePanel {
 
     const saved = Number(localStorage.getItem(LS_WIDTH));
     if (saved >= MIN) this.exp.style.width = `${saved}px`;
-    this.el.querySelector('.psplit').addEventListener('mousedown', (e) => this.drag(e));
+    this.el.querySelector('.psplit').addEventListener('pointerdown', (e) => this.drag(e));
 
     this.paint();
   }
@@ -121,6 +121,10 @@ export class SidePanel {
     // keeping it folded would make the handle feel broken.
     this.unfold();
     e.preventDefault();
+    const handle = e.currentTarget;
+    // Pointer events rather than mouse events: a finger drag fires no
+    // `mousemove`, so on a touch screen this handle used to do nothing.
+    handle.setPointerCapture(e.pointerId);
     const left = this.exp.getBoundingClientRect().left;
     const move = (ev) => {
       const max = Math.max(MIN, this.el.clientWidth - 160);
@@ -130,12 +134,15 @@ export class SidePanel {
       this.editor.relayout();
       this.tree.paint();
     };
-    const up = () => {
-      document.removeEventListener('mousemove', move);
-      document.removeEventListener('mouseup', up);
+    const up = (ev) => {
+      handle.releasePointerCapture(ev.pointerId);
+      handle.removeEventListener('pointermove', move);
+      handle.removeEventListener('pointerup', up);
+      handle.removeEventListener('pointercancel', up);
     };
-    document.addEventListener('mousemove', move);
-    document.addEventListener('mouseup', up);
+    handle.addEventListener('pointermove', move);
+    handle.addEventListener('pointerup', up);
+    handle.addEventListener('pointercancel', up);
   }
 
   /// Move to another (machine, project). What was open stays open — behind the
