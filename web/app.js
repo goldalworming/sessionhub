@@ -980,6 +980,21 @@ function renderTabs() {
   // tabs.
   const strip = document.createElement('div');
   strip.className = 'tabstrip';
+  // A mouse wheel only turns one way, and the strip only scrolls the other.
+  // With its scrollbar hidden on purpose, a laptop without a touchpad had no
+  // way along it at all — so the wheel's vertical motion is turned sideways
+  // here. `deltaX` is honoured too, so a touchpad's real sideways swipe still
+  // does what it always did.
+  strip.addEventListener(
+    'wheel',
+    (e) => {
+      const d = Math.abs(e.deltaX) > Math.abs(e.deltaY) ? e.deltaX : e.deltaY;
+      if (!d || strip.scrollWidth <= strip.clientWidth) return;
+      e.preventDefault();
+      strip.scrollLeft += d;
+    },
+    { passive: false },
+  );
   el.tabs.appendChild(strip);
 
   const list = inTabOrder(visibleTerminals());

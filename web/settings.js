@@ -454,7 +454,10 @@ export class Settings {
       this.onLan(cb.checked);
     };
 
-    if (!this.lanAccess) return pane;
+    if (!this.lanAccess) {
+      pane.appendChild(this.signOutRows());
+      return pane;
+    }
 
     // The warning comes before the address: what is being shared is a shell, not
     // a web page, and that has to be read before the link is copied.
@@ -486,7 +489,74 @@ export class Settings {
         }),
       );
     }
+    pane.appendChild(this.signOutRows());
     return pane;
+  }
+
+  /// Leave a borrowed browser the way it was found.
+  ///
+  /// Two stores carry state on someone else's device: localStorage (the token
+  /// among a pile of preferences) and the sign-in cookie. The first is cleared
+  /// here; the cookie is HttpOnly — unreachable from any script on purpose —
+  /// so `/api/signout` asks the daemon to have the browser drop it.
+  ///
+  /// What this cannot do is honestly stated on the row: the token itself still
+  /// works, and the `?token=` address may sit in that browser's history. A
+  /// device that is not yours to trust needs `sessionhubd token rotate`.
+  signOutRows() {
+    const wrap = document.createElement('div');
+    wrap.className = 'signoutrow';
+
+    const row = document.createElement('div');
+    row.className = 'usagebar';
+    const label = document.createElement('span');
+    label.className = 'usage';
+    label.textContent = 'Done on a borrowed device? Sign this browser out.';
+    row.appendChild(label);
+
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'del';
+    btn.textContent = 'Sign out';
+    btn.onclick = async () => {
+      if (!btn.dataset.armed) {
+        btn.dataset.armed = '1';
+        btn.classList.add('armed');
+        btn.textContent = 'Click again to sign out';
+        setTimeout(() => {
+          if (!btn.isConnected) return;
+          delete btn.dataset.armed;
+          btn.classList.remove('armed');
+          btn.textContent = 'Sign out';
+        }, 4000);
+        return;
+      }
+      btn.disabled = true;
+      btn.textContent = 'Signing out…';
+      // The cookie first, while the page can still ask; the wipe second; the
+      // sign-in page last. A failed fetch — daemon gone — does not keep the
+      // stores: the wipe happens regardless.
+      try {
+        await fetch('/api/signout');
+      } catch {}
+      try {
+        localStorage.clear();
+        sessionStorage.clear();
+      } catch {}
+      location.replace('/');
+    };
+    row.appendChild(btn);
+    wrap.appendChild(row);
+
+    wrap.appendChild(
+      Settings.stat(
+        'muted',
+        'Clears everything sessionhub kept in this browser — the sign-in and every preference. ' +
+          'The token itself keeps working, and the signed-in address may still be in this ' +
+          'browser’s history: if the device is not yours, run `sessionhubd token rotate` on yours.',
+      ),
+    );
+    return wrap;
   }
 
   /// "Refresh": refetch every file this page runs on, past every cache,

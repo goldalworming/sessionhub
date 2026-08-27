@@ -427,6 +427,7 @@ fn handle(
         "/api/stop" => api_stop(&mut sock, &tx),
         "/api/reload" => api_reload(&mut sock, &token),
         "/api/file" => api_file(&mut sock, &req),
+        "/api/signout" => api_signout(&mut sock),
         _ => serve_static(&mut sock, &req, set_cookie, &secret),
     }
 }
@@ -845,6 +846,28 @@ fn serve_static(
 /// secret to live, it is the same lifetime the frontend already assumed. Of the
 /// two, the cookie is the safer, being `HttpOnly` and so unreadable by script.
 const COOKIE_MAX_AGE_SECS: u64 = 400 * 24 * 60 * 60;
+
+/// Sign this browser out: tell it to drop the cookie.
+///
+/// The cookie is HttpOnly — that is what keeps a script served by this daemon
+/// from reading it — so the page cannot delete it either; only a Set-Cookie
+/// from here can. The point is a borrowed device: Settings clears the
+/// localStorage side itself and calls this for the half it cannot reach.
+///
+/// This does NOT revoke the token. The URL that carried `?token=` may still be
+/// in that browser's history, and history is out of everyone's reach — real
+/// revocation is `sessionhubd token rotate`, and the pane says so.
+fn api_signout(sock: &mut TcpStream) -> io::Result<()> {
+    respond_with(
+        sock,
+        200,
+        "text/plain; charset=utf-8",
+        b"signed out
+",
+        "Set-Cookie: sh_token=; Path=/; Max-Age=0; SameSite=Lax; HttpOnly
+",
+    )
+}
 
 /// The sign-in cookie, in one place — it used to be written out twice,
 /// identically, which is one edit away from two different cookies.

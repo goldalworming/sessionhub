@@ -1912,6 +1912,24 @@ html, body {
 }
 .agent .del:hover { color: var(--bad); border-color: var(--bad); }
 .agent .del.armed { color: var(--bad); border-color: var(--bad); font-weight: 600; }
+/* The sign-out button borrows the Forget look — same two-click arming, same
+   colours — but lives outside an .agent row, so it needs the rules by name. */
+.signoutrow { margin-top: 18px; padding-top: 12px; border-top: 1px solid var(--border); }
+.signoutrow .del {
+  flex: 0 0 auto;
+  font: inherit;
+  font-size: 11px;
+  color: var(--muted);
+  background: none;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 4px 10px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.signoutrow .del:hover { color: var(--bad); border-color: var(--bad); }
+.signoutrow .del.armed { color: var(--bad); border-color: var(--bad); font-weight: 600; }
+.signoutrow .sstat { margin-top: 8px; }
 
 .addbtn {
   align-self: flex-start;
