@@ -109,6 +109,7 @@ export class Conn {
         saved: 'onSaved',
         last_command: 'onLastCommand',
         remotes: 'onRemotes',
+        token_rotated: 'onTokenRotated',
         cloudflare: 'onCloudflare',
         update: 'onUpdate',
       };

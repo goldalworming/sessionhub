@@ -179,7 +179,17 @@ A random 32-byte token is created once and then saved. It does not change on eve
 sessionhubd token rotate
 ```
 
+or **⚙ Settings → Network access → New token**, which asks twice and then carries
+that tab over to the new address by itself — its WebSocket was authenticated when
+it was opened, so it survives the change and can be handed the new URL down it.
+
 The old token stops working right away. The new one takes effect without closing running terminals. Browser tabs that are still open will be rejected. They will be told their token has expired.
+
+Everything else holding the old token breaks with it, which is exactly what
+replacing a token is for: every other browser and phone needs the new address,
+any Cloudflare hostname arranged here is gated on the same token so its URL
+changes too, and a machine that paired **to** this one has the old token stored
+and must be paired again.
 
 ### How a browser stays signed in
 

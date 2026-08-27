@@ -142,6 +142,9 @@ pub enum ClientMsg {
     SetRemoteCommands {
         enabled: bool,
     },
+    /// Replace this machine's token. Everything holding the old one stops
+    /// working the moment it is done — which is the point of asking.
+    RotateToken,
     /// Change the storage limits for dropped files, then sweep right away.
     SetDrops {
         max_age_hours: u64,
@@ -379,6 +382,15 @@ pub enum ServerMsg {
     /// to redraw one pane.
     Cloudflare {
         cloudflare: CloudflareInfo,
+    },
+    /// The token was replaced, and this is the address that works now.
+    ///
+    /// Sent only to the client that asked, down the socket it already holds —
+    /// that connection was authenticated when it was upgraded and survives the
+    /// change, which is the only reason there is a way to hand the new address
+    /// over at all. Every other browser is signed out where it stands.
+    TokenRotated {
+        url: String,
     },
     Remotes {
         remotes: Vec<RemoteInfo>,

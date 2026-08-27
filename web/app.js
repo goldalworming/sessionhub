@@ -1884,6 +1884,10 @@ const settings = new Settings(
   // Through the facade, like the LAN switch beside it: what is being allowed or
   // refused belongs to the machine whose settings are on screen.
   (enabled) => conn.send({ t: 'set_remote_commands', enabled }),
+  // Also through the facade: the token being replaced belongs to the machine
+  // whose settings are open, not to whichever one the browser happens to be
+  // talking to.
+  () => conn.send({ t: 'rotate_token' }),
   (limits) => conn.send(limits ? { t: 'set_drops', ...limits } : { t: 'sweep_drops' }),
   (name) => conn.send({ t: 'remove_agent', name }),
   // Forgetting a machine always goes to the LOCAL daemon: the paired list is its
@@ -2634,6 +2638,16 @@ function forgetMachine(m) {
 
 /// The machine list from the local daemon. Tabs are created for new ones, and
 /// the ones forgotten are closed.
+conn.on.onTokenRotated = (msg, m) => {
+  // Only from the machine on screen: rotating a paired machine's token does not
+  // change the address of the browser's own daemon.
+  if (m !== current) {
+    banner(`${m.label}: token replaced — that machine must be paired again.`, true);
+    return;
+  }
+  settings.tokenRotated(msg.url);
+};
+
 conn.on.onRemotes = (msg, m) => {
   // Only the local daemon holds this list; remotes are not chained.
   if (m !== local) return;

@@ -61,6 +61,7 @@ export class Settings {
     onSave,
     onLan,
     onRemoteCommands,
+    onRotateToken,
     onDrops,
     onRemove,
     onForget,
@@ -81,6 +82,7 @@ export class Settings {
     this.onSave = onSave;
     this.onLan = onLan;
     this.onRemoteCommands = onRemoteCommands || (() => {});
+    this.onRotateToken = onRotateToken || (() => {});
     this.onDrops = onDrops;
     this.onRemove = onRemove;
     this.onForget = onForget || (() => {});
@@ -463,6 +465,7 @@ export class Settings {
     if (!this.lanAccess) {
       pane.appendChild(this.remoteCommandRows());
       pane.appendChild(this.signOutRows());
+      pane.appendChild(this.rotateRows());
       return pane;
     }
 
@@ -498,6 +501,7 @@ export class Settings {
     }
     pane.appendChild(this.remoteCommandRows());
     pane.appendChild(this.signOutRows());
+    pane.appendChild(this.rotateRows());
     return pane;
   }
 
@@ -550,6 +554,70 @@ export class Settings {
       ),
     );
     return wrap;
+  }
+
+  /// Replace the token, when it has been somewhere it should not have been.
+  ///
+  /// Signing out clears one browser; this makes the old token worthless
+  /// everywhere at once — which is what a token that was pasted into a chat, a
+  /// screenshot or a shared log actually needs. It is the loud one, so it says
+  /// what breaks before it is pressed, and asks twice.
+  rotateRows() {
+    const wrap = document.createElement('div');
+    wrap.className = 'signoutrow';
+
+    const row = document.createElement('div');
+    row.className = 'usagebar';
+    const label = document.createElement('span');
+    label.className = 'usage';
+    label.textContent = 'Token seen by someone else? Replace it.';
+    row.appendChild(label);
+
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'del';
+    btn.textContent = 'New token';
+    btn.onclick = () => {
+      if (!btn.dataset.armed) {
+        btn.dataset.armed = '1';
+        btn.classList.add('armed');
+        btn.textContent = 'Click again — everything signs out';
+        setTimeout(() => {
+          if (!btn.isConnected) return;
+          delete btn.dataset.armed;
+          btn.classList.remove('armed');
+          btn.textContent = 'New token';
+        }, 5000);
+        return;
+      }
+      btn.disabled = true;
+      btn.textContent = 'Replacing…';
+      this.note.textContent = 'Replacing the token…';
+      this.onRotateToken();
+    };
+    row.appendChild(btn);
+    wrap.appendChild(row);
+
+    wrap.appendChild(
+      Settings.stat(
+        'warn',
+        'The old token stops working at once, everywhere. Every other browser and phone ' +
+          'needs the new address, any Cloudflare hostname here changes with it, and a machine ' +
+          'paired to this one must be paired again. Terminals keep running throughout — this ' +
+          'tab will carry itself over.',
+      ),
+    );
+    return wrap;
+  }
+
+  /// The daemon replaced the token and told us where to carry on.
+  ///
+  /// The open WebSocket was authenticated when it was upgraded, so it survives
+  /// the change and can deliver this. The cookie in this browser is stale from
+  /// here on, and reloading at the new address is what replaces it.
+  tokenRotated(url) {
+    this.note.textContent = 'Token replaced. Reloading at the new address…';
+    setTimeout(() => location.replace(url), 400);
   }
 
   /// Leave a borrowed browser the way it was found.

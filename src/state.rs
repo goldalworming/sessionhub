@@ -1597,6 +1597,72 @@ pub fn run(cfg: Config, rx: Receiver<Cmd>, tx: Sender<Cmd>, registry_cfg: Sender
                     }
                 }
 
+                ClientMsg::RotateToken => {
+                    // Generated before anything is written: if randomness fails
+                    // there is nothing to undo.
+                    let fresh = match crate::config::generate_token() {
+                        Ok(t) => t,
+                        Err(e) => {
+                            warn!(error = %e, "could not make a new token");
+                            send_to(
+                                &clients,
+                                id,
+                                json(&ServerMsg::Error {
+                                    code: "rotate_failed".into(),
+                                    message: format!("Could not make a new token: {e}"),
+                                }),
+                            );
+                            continue;
+                        }
+                    };
+                    let previous = cfg.token.clone();
+                    cfg.token = fresh.clone();
+                    if let Err(e) = crate::config::save(&cfg) {
+                        // Nothing has changed yet — the listeners still hold the
+                        // old token — so put it back rather than leave the file
+                        // and the running daemon disagreeing.
+                        cfg.token = previous;
+                        warn!(error = %e, "could not save the new token");
+                        send_to(
+                            &clients,
+                            id,
+                            json(&ServerMsg::Error {
+                                code: "rotate_failed".into(),
+                                message: format!(
+                                    "config.toml could not be written, so the token was left \
+                                     as it was: {e}"
+                                ),
+                            }),
+                        );
+                        continue;
+                    }
+                    if let Err(e) = crate::http::set_token(&fresh) {
+                        warn!(error = %e, "the new token was saved but not applied");
+                        send_to(
+                            &clients,
+                            id,
+                            json(&ServerMsg::Error {
+                                code: "rotate_failed".into(),
+                                message: format!(
+                                    "The new token was written to config.toml but could not be \
+                                     applied — restart the daemon to pick it up: {e}"
+                                ),
+                            }),
+                        );
+                        continue;
+                    }
+                    info!("the token was replaced; everything holding the old one is now refused");
+                    // The address to carry on at. Loopback rather than the LAN
+                    // one: this is handed to the browser that asked, and that
+                    // browser reached us somehow already — a relative path keeps
+                    // whatever host and scheme it used, tunnel included.
+                    send_to(
+                        &clients,
+                        id,
+                        json(&ServerMsg::TokenRotated { url: format!("/?token={fresh}") }),
+                    );
+                }
+
                 ClientMsg::SetRemoteCommands { enabled } => {
                     // Applied before it is saved, and applied even if saving
                     // fails: a person turning this OFF wants it off now, not

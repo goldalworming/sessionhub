@@ -89,7 +89,9 @@ can open from anywhere, still behind the sessionhub token.
 
 > **This exposes a shell.** Anyone with the address and the token can run any
 > command on that computer, as you. Put **Cloudflare Access** in front of it if
-> it is more than a moment, and run `sessionhubd token rotate` if a URL leaked.
+> it is more than a moment. If a URL ever leaked — a screenshot, a chat, a shared
+> log — replace the token: **⚙ Settings → Network access → New token**, or
+> `sessionhubd token rotate`.
 
 ## Putting another machine to work
 

@@ -284,6 +284,20 @@ Connection: close
 }
 
 /// Turn the network listener on or off. Returns the address used.
+/// Put a new token in front of every listener, at once.
+///
+/// The same slot `/api/reload` writes, reached directly instead of through a
+/// loopback request to ourselves. Sockets already open are unaffected — a
+/// WebSocket was authenticated when it was upgraded — which is what lets the
+/// browser that asked for this be told the new address over the connection it
+/// already has, instead of being dropped and left at a sign-in page.
+pub fn set_token(fresh: &str) -> Result<(), String> {
+    let ctx = CTX.get().ok_or("server is not running yet")?;
+    let mut slot = ctx.token.write().map_err(|_| "the token slot is poisoned")?;
+    *slot = fresh.to_string();
+    Ok(())
+}
+
 /// Flip the remote-commands switch. Called by the actor when settings change.
 pub fn set_remote_commands(on: bool) {
     REMOTE_COMMANDS.store(on, Ordering::Relaxed);
