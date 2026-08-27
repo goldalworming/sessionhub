@@ -222,6 +222,53 @@ fn request(port: u16, method: &str, target: &str) -> Option<String> {
     Some(body.to_string())
 }
 
+/// A loopback request whose answer is wanted whatever the status was, and which
+/// may take as long as the work it asked for.
+///
+/// `request` above is built for two control endpoints: five seconds, and
+/// `None` for anything that is not a 200. Neither suits asking the daemon to run
+/// a build on another machine — that can take minutes, and when it is refused
+/// the refusal is the very thing worth printing.
+pub fn ask(
+    port: u16,
+    method: &str,
+    target: &str,
+    body: &[u8],
+    wait: Duration,
+) -> Result<(u16, Vec<u8>), String> {
+    let addr: SocketAddr = ([127, 0, 0, 1], port).into();
+    let mut sock = TcpStream::connect_timeout(&addr, Duration::from_millis(1500))
+        .map_err(|e| format!("sessionhub is not answering on port {port}: {e}"))?;
+    sock.set_read_timeout(Some(wait)).map_err(|e| e.to_string())?;
+
+    let mut req = format!(
+        "{method} {target} HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\
+         Content-Length: {}\r\n\r\n",
+        body.len()
+    )
+    .into_bytes();
+    req.extend_from_slice(body);
+    sock.write_all(&req).map_err(|e| format!("could not send the request: {e}"))?;
+    sock.flush().map_err(|e| e.to_string())?;
+
+    let mut raw = Vec::new();
+    sock.read_to_end(&mut raw).map_err(|e| format!("the daemon stopped replying: {e}"))?;
+    let _ = sock.shutdown(Shutdown::Both);
+
+    let split = raw
+        .windows(4)
+        .position(|w| w == b"\r\n\r\n")
+        .ok_or_else(|| "the daemon sent a reply this version cannot read".to_string())?;
+    let head = String::from_utf8_lossy(&raw[..split]);
+    let status = head
+        .lines()
+        .next()
+        .and_then(|l| l.split_whitespace().nth(1))
+        .and_then(|c| c.parse::<u16>().ok())
+        .unwrap_or(0);
+    Ok((status, raw[split + 4..].to_vec()))
+}
+
 /// Wait for a process to really be gone after being asked to stop.
 pub fn wait_gone(pid: u32, timeout: Duration) -> bool {
     let deadline = std::time::Instant::now() + timeout;

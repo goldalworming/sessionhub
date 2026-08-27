@@ -305,6 +305,33 @@ token = "…"
 version = "0.1.0"
 ```
 
+### Running commands there
+
+A paired machine can be put to work from the command line, which is how a coding
+agent uses it: `sessionhubd run --on NAME -- COMMAND` runs something there and
+comes back with its output and its exit code; `sessionhubd push` and `pull` move
+one file each. See the README for the whole shape.
+
+The machine being asked decides whether to allow it:
+
+```toml
+remote_commands = true
+```
+
+**⚙ Settings → Network access → Remote commands** flips it, and it takes effect
+at once — no restart. On by default, because it grants nothing the token did not
+already grant: anyone who can open a terminal there can type anything into it.
+What it changes is that the same power becomes scriptable and unattended, so
+every command that runs this way is written to that machine's log:
+
+```
+INFO ran a command asked for from elsewhere cmd=./gradlew assembleDebug cwd=C:/b code=0 ms=41219
+```
+
+Turned off, commands and sent files are refused with a 403 that names the switch.
+**Reading** a file is not covered — the file panel has always read from a paired
+machine, and breaking that is not what this switch is for.
+
 > The traffic is **not encrypted**, exactly as with Network access. The token proves who is calling; it does not hide what is being said. A paired machine means **full access** to that machine — that daemon does hand out a shell. Use it only on networks you trust, or over a VPN — the pairing link accepts a VPN address just as it accepts a LAN address.
 >
 > **`https://` connections are not supported**: pairing speaks plain HTTP and requires `host:port`, so a `sessionhubd tunnel` URL cannot be paired. To cross the internet, run it over a VPN.

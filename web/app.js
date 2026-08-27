@@ -1881,6 +1881,9 @@ const settings = new Settings(
   document.body,
   (agent) => conn.send({ t: 'set_agent', ...agent }),
   (enabled) => conn.send({ t: 'set_lan_access', enabled }),
+  // Through the facade, like the LAN switch beside it: what is being allowed or
+  // refused belongs to the machine whose settings are on screen.
+  (enabled) => conn.send({ t: 'set_remote_commands', enabled }),
   (limits) => conn.send(limits ? { t: 'set_drops', ...limits } : { t: 'sweep_drops' }),
   (name) => conn.send({ t: 'remove_agent', name }),
   // Forgetting a machine always goes to the LOCAL daemon: the paired list is its

@@ -137,6 +137,11 @@ pub enum ClientMsg {
     SetLanAccess {
         enabled: bool,
     },
+    /// Allow, or stop allowing, another machine to run commands here without a
+    /// person watching. Saved to `config.toml` and applied at once.
+    SetRemoteCommands {
+        enabled: bool,
+    },
     /// Change the storage limits for dropped files, then sweep right away.
     SetDrops {
         max_age_hours: u64,
@@ -421,6 +426,13 @@ pub enum ServerMsg {
         /// — a client only ever sees what was arranged with it, the same rule
         /// the machine tokens follow.
         cloudflare: CloudflareInfo,
+        /// Whether another machine may run commands here unattended.
+        remote_commands: bool,
+        /// That this daemon understands `set_remote_commands` at all. Read the
+        /// same way `can_move` is: absent means no, and no switch is drawn —
+        /// an older daemon would drop the message without answering, leaving a
+        /// switch that flips back on its own.
+        can_run_remotely: bool,
     },
 }
 

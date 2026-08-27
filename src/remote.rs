@@ -176,6 +176,72 @@ pub fn http_get(addr: &str, path: &str) -> Result<Vec<u8>, String> {
     }
 }
 
+/// `http_get` for something that takes its time.
+///
+/// `dial` sets a 15-second read timeout, which is right for asking a machine
+/// what version it is and wrong for asking it to run a build. The deadline here
+/// belongs to the command, not to the network.
+pub fn http_get_slow(addr: &str, path: &str, wait: std::time::Duration) -> Result<Vec<u8>, String> {
+    let sock = dial(addr)?;
+    sock.set_read_timeout(Some(wait)).map_err(|e| format!("{addr}: {e}"))?;
+    send_and_read(sock, addr, format!(
+        "GET {path} HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\nAccept: */*\r\n\r\n"
+    ).into_bytes())
+}
+
+/// Send a file's bytes to another machine.
+pub fn http_put(addr: &str, path: &str, body: &[u8]) -> Result<Vec<u8>, String> {
+    let sock = dial(addr)?;
+    // A big file over a slow link takes longer than the 15 seconds `dial` allows
+    // for a status check.
+    sock.set_read_timeout(Some(std::time::Duration::from_secs(120)))
+        .map_err(|e| format!("{addr}: {e}"))?;
+    let mut req = format!(
+        "PUT {path} HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n\
+         Content-Type: application/octet-stream\r\nContent-Length: {}\r\n\r\n",
+        body.len()
+    )
+    .into_bytes();
+    req.extend_from_slice(body);
+    send_and_read(sock, addr, req)
+}
+
+/// Write one request, read the whole reply, and unwrap its status.
+///
+/// Shared by the two above so a reply is judged the same way whichever verb
+/// asked for it.
+fn send_and_read(mut sock: TcpStream, addr: &str, req: Vec<u8>) -> Result<Vec<u8>, String> {
+    sock.write_all(&req).map_err(|e| format!("Could not reach {addr}: {e}"))?;
+    let mut raw = Vec::new();
+    sock.read_to_end(&mut raw).map_err(|e| format!("{addr} stopped replying: {e}"))?;
+
+    let split = find_headers_end(&raw)
+        .ok_or_else(|| format!("{addr} sent a reply this version cannot read."))?;
+    let head = String::from_utf8_lossy(&raw[..split]);
+    let status = head
+        .lines()
+        .next()
+        .and_then(|l| l.split_whitespace().nth(1))
+        .and_then(|c| c.parse::<u16>().ok())
+        .unwrap_or(0);
+    let body = raw[split + 4..].to_vec();
+    match status {
+        200 => Ok(body),
+        401 => Err(format!("{addr} refused the token.")),
+        403 => Err(String::from_utf8_lossy(&body).trim().to_string()),
+        404 => Err(format!("{addr} does not have that.")),
+        other => {
+            let said = String::from_utf8_lossy(&body);
+            let said = said.trim();
+            if said.is_empty() {
+                Err(format!("{addr} answered {other}."))
+            } else {
+                Err(format!("{addr} answered {other}: {said}"))
+            }
+        }
+    }
+}
+
 fn find_headers_end(raw: &[u8]) -> Option<usize> {
     raw.windows(4).position(|w| w == b"\r\n\r\n")
 }

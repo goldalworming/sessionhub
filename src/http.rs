@@ -44,6 +44,14 @@ struct ServeCtx {
 }
 
 static CTX: OnceLock<ServeCtx> = OnceLock::new();
+/// Whether a paired machine may run commands here.
+///
+/// Kept here rather than read from `cfg`, for the reason `LAN` is: the `Config`
+/// this module was handed is a snapshot taken at start, and this is a switch a
+/// person flips at runtime. The actor calls `set_remote_commands` when it
+/// changes, exactly as it calls `set_lan_access`.
+static REMOTE_COMMANDS: AtomicBool = AtomicBool::new(true);
+
 static LAN: Mutex<Option<LanListener>> = Mutex::new(None);
 static FORWARDS: Mutex<Option<HashMap<String, ForwardListener>>> = Mutex::new(None);
 
@@ -79,6 +87,8 @@ pub fn serve(
     // daemon restart, and no live terminal dies with it.
     let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, cfg.port))?;
     info!(port = cfg.port, "listening on 127.0.0.1");
+
+    REMOTE_COMMANDS.store(cfg.remote_commands, Ordering::Relaxed);
 
     let lan_wanted = cfg.lan_access;
     // Addresses that were open before the daemon stopped: the tunnel still
@@ -274,6 +284,27 @@ Connection: close
 }
 
 /// Turn the network listener on or off. Returns the address used.
+/// Flip the remote-commands switch. Called by the actor when settings change.
+pub fn set_remote_commands(on: bool) {
+    REMOTE_COMMANDS.store(on, Ordering::Relaxed);
+}
+
+pub fn remote_commands_on() -> bool {
+    REMOTE_COMMANDS.load(Ordering::Relaxed)
+}
+
+/// The answer when the switch is off. Names the switch: a refusal that does not
+/// say how to lift it sends someone reading source code.
+fn refuse_remote_commands(sock: &mut TcpStream) -> io::Result<()> {
+    respond(
+        sock,
+        403,
+        "text/plain; charset=utf-8",
+        b"403 remote commands are turned off on that machine \
+(turn them back on there: Settings -> Network access -> Remote commands)\n",
+    )
+}
+
 pub fn set_lan_access(on: bool) -> Result<Option<SocketAddr>, String> {
     let Some(ctx) = CTX.get() else {
         return Err("server is not running yet".into());
@@ -397,6 +428,21 @@ fn handle(
     }
     let set_cookie = from_query.is_some();
 
+    // The one route that carries a body. It is read here, before routing,
+    // because both the local handler and the relay need it — and because the
+    // bytes are sitting on the socket either way: leaving them there would
+    // desynchronise anything that read from it next.
+    let put_body = if req.path == "/api/put" {
+        match read_body(&mut sock, &req) {
+            Ok(b) => b,
+            Err(message) => {
+                return respond(&mut sock, 400, "text/plain; charset=utf-8", message.as_bytes());
+            }
+        }
+    } else {
+        Vec::new()
+    };
+
     // `via` redirects this request to another paired machine. Only registered
     // names are served: if a free address were accepted, this daemon would turn
     // into an open proxy for anyone holding the token.
@@ -412,6 +458,8 @@ fn handle(
         return match req.path.as_str() {
             "/ws" => relay_ws(sock, req, r),
             "/api/file" => relay_file(&mut sock, &req, &r),
+            "/api/exec" => relay_exec(&mut sock, &req, &r),
+            "/api/put" => relay_put(&mut sock, &req, &r, put_body),
             other => respond(
                 &mut sock,
                 404,
@@ -427,6 +475,8 @@ fn handle(
         "/api/stop" => api_stop(&mut sock, &tx),
         "/api/reload" => api_reload(&mut sock, &token),
         "/api/file" => api_file(&mut sock, &req),
+        "/api/exec" => api_exec(&mut sock, &req),
+        "/api/put" => api_put(&mut sock, &req, put_body),
         "/api/signout" => api_signout(&mut sock),
         _ => serve_static(&mut sock, &req, set_cookie, &secret),
     }
@@ -499,6 +549,59 @@ fn relay_file(sock: &mut TcpStream, req: &Request, r: &crate::config::Remote) ->
     }
 }
 
+/// Forward a command to another machine and hand its answer straight back.
+///
+/// The answer is passed through untouched, JSON and all — including the far
+/// side's 403 when its own switch is off, which is the message that should
+/// reach whoever asked, not one this machine invented.
+///
+/// The deadline given to the far side is the caller's, plus a margin: this hop
+/// must not give up while the machine actually doing the work is still working.
+fn relay_exec(sock: &mut TcpStream, req: &Request, r: &crate::config::Remote) -> io::Result<()> {
+    let Some(command) = req.query_param("cmd") else {
+        return respond(sock, 400, "text/plain; charset=utf-8", b"400 missing cmd\n");
+    };
+    let asked = req.query_param("timeout").and_then(|t| t.parse::<u64>().ok());
+    let wait = crate::exec::clamp_timeout(asked) + Duration::from_secs(15);
+
+    let mut url = format!(
+        "/api/exec?token={}&cmd={}",
+        r.token,
+        crate::remote::percent_encode(&command),
+    );
+    if let Some(cwd) = req.query_param("cwd") {
+        url.push_str(&format!("&cwd={}", crate::remote::percent_encode(&cwd)));
+    }
+    if let Some(t) = asked {
+        url.push_str(&format!("&timeout={t}"));
+    }
+    match crate::remote::http_get_slow(&r.addr, &url, wait) {
+        Ok(body) => respond(sock, 200, "application/json", &body),
+        Err(e) => respond(sock, 502, "text/plain; charset=utf-8", e.as_bytes()),
+    }
+}
+
+/// Forward a file's bytes to another machine.
+fn relay_put(
+    sock: &mut TcpStream,
+    req: &Request,
+    r: &crate::config::Remote,
+    body: Vec<u8>,
+) -> io::Result<()> {
+    let Some(path) = req.query_param("path") else {
+        return respond(sock, 400, "text/plain; charset=utf-8", b"400 missing path\n");
+    };
+    let url = format!(
+        "/api/put?token={}&path={}",
+        r.token,
+        crate::remote::percent_encode(&path),
+    );
+    match crate::remote::http_put(&r.addr, &url, &body) {
+        Ok(answer) => respond(sock, 200, "application/json", &answer),
+        Err(e) => respond(sock, 502, "text/plain; charset=utf-8", e.as_bytes()),
+    }
+}
+
 /// One file's bytes, with its type — and, for HTML, a leash.
 ///
 /// `/api/file` serves whatever is on disk, and the file panel now offers HTML
@@ -563,6 +666,107 @@ fn api_file(sock: &mut TcpStream, req: &Request) -> io::Result<()> {
         }
     };
     serve_file_bytes(sock, &path.to_string_lossy(), &body)
+}
+
+/// Run a command here and answer with everything it said.
+///
+/// A GET with the command in the query rather than a POST with a body, because
+/// `Request::parse` throws the verb away and nothing in this server has ever
+/// read a request body — `percent_encode` already carries Windows paths and
+/// tokens through query strings, and a command is no stranger. The head is
+/// capped at 16 KB (`MAX_HEAD`), which is thousands of characters of command;
+/// anything longer belongs in a script file pushed first.
+fn api_exec(sock: &mut TcpStream, req: &Request) -> io::Result<()> {
+    if !remote_commands_on() {
+        return refuse_remote_commands(sock);
+    }
+    let Some(command) = req.query_param("cmd") else {
+        return respond(sock, 400, "text/plain; charset=utf-8", b"400 missing cmd\n");
+    };
+    let cwd = req.query_param("cwd").unwrap_or_default();
+    let timeout =
+        crate::exec::clamp_timeout(req.query_param("timeout").and_then(|t| t.parse::<u64>().ok()));
+
+    let started = Instant::now();
+    let out = match crate::exec::run(&command, &cwd, timeout) {
+        Ok(o) => o,
+        Err(message) => {
+            warn!(cmd = %command, error = %message, "a remote command could not start");
+            let body = serde_json::json!({ "error": message }).to_string();
+            return respond(sock, 400, "application/json", body.as_bytes());
+        }
+    };
+    // The audit line. A command that ran here on somebody else's say-so is
+    // exactly the thing that should be findable afterwards.
+    info!(
+        cmd = %command,
+        cwd = %if cwd.is_empty() { "~".to_string() } else { cwd.clone() },
+        code = out.code,
+        ms = started.elapsed().as_millis() as u64,
+        timed_out = out.timed_out,
+        "ran a command asked for from elsewhere"
+    );
+
+    let body = serde_json::json!({
+        "code": out.code,
+        "stdout": out.stdout,
+        "stderr": out.stderr,
+        "truncated": out.truncated,
+        "timed_out": out.timed_out,
+    })
+    .to_string();
+    respond(sock, 200, "application/json", body.as_bytes())
+}
+
+/// Write a file here, from the bytes that came with the request.
+///
+/// `/api/file` reads; this is the other direction, and it is what makes "send
+/// the source over and build it there" possible without a share or an ssh key.
+/// Deliberately not `files::write`: that one refuses to create a file, which is
+/// the editor's guard against saving into a typo. This contract is the reverse —
+/// a build directory that does not exist yet is the normal case.
+fn api_put(sock: &mut TcpStream, req: &Request, body: Vec<u8>) -> io::Result<()> {
+    if !remote_commands_on() {
+        return refuse_remote_commands(sock);
+    }
+    let Some(raw) = req.query_param("path") else {
+        return respond(sock, 400, "text/plain; charset=utf-8", b"400 missing path\n");
+    };
+    let path = crate::browse::normalize(&raw);
+    if let Some(parent) = path.parent() {
+        if let Err(e) = std::fs::create_dir_all(parent) {
+            warn!(path = %path.display(), error = %e, "could not make the folder for /api/put");
+            return respond(
+                sock,
+                500,
+                "text/plain; charset=utf-8",
+                b"500 cannot make the folder\n",
+            );
+        }
+    }
+    let bytes = body.len();
+    if let Err(e) = std::fs::write(&path, &body) {
+        warn!(path = %path.display(), error = %e, "could not write a file for /api/put");
+        return respond(sock, 500, "text/plain; charset=utf-8", b"500 cannot write\n");
+    }
+    info!(path = %path.display(), bytes, "wrote a file sent from elsewhere");
+    let answer = serde_json::json!({ "path": path.to_string_lossy(), "bytes": bytes }).to_string();
+    respond(sock, 200, "application/json", answer.as_bytes())
+}
+
+/// The bytes after the head. `read_head` stops at the blank line, so whatever
+/// follows is still on the socket, waiting.
+fn read_body(sock: &mut TcpStream, req: &Request) -> Result<Vec<u8>, String> {
+    let len: usize = req
+        .header("content-length")
+        .and_then(|v| v.trim().parse().ok())
+        .ok_or_else(|| "411 length required\n".to_string())?;
+    if len as u64 > MAX_INLINE {
+        return Err("413 file too large\n".to_string());
+    }
+    let mut body = vec![0u8; len];
+    sock.read_exact(&mut body).map_err(|e| format!("400 body ended early: {e}\n"))?;
+    Ok(body)
 }
 
 /// The limit for `/api/file`. Large enough for screenshots and assets, small

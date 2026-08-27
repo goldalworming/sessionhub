@@ -333,6 +333,7 @@ pub fn run(cfg: Config, rx: Receiver<Cmd>, tx: Sender<Cmd>, registry_cfg: Sender
                     let agents: Vec<(String, crate::config::Agent)> =
                         cfg.agents.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
                     let lan_access = cfg.lan_access;
+                    let remote_commands = cfg.remote_commands;
                     let token = cfg.token.clone();
                     let limits = cfg.drops.clone();
                     let cloudflare = cloudflare_info(&cfg.cloudflare, &cfg.token, &choices);
@@ -417,6 +418,8 @@ pub fn run(cfg: Config, rx: Receiver<Cmd>, tx: Sender<Cmd>, registry_cfg: Sender
                             lan_url,
                             pair_url,
                             cloudflare,
+                            remote_commands,
+                            can_run_remotely: true,
                         };
                         if let Ok(text) = serde_json::to_string(&msg) {
                             let _ = out.try_send(Out::Text(text));
@@ -1584,6 +1587,36 @@ pub fn run(cfg: Config, rx: Receiver<Cmd>, tx: Sender<Cmd>, registry_cfg: Sender
                                 code: "config_write_failed".into(),
                                 message: format!(
                                     "Network access changed, but config.toml could not be \
+                                     written, so it will reset on restart: {e}"
+                                ),
+                            }),
+                        );
+                    }
+                    if tx.send(Cmd::ClientMsg { id, msg: ClientMsg::Config }).is_err() {
+                        return;
+                    }
+                }
+
+                ClientMsg::SetRemoteCommands { enabled } => {
+                    // Applied before it is saved, and applied even if saving
+                    // fails: a person turning this OFF wants it off now, not
+                    // after a disk write succeeds.
+                    crate::http::set_remote_commands(enabled);
+                    cfg.remote_commands = enabled;
+                    if enabled {
+                        info!("remote commands allowed");
+                    } else {
+                        info!("remote commands refused from now on");
+                    }
+                    if let Err(e) = crate::config::save(&cfg) {
+                        warn!(error = %e, "could not save config");
+                        send_to(
+                            &clients,
+                            id,
+                            json(&ServerMsg::Error {
+                                code: "config_write_failed".into(),
+                                message: format!(
+                                    "Remote commands changed, but config.toml could not be \
                                      written, so it will reset on restart: {e}"
                                 ),
                             }),

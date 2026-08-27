@@ -45,6 +45,16 @@ pub struct Config {
     /// this machine is already reached by.
     #[serde(default)]
     pub cloudflare: Cloudflare,
+    /// Whether a paired machine may run commands here without a person
+    /// watching — `/api/exec` and `/api/put`.
+    ///
+    /// On by default, because it grants nothing the token did not already
+    /// grant: anyone who can open a terminal here can type anything into it.
+    /// What it changes is that the same power becomes scriptable and
+    /// unattended, and a machine deserves a way to say no to that — so it is a
+    /// switch, and every command that runs is written to the log.
+    #[serde(default = "yes")]
+    pub remote_commands: bool,
 }
 
 /// Reaching a dev server from outside, at a hostname of its own.
@@ -545,7 +555,7 @@ pub const TERMINAL_AGENT: &str = "terminal";
 /// The system's default shell. On Windows PowerShell is chosen over `%COMSPEC%`:
 /// it is what Windows Terminal and VS Code use, so it is what the user expects
 /// when pressing "New terminal".
-fn default_shell() -> String {
+pub fn default_shell() -> String {
     if cfg!(windows) {
         "powershell.exe".to_string()
     } else {
@@ -633,6 +643,7 @@ impl Default for Config {
             remotes: Vec::new(),
             saved: Vec::new(),
             cloudflare: Cloudflare::default(),
+            remote_commands: true,
         }
     }
 }

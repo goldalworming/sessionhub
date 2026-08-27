@@ -9,6 +9,7 @@ mod browse;
 mod cloudflare;
 mod daemon;
 mod drops;
+mod exec;
 mod files;
 mod http;
 mod memory;
@@ -80,6 +81,10 @@ fn main() -> ExitCode {
                 ExitCode::from(2)
             }
         },
+        "machines" => cmd_machines(),
+        "run" => cmd_run(&argv),
+        "push" => cmd_push(&argv),
+        "pull" => cmd_pull(&argv),
         "tray" => tray::run(home),
         "tunnel" => cmd_tunnel(),
         "bundle-web" => cmd_bundle_web(&argv),
@@ -106,6 +111,15 @@ fn print_help() {
          sessionhubd restart [--force]      stop and start again, to load a new build\n\
          sessionhubd status                 port, live terminal count, uptime\n\
          sessionhubd token rotate           replace the token; the old one stops working\n\
+         \n\
+         Working on a paired machine — like ssh, but to any machine sessionhub reaches:\n\
+         sessionhubd machines               the machines paired with this one\n\
+         sessionhubd run --on NAME [--cwd DIR] [--timeout SECONDS] -- COMMAND…\n\
+         \x20                                 run it there; its exit code becomes ours\n\
+         sessionhubd push --on NAME LOCAL THERE    send one file\n\
+         sessionhubd pull --on NAME THERE LOCAL    fetch one file\n\
+         \x20                                 a whole folder: tar it, push it, run tar -xzf\n\
+         \n\
          sessionhubd tray                   show the tray icon; `start` does this too\n\
          sessionhubd tunnel                 expose it externally through cloudflared\n\
          sessionhubd bundle-web FILE [--raw]  pack the frontend for a release\n\
@@ -626,6 +640,240 @@ fn cmd_revert_web() -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+// ------------------------------------------------------- another machine
+//
+// Four commands that make a paired machine usable the way ssh makes a Unix box
+// usable: list them, run something, send a file, fetch a file.
+//
+// They exist for an agent as much as for a person. Told "build this on the
+// other computer", a coding agent has no ssh to reach a Windows machine and no
+// business learning this daemon's WebSocket protocol — but it already knows how
+// to run a command line. So the shape is deliberately ssh's: output on stdout,
+// errors on stderr, and the far side's exit code becomes ours, so `&&` and `||`
+// keep their meaning.
+//
+// Everything goes to the LOCAL daemon with `?via=<machine>`; it holds the other
+// machine's token and does the relaying. No token for the far side is ever read,
+// typed, or stored here.
+
+/// The port the local daemon is on, and its token — or a message saying why not.
+fn local_daemon() -> Option<(u16, String)> {
+    let cfg = load_config()?;
+    let port = daemon::read_pid_file().map(|p| p.port).unwrap_or(cfg.port);
+    if daemon::probe(port, &cfg.token).is_none() {
+        eprintln!("sessionhubd is not running here. Run `sessionhubd start` first.");
+        return None;
+    }
+    Some((port, cfg.token))
+}
+
+/// `--on NAME`, which every one of these needs.
+fn machine_flag(argv: &[String]) -> Option<String> {
+    match flag_value(argv, "--on") {
+        Some(name) if !name.trim().is_empty() => Some(name),
+        _ => {
+            eprintln!("Which machine? Add `--on <name>`; `sessionhubd machines` lists them.");
+            None
+        }
+    }
+}
+
+fn cmd_machines() -> ExitCode {
+    let Some(cfg) = load_config() else { return ExitCode::FAILURE };
+    if cfg.remotes.is_empty() {
+        println!("No machines paired yet.");
+        println!("On the other computer: Settings -> Network access, copy its pairing link,");
+        println!("then paste it into the + box above the terminal here.");
+        return ExitCode::SUCCESS;
+    }
+    for r in &cfg.remotes {
+        let version = if r.version.is_empty() { "?".to_string() } else { r.version.clone() };
+        println!("{:<20} {:<24} {}", r.name, r.addr, version);
+    }
+    ExitCode::SUCCESS
+}
+
+fn cmd_run(argv: &[String]) -> ExitCode {
+    let Some(on) = machine_flag(argv) else { return ExitCode::from(2) };
+    // Everything after `--` is the command, untouched. Without this rule a
+    // command carrying its own `--release` or `--on` would be eaten by the flag
+    // parser above.
+    let Some(at) = argv.iter().position(|a| a == "--") else {
+        eprintln!("Usage: sessionhubd run --on <machine> [--cwd DIR] [--timeout SECONDS] -- COMMAND…");
+        return ExitCode::from(2);
+    };
+    let command = argv[at + 1..].join(" ");
+    if command.trim().is_empty() {
+        eprintln!("There is no command after `--`.");
+        return ExitCode::from(2);
+    }
+    let cwd = flag_value(argv, "--cwd").unwrap_or_default();
+    let asked = flag_value(argv, "--timeout").and_then(|t| t.parse::<u64>().ok());
+
+    let Some((port, token)) = local_daemon() else { return ExitCode::FAILURE };
+    let mut target = format!(
+        "/api/exec?token={}&via={}&cmd={}",
+        remote::percent_encode(&token),
+        remote::percent_encode(&on),
+        remote::percent_encode(&command),
+    );
+    if !cwd.is_empty() {
+        target.push_str(&format!("&cwd={}", remote::percent_encode(&cwd)));
+    }
+    if let Some(t) = asked {
+        target.push_str(&format!("&timeout={t}"));
+    }
+    // Longer than the command's own deadline: the two relay hops each add their
+    // own margin, and giving up here first would report a timeout that did not
+    // happen.
+    let wait = exec::clamp_timeout(asked) + std::time::Duration::from_secs(45);
+
+    let (status, body) = match daemon::ask(port, "GET", &target, &[], wait) {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("{e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    if status != 200 {
+        eprintln!("{}", String::from_utf8_lossy(&body).trim());
+        return ExitCode::FAILURE;
+    }
+    let parsed: serde_json::Value = match serde_json::from_slice(&body) {
+        Ok(v) => v,
+        Err(_) => {
+            eprintln!("{on} sent something this version cannot read.");
+            return ExitCode::FAILURE;
+        }
+    };
+    if let Some(message) = parsed.get("error").and_then(|v| v.as_str()) {
+        eprintln!("{message}");
+        return ExitCode::FAILURE;
+    }
+    print!("{}", parsed.get("stdout").and_then(|v| v.as_str()).unwrap_or(""));
+    eprint!("{}", parsed.get("stderr").and_then(|v| v.as_str()).unwrap_or(""));
+    let _ = std::io::Write::flush(&mut std::io::stdout());
+    if parsed.get("timed_out").and_then(|v| v.as_bool()).unwrap_or(false) {
+        eprintln!("(killed after the timeout — what is above is how far it got)");
+    }
+    let code = parsed.get("code").and_then(|v| v.as_i64()).unwrap_or(-1);
+    // The far side's exit code becomes ours. That is the whole contract: a
+    // caller can write `sessionhubd run … && next-thing`.
+    //
+    // Anything outside a byte becomes 1 rather than being clamped. Clamping is
+    // what a first draft of this did, and it turned -1 — "we never learned the
+    // code" — into 0, which is to say into success. A Windows crash code like
+    // 0xC0000005 has the same problem from the other end.
+    ExitCode::from(match code {
+        0 => 0,
+        c if (1..=255).contains(&c) => c as u8,
+        _ => 1,
+    })
+}
+
+fn cmd_push(argv: &[String]) -> ExitCode {
+    let Some(on) = machine_flag(argv) else { return ExitCode::from(2) };
+    let rest: Vec<&String> = positional(argv);
+    let (Some(local), Some(there)) = (rest.first(), rest.get(1)) else {
+        eprintln!("Usage: sessionhubd push --on <machine> <local file> <path over there>");
+        return ExitCode::from(2);
+    };
+    let body = match std::fs::read(local.as_str()) {
+        Ok(b) => b,
+        Err(e) => {
+            eprintln!("Cannot read {local}: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let Some((port, token)) = local_daemon() else { return ExitCode::FAILURE };
+    let target = format!(
+        "/api/put?token={}&via={}&path={}",
+        remote::percent_encode(&token),
+        remote::percent_encode(&on),
+        remote::percent_encode(there),
+    );
+    let bytes = body.len();
+    match daemon::ask(port, "PUT", &target, &body, std::time::Duration::from_secs(180)) {
+        Ok((200, _)) => {
+            println!("sent {bytes} bytes to {on}:{there}");
+            ExitCode::SUCCESS
+        }
+        Ok((_, answer)) => {
+            eprintln!("{}", String::from_utf8_lossy(&answer).trim());
+            ExitCode::FAILURE
+        }
+        Err(e) => {
+            eprintln!("{e}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+fn cmd_pull(argv: &[String]) -> ExitCode {
+    let Some(on) = machine_flag(argv) else { return ExitCode::from(2) };
+    let rest: Vec<&String> = positional(argv);
+    let (Some(there), Some(local)) = (rest.first(), rest.get(1)) else {
+        eprintln!("Usage: sessionhubd pull --on <machine> <path over there> <local file>");
+        return ExitCode::from(2);
+    };
+    let Some((port, token)) = local_daemon() else { return ExitCode::FAILURE };
+    // Nothing new is needed on the far side for this: `/api/file` has always
+    // served raw bytes and has always been relayable.
+    let target = format!(
+        "/api/file?token={}&via={}&path={}",
+        remote::percent_encode(&token),
+        remote::percent_encode(&on),
+        remote::percent_encode(there),
+    );
+    match daemon::ask(port, "GET", &target, &[], std::time::Duration::from_secs(180)) {
+        Ok((200, body)) => match std::fs::write(local.as_str(), &body) {
+            Ok(()) => {
+                println!("fetched {} bytes into {local}", body.len());
+                ExitCode::SUCCESS
+            }
+            Err(e) => {
+                eprintln!("Cannot write {local}: {e}");
+                ExitCode::FAILURE
+            }
+        },
+        Ok((_, answer)) => {
+            eprintln!("{}", String::from_utf8_lossy(&answer).trim());
+            ExitCode::FAILURE
+        }
+        Err(e) => {
+            eprintln!("{e}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// The arguments that are not the subcommand, a flag, or a flag's value.
+///
+/// Every flag that swallows the word after it has to be listed, `--home`
+/// included — it is global, so it can appear in front of these commands too, and
+/// leaving it out made its path look like the file being sent.
+fn positional(argv: &[String]) -> Vec<&String> {
+    const TAKES_VALUE: [&str; 6] =
+        ["--on", "--cwd", "--timeout", "--home", "--account", "--password"];
+    let mut out = Vec::new();
+    let mut skip = false;
+    for a in argv.iter().skip(1) {
+        if skip {
+            skip = false;
+            continue;
+        }
+        if TAKES_VALUE.contains(&a.as_str()) {
+            skip = true;
+            continue;
+        }
+        if a.starts_with("--") {
+            continue;
+        }
+        out.push(a);
+    }
+    out
 }
 
 fn cmd_tunnel() -> ExitCode {

@@ -91,6 +91,51 @@ can open from anywhere, still behind the sessionhub token.
 > command on that computer, as you. Put **Cloudflare Access** in front of it if
 > it is more than a moment, and run `sessionhubd token rotate` if a URL leaked.
 
+## Putting another machine to work
+
+Four commands make a paired machine usable the way ssh makes a Unix box usable —
+and they reach Windows, which ssh mostly does not:
+
+```
+sessionhubd machines                                   # what is paired here
+sessionhubd run  --on NAME [--cwd DIR] [--timeout S] -- COMMAND…
+sessionhubd push --on NAME <local file> <path there>
+sessionhubd pull --on NAME <path there> <local file>
+```
+
+`run` prints stdout on stdout, stderr on stderr, and **exits with the far side's
+exit code**, so `&&` and `||` keep their meaning. Quoting follows the ssh rule:
+the far side re-parses, so wrap the whole command in quotes when it matters.
+
+They exist for an agent as much as for you. This is what "build it on the other
+computer" turns into — the laptop has no Android Studio, the other machine does:
+
+```
+tar -czf /tmp/src.tgz --exclude=build .
+sessionhubd push --on buildbox /tmp/src.tgz C:/b/src.tgz
+sessionhubd run  --on buildbox --cwd C:/b -- tar -xzf src.tgz
+sessionhubd run  --on buildbox --cwd C:/b --timeout 600 -- ./gradlew assembleDebug
+sessionhubd pull --on buildbox C:/b/app/build/outputs/apk/debug/app-debug.apk ./app.apk
+```
+
+`push` and `pull` carry one file each; a folder goes as a tar, which also leaves
+the choice of what to exclude where it belongs. `tar` is already on Windows 10
+1803+ and on macOS.
+
+Your agent will not guess these exist. Paste this into the project's `CLAUDE.md`
+once:
+
+> This machine can reach other computers through sessionhub. `sessionhubd
+> machines` lists them; `sessionhubd run --on NAME -- COMMAND` runs something
+> there and returns its exit code; `sessionhubd push` / `pull` move one file.
+
+The token has always meant a full shell, so this grants nothing new — but it
+makes that power scriptable and unattended, so the machine being asked has a
+switch of its own: **⚙ Settings → Network access → Remote commands**, on by
+default, and every command it runs is written to that machine's log. Reading a
+file is deliberately not covered by the switch, because the file panel has
+always read from a paired machine.
+
 ## Known limits
 
 - The history kept is the last 2 MB per terminal. It is lost when the daemon stops. It is a ring buffer, not terminal grid state.

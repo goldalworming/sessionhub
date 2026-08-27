@@ -60,6 +60,7 @@ export class Settings {
     root,
     onSave,
     onLan,
+    onRemoteCommands,
     onDrops,
     onRemove,
     onForget,
@@ -79,6 +80,7 @@ export class Settings {
     this.onUpdateAgent = onUpdateAgent || (() => {});
     this.onSave = onSave;
     this.onLan = onLan;
+    this.onRemoteCommands = onRemoteCommands || (() => {});
     this.onDrops = onDrops;
     this.onRemove = onRemove;
     this.onForget = onForget || (() => {});
@@ -200,6 +202,10 @@ export class Settings {
     this.shells = msg.shells || [];
     this.configPath = msg.config_path || '';
     this.lanAccess = !!msg.lan_access;
+    this.remoteCommands = !!msg.remote_commands;
+    // A daemon too old to know the message would drop it without answering,
+    // leaving a switch that flips back by itself. So it is not drawn at all.
+    this.canRunRemotely = msg.can_run_remotely === true;
     this.lanUrl = msg.lan_url || '';
     this.pairUrl = msg.pair_url || '';
     this.drops = msg.drops || null;
@@ -455,6 +461,7 @@ export class Settings {
     };
 
     if (!this.lanAccess) {
+      pane.appendChild(this.remoteCommandRows());
       pane.appendChild(this.signOutRows());
       return pane;
     }
@@ -489,8 +496,60 @@ export class Settings {
         }),
       );
     }
+    pane.appendChild(this.remoteCommandRows());
     pane.appendChild(this.signOutRows());
     return pane;
+  }
+
+  /// Whether a paired machine may put this one to work.
+  ///
+  /// It grants nothing the token did not already grant — anyone who can open a
+  /// terminal here can type anything into it. What changes is that the same
+  /// power becomes scriptable and runs with nobody watching, which is a
+  /// different thing to agree to, so it gets its own switch and its own line in
+  /// the log. Reading a file is deliberately NOT covered: the file panel has
+  /// always fetched images and code from a paired machine, and turning this off
+  /// must not break the panel.
+  remoteCommandRows() {
+    const wrap = document.createElement('div');
+    wrap.className = 'signoutrow';
+    if (!this.canRunRemotely) return wrap;
+
+    const row = document.createElement('div');
+    row.className = 'switchrow';
+    const toggle = document.createElement('label');
+    toggle.className = 'switch';
+    const cb = document.createElement('input');
+    cb.type = 'checkbox';
+    cb.checked = this.remoteCommands;
+    toggle.appendChild(cb);
+    const track = document.createElement('span');
+    track.className = 'track';
+    toggle.appendChild(track);
+    const word = document.createElement('span');
+    word.className = 'switchword';
+    word.textContent = `Remote commands ${this.remoteCommands ? 'on' : 'off'}`;
+    toggle.appendChild(word);
+    row.appendChild(toggle);
+    wrap.appendChild(row);
+
+    cb.onchange = () => {
+      this.note.textContent = cb.checked ? 'Allowing…' : 'Refusing…';
+      this.onRemoteCommands(cb.checked);
+    };
+
+    wrap.appendChild(
+      Settings.stat(
+        this.remoteCommands ? 'muted' : 'warn',
+        this.remoteCommands
+          ? 'A machine paired with this one can run commands here and send files here — ' +
+              'that is how `sessionhubd run` builds something on this computer from another. ' +
+              'Every command is written to the log. Reading files is separate and stays on.'
+          : 'Commands sent from another machine are refused. Its terminals and its file ' +
+              'panel still work — only unattended commands and sent files are turned away.',
+      ),
+    );
+    return wrap;
   }
 
   /// Leave a borrowed browser the way it was found.
