@@ -1835,6 +1835,10 @@ const settings = new Settings(
   // And so does moving one: the address being changed is the one this machine
   // dials, whoever is on screen at the time.
   (name, addr) => local.conn.send({ t: 'set_remote_addr', name, addr }),
+  // Renaming likewise: the name being changed is the one THIS machine files it
+  // under. The machine on the other end never hears about it and does not need
+  // to — it does not know what it is called here.
+  (name, to) => local.conn.send({ t: 'set_remote_name', name, to }),
   // Updating goes to the machine whose settings are on screen, through the
   // facade — so the Update section of a remote's panel updates that remote.
   (what) =>
@@ -2364,7 +2368,7 @@ conn.on.onError = (msg, m) => {
     if (!settings.open) banner(msg.message, true);
     return;
   }
-  if (msg.code === 'move_failed' || msg.code === 'bad_addr') {
+  if (msg.code === 'move_failed' || msg.code === 'rename_failed' || msg.code === 'bad_addr') {
     settings.moveFailed(msg.message || msg.code);
     if (!settings.open) banner(msg.message, true);
     return;
@@ -2515,6 +2519,23 @@ conn.on.onRemotes = (msg, m) => {
       have.addr = r.addr;
       continue;
     }
+    // A machine whose NAME changed is the same machine — its address is what
+    // did not move — so it is found here rather than falling through to be made
+    // again. Remaking it would close its connection, dispose every terminal on
+    // it and forget which tabs were closed. Its `id` deliberately stays as it
+    // was: no daemon is ever told an id, and everything remembered per machine
+    // hangs off it.
+    const renamed = machines.find(
+      (x) => x.via && x.addr === r.addr && !want.some((w) => w.name === x.via),
+    );
+    if (renamed) {
+      renamed.label = r.name;
+      renamed.via = r.name;
+      // Read again on each connect, so the next reconnect asks for the new name.
+      renamed.conn.via = r.name;
+      continue;
+    }
+
     const fresh = makeMachine({ id: `r:${r.name}`, label: r.name, via: r.name });
     fresh.addr = r.addr;
     el.terms.appendChild(fresh.host);
@@ -2527,7 +2548,7 @@ conn.on.onRemotes = (msg, m) => {
     dropMachine(gone);
   }
   machineBar.paint(current);
-  settings.setRemotes(want, msg.can_move === true);
+  settings.setRemotes(want, msg.can_move === true, msg.can_rename === true);
 };
 
 /// Drop a machine along with everything it displays.

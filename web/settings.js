@@ -64,6 +64,7 @@ export class Settings {
     onRemove,
     onForget,
     onMoveRemote,
+    onRenameRemote,
     onUpdate,
     onUpdateAgent,
     onCloudflare,
@@ -82,6 +83,7 @@ export class Settings {
     this.onRemove = onRemove;
     this.onForget = onForget || (() => {});
     this.onMoveRemote = onMoveRemote || (() => {});
+    this.onRenameRemote = onRenameRemote || (() => {});
     this.onCloudflare = onCloudflare || (() => {});
     this.onAddForward = onAddForward || (() => {});
     this.onRemoveForward = onRemoveForward || (() => {});
@@ -170,9 +172,10 @@ export class Settings {
   /// `canMove` is whether that daemon understands being told a new address. An
   /// older one drops the message without answering, so the address is left as
   /// plain text there rather than as a field that swallows what is typed.
-  setRemotes(list, canMove) {
+  setRemotes(list, canMove, canRename) {
     this.remotes = list || [];
     this.canMove = canMove === true;
+    this.canRename = canRename === true;
     if (this.open) this.paint();
   }
 
@@ -839,8 +842,12 @@ export class Settings {
       head.appendChild(dot);
 
       const name = document.createElement('span');
-      name.className = 'aname';
+      name.className = 'aname' + (this.canRename ? ' editable' : '');
       name.textContent = r.name;
+      if (this.canRename) {
+        name.title = `Click to rename ${r.name}. Its address and its token are kept.`;
+        name.onclick = () => this.renameRow(name, r);
+      }
       head.appendChild(name);
 
       const where = document.createElement('span');
@@ -928,8 +935,64 @@ export class Settings {
     input.onblur = stop;
   }
 
-  /// The daemon refused the new address. The row is drawn again so it can be
-  /// tried once more, with what went wrong left on the line below.
+  /// Give a machine a different name, in place.
+  ///
+  /// A machine arrives named after its address — `192-168-0-100` — because
+  /// pairing has nothing else to go on. That is a poor label for a tab you look
+  /// at all day, and until now the only way past it was to forget the machine
+  /// and pair it again, which throws its token away and needs a fresh link
+  /// fetched from the other side. Here only the name moves; the daemon refuses
+  /// one another machine already answers to, rather than quietly making it
+  /// unique.
+  renameRow(cell, r) {
+    if (cell.dataset.editing) return;
+    cell.dataset.editing = '1';
+    cell.textContent = '';
+
+    const input = document.createElement('input');
+    input.type = 'text';
+    input.className = 'amove arename';
+    input.value = r.name;
+    input.spellcheck = false;
+    input.autocapitalize = 'off';
+    input.title = 'lowercase letters, digits, and - _ . — up to 24 characters';
+    cell.appendChild(input);
+    input.focus();
+    input.select();
+
+    let sent = false;
+    const stop = () => {
+      // Same as the address field: a repaint is coming either way, and the blur
+      // that follows it must not put the old name back on screen.
+      if (sent) return;
+      delete cell.dataset.editing;
+      this.paint();
+    };
+    input.onkeydown = (e) => {
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        stop();
+        return;
+      }
+      if (e.key !== 'Enter') return;
+      e.preventDefault();
+      // Lowercased here as well as in the daemon, so what is sent is what the
+      // row will come back saying.
+      const to = input.value.trim().toLowerCase();
+      if (!to || to === r.name) {
+        stop();
+        return;
+      }
+      sent = true;
+      input.disabled = true;
+      this.note.textContent = `Renaming ${r.name} to ${to}…`;
+      this.onRenameRemote(r.name, to);
+    };
+    input.onblur = stop;
+  }
+
+  /// The daemon refused the new address or the new name. The row is drawn again
+  /// so it can be tried once more, with what went wrong left on the line below.
   moveFailed(message) {
     // After the repaint, not before: `paint` writes its own line into the note
     // and would wipe this one out.

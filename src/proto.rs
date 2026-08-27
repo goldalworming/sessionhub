@@ -192,6 +192,17 @@ pub enum ClientMsg {
         name: String,
         addr: String,
     },
+    /// Give an already paired machine a different name.
+    ///
+    /// The name is what a machine is referred to by everywhere — its tab, its
+    /// `?via=`, its row in `config.toml` — so the only way to change it used to
+    /// be forgetting the machine and pairing it again, which throws its token
+    /// away and needs a fresh link from the other side. Here nothing but the
+    /// name moves.
+    SetRemoteName {
+        name: String,
+        to: String,
+    },
     /// Forget a machine. This is the only thing that deletes its token.
     Forget {
         name: String,
@@ -361,6 +372,8 @@ pub enum ServerMsg {
         /// leave someone waiting on a reply that is never coming. Read the same
         /// way `can_pick` is: absent means no.
         can_move: bool,
+        /// The same, for `set_remote_name`.
+        can_rename: bool,
     },
     /// One folder's contents, for the folder picker in the "New project" panel.
     Dir(DirList),

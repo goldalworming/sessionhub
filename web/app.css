@@ -1735,6 +1735,13 @@ html, body {
 .adot.bad { background: var(--bad); }
 .adot.off { background: none; border: 1px solid var(--muted); }
 .agent .aname { flex: 0 0 auto; font-weight: 600; }
+/* A name that can be changed says so on hover, the same way its address does. */
+.agent .aname.editable { cursor: text; }
+.agent .aname.editable:hover { text-decoration: underline dotted; }
+/* While it is being typed the name is given room to type in; the address beside
+   it is the half that can afford to shrink. */
+.agent .aname:has(.arename) { flex: 0 1 200px; min-width: 0; }
+.arename { width: 100%; font-weight: 400; }
 .awhere {
   flex: 1 1 auto;
   min-width: 0;

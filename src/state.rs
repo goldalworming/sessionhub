@@ -1170,6 +1170,69 @@ pub fn run(cfg: Config, rx: Receiver<Cmd>, tx: Sender<Cmd>, registry_cfg: Sender
                     send_to(&clients, id, json(&remotes_msg(&cfg)));
                 }
 
+                ClientMsg::SetRemoteName { name, to } => {
+                    if crate::remote::find(&cfg.remotes, &name).is_none() {
+                        send_to(
+                            &clients,
+                            id,
+                            json(&ServerMsg::Error {
+                                code: "unknown_remote".into(),
+                                message: format!("There is no paired machine called `{name}`."),
+                            }),
+                        );
+                        continue;
+                    }
+                    // Lowercased exactly as pairing does, so a name typed here
+                    // and a name derived from an address are the same kind of
+                    // thing, and `?via=` never depends on which way it was made.
+                    let wanted = to.trim().to_lowercase();
+                    if wanted == name {
+                        send_to(&clients, id, json(&remotes_msg(&cfg)));
+                        continue;
+                    }
+                    if let Err(message) = crate::remote::check_name(&wanted) {
+                        send_to(
+                            &clients,
+                            id,
+                            json(&ServerMsg::Error { code: "rename_failed".into(), message }),
+                        );
+                        continue;
+                    }
+                    // Refused rather than made unique: `unique_name` is right
+                    // when a name is being derived and nobody asked for it, and
+                    // wrong when it was typed — silently storing `kantor-2` for
+                    // someone who wrote `kantor` teaches nothing.
+                    if crate::remote::find(&cfg.remotes, &wanted).is_some() {
+                        send_to(
+                            &clients,
+                            id,
+                            json(&ServerMsg::Error {
+                                code: "rename_failed".into(),
+                                message: format!("`{wanted}` is already another machine here."),
+                            }),
+                        );
+                        continue;
+                    }
+
+                    if let Some(slot) = cfg.remotes.iter_mut().find(|r| r.name == name) {
+                        slot.name = wanted.clone();
+                    }
+                    if let Err(e) = crate::config::save(&cfg) {
+                        warn!(error = %e, "could not save config");
+                        send_to(
+                            &clients,
+                            id,
+                            json(&ServerMsg::Error {
+                                code: "config_write_failed".into(),
+                                message: format!("Could not write config.toml: {e}"),
+                            }),
+                        );
+                        continue;
+                    }
+                    info!(from = %name, to = %wanted, "a paired machine was renamed");
+                    send_to(&clients, id, json(&remotes_msg(&cfg)));
+                }
+
                 ClientMsg::Forget { name } => {
                     let before = cfg.remotes.len();
                     cfg.remotes.retain(|r| r.name != name);
@@ -2129,6 +2192,7 @@ fn remotes_msg(cfg: &Config) -> ServerMsg {
             })
             .collect(),
         can_move: true,
+        can_rename: true,
     }
 }
 
