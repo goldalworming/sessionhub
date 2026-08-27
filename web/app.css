@@ -881,6 +881,71 @@ html, body {
   white-space: nowrap;
   font-variant-numeric: tabular-nums;
 }
+/* The links sheet: the palette's shape without the search box. Rows are
+   thumb-sized on purpose — this exists for fingers that cannot hover. */
+#linksheet {
+  position: fixed;
+  inset: 0;
+  z-index: 30;
+  background: var(--scrim);
+  display: flex;
+  justify-content: center;
+  align-items: flex-start;
+  padding: 12vh 16px 0;
+}
+#linksheet[hidden] { display: none; }
+.lbox {
+  width: min(560px, 100%);
+  max-height: 70vh;
+  display: flex;
+  flex-direction: column;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  overflow: hidden;
+}
+.lhead {
+  flex: 0 0 auto;
+  padding: 10px 12px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--muted);
+  border-bottom: 1px solid var(--border);
+}
+.llist { flex: 1 1 auto; overflow-y: auto; }
+.lrow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--border);
+}
+.lrow:last-child { border-bottom: none; }
+.lurl {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-family: var(--mono);
+  font-size: 11.5px;
+  color: var(--text);
+  text-decoration: none;
+  overflow-wrap: anywhere; /* the whole URL stays readable, wrapped, not clipped */
+}
+.lurl:hover { text-decoration: underline; }
+.lcopy {
+  flex: 0 0 auto;
+  font: inherit;
+  font-size: 11px;
+  color: var(--muted);
+  background: none;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 4px 10px;
+  cursor: pointer;
+}
+.lcopy:hover { color: var(--text); }
+.lnone { padding: 18px 12px; font-size: 12px; color: var(--muted); }
+
 /* Pinned. Worth seeing without reading the number. `--t-bright-red` rather
    than `--bad`, which is defined inside `#settings` and nowhere else — outside
    it the rule would simply be dropped, and the readout would look normal at
@@ -2359,7 +2424,9 @@ html, body {
 .ehead button:disabled { opacity: 0.4; cursor: default; }
 .ehead .esave.on { color: var(--text); border-color: var(--accent); }
 .ehead .etheme,
+.ehead .eview,
 .ehead .ewrap { font-size: 10px; min-width: 40px; }
+.ehead .eview[hidden] { display: none; }
 .ehead .etheme.on,
 .ehead .ewrap.on { border-color: var(--accent); }
 #editor.dark .ehead .esave.on,

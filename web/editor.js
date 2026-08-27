@@ -75,6 +75,7 @@ export class Editor {
       '<div class="ehead">' +
       '<span class="ecrumb"></span>' +
       '<span class="enote"></span>' +
+      '<button class="eview" hidden>view</button>' +
       '<button class="ewrap"></button>' +
       '<button class="etheme"></button>' +
       '<button class="esave" title="Save (Ctrl+S)">Save</button>' +
@@ -88,6 +89,7 @@ export class Editor {
     this.crumbEl = this.el.querySelector('.ecrumb');
     this.saveBtn = this.el.querySelector('.esave');
     this.wrapBtn = this.el.querySelector('.ewrap');
+    this.viewBtn = this.el.querySelector('.eview');
     this.themeBtn = this.el.querySelector('.etheme');
     this.bodyEl = this.el.querySelector('.ebody');
     this.imgWrap = this.el.querySelector('.eimg');
@@ -119,6 +121,18 @@ export class Editor {
       this.wrap = !this.wrap;
       localStorage.setItem(LS_WRAP, this.wrap ? 'on' : 'off');
       this.applyWrap();
+    };
+    // The rendered page, in its own tab. The same URL the image viewer uses:
+    // `/api/file` answers `text/html` for these, the cookie authenticates it,
+    // and `via` carries it from a paired machine. A tab rather than an iframe
+    // because on a phone the point is a full screen and a working back button.
+    this.viewBtn.onclick = () => {
+      if (!this.current) return;
+      const via = this.machineVia();
+      const url =
+        `/api/file?path=${encodeURIComponent(this.current)}` +
+        (via ? `&via=${encodeURIComponent(via)}` : '');
+      window.open(url, '_blank', 'noopener');
     };
     this.paintTheme();
     this.paintWrap();
@@ -390,6 +404,11 @@ export class Editor {
     // Nothing to fold in a picture, and the same for a binary that is only
     // being described rather than shown.
     this.wrapBtn.disabled = meta.binary || meta.image;
+    // Only an HTML file has a rendered form worth a tab of its own. Hidden
+    // rather than disabled for everything else: a control that is dead for
+    // nearly every file should not sit in the bar explaining itself.
+    this.viewBtn.hidden = !/\.html?$/i.test(meta.name || '');
+    this.viewBtn.title = 'Open this page rendered, in a new tab';
     this.saveBtn.classList.toggle('on', this.dirty.has(this.key(this.current)));
   }
 

@@ -44,6 +44,11 @@ const ROW2 = [
   // opens is the gallery/camera; the file then rides the same route as a drop —
   // saved on the daemon's machine, its path typed into the terminal.
   { label: 'Img', act: 'upload', title: 'Send an image — its path is typed into the terminal' },
+  // A finger cannot hover, so tapping a URL drawn on the canvas is a coin
+  // toss — and the long ones agents print are often broken across lines by
+  // the program itself. This opens a list of them instead, stitched back
+  // together, each row big enough for a thumb.
+  { label: '🔗', act: 'links', title: 'Links this terminal has printed' },
   // Completion is a shell need rather than an agent one: worth a seat, but one
   // that can afford the tap which opens this row. The first row is full at
   // eight keys and the ⋯ — a tenth tips it into scrolling on a 390 px phone,
@@ -79,10 +84,11 @@ export class KeyBar {
   /// `send(text)` sends bytes to the terminal currently active.
   /// `onResize()` is called when the bar's height changes, so the PTY is
   /// renegotiated.
-  constructor(host, { send, onResize, onPaste, onUpload }) {
+  constructor(host, { send, onResize, onPaste, onUpload, onLinks }) {
     this.send = send;
     this.onPaste = onPaste;
     this.onUpload = onUpload;
+    this.onLinks = onLinks;
     this.onResize = onResize;
     this.ctrl = false;
     this.expanded = false;
@@ -166,6 +172,10 @@ export class KeyBar {
     if (btn.dataset.act === 'upload') {
       // Same constraint: a file picker only opens inside a user gesture.
       this.onUpload?.();
+      return;
+    }
+    if (btn.dataset.act === 'links') {
+      this.onLinks?.();
       return;
     }
     const seq = btn.dataset.seq;

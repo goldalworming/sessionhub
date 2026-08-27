@@ -493,9 +493,29 @@ fn relay_file(sock: &mut TcpStream, req: &Request, r: &crate::config::Remote) ->
         crate::remote::percent_encode(&path),
     );
     match crate::remote::http_get(&r.addr, &url) {
-        Ok(body) => respond(sock, 200, mime_of(&path), &body),
+        Ok(body) => serve_file_bytes(sock, &path, &body),
         Err(e) => respond(sock, 502, "text/plain; charset=utf-8", e.as_bytes()),
     }
+}
+
+/// One file's bytes, with its type — and, for HTML, a leash.
+///
+/// `/api/file` serves whatever is on disk, and the file panel now offers HTML
+/// rendered in a tab. A page served plain would run on the daemon's own
+/// origin, where the `sh_token` cookie rides along on every request it makes —
+/// including a WebSocket to `/ws`, which is a shell. An agent writes these
+/// files, so that is a real path from "generated a report" to "drove the
+/// terminal". `sandbox` without `allow-same-origin` puts the document in an
+/// opaque origin instead: its scripts run, its cookies do not exist.
+fn serve_file_bytes(sock: &mut TcpStream, path: &str, body: &[u8]) -> io::Result<()> {
+    let ctype = mime_of(path);
+    let extra = if ctype.starts_with("text/html") {
+        "Content-Security-Policy: sandbox allow-scripts allow-modals allow-popups
+"
+    } else {
+        ""
+    };
+    respond_with(sock, 200, ctype, body, extra)
 }
 
 /// Re-read the config from disk and adopt its token. Called by `token rotate`
@@ -541,7 +561,7 @@ fn api_file(sock: &mut TcpStream, req: &Request) -> io::Result<()> {
             return respond(sock, 500, "text/plain; charset=utf-8", b"500 cannot read\n");
         }
     };
-    respond(sock, 200, mime_of(&path.to_string_lossy()), &body)
+    serve_file_bytes(sock, &path.to_string_lossy(), &body)
 }
 
 /// The limit for `/api/file`. Large enough for screenshots and assets, small

@@ -14,6 +14,7 @@ import { MachineBar } from './machines.js';
 import { SidePanel } from './sidepanel.js';
 import { renderTree as renderSidebar } from './sidebar.js';
 import { KeyBar } from './keybar.js';
+import { LinksSheet, bufferLines, scanLinks } from './links.js';
 import { attachTouchScroll, hasFinePointer } from './touchscroll.js';
 import { attachScrollPad } from './scrollpad.js';
 import { unlock as unlockAudio, ding } from './chime.js';
@@ -78,11 +79,20 @@ function insertIntoField(field, text) {
 
 /// The key bar for touch screens. Built first because every terminal's
 /// `onData` passes through it.
+const linksSheet = new LinksSheet(document.body);
+
 const keybar = new KeyBar(document.getElementById('stage'), {
   send: (text) => {
     if (activeId !== null) conn.sendInput(activeId, text);
   },
   onResize: () => relayout(),
+  // The 🔗 key: every URL this terminal has printed, in a tappable list. The
+  // scan runs here, when asked — never per output frame.
+  onLinks: () => {
+    const entry = terms.get(activeId);
+    if (!entry) return;
+    linksSheet.show(scanLinks(bufferLines(entry.term)));
+  },
   // The Img key: a file picker, because a phone has no drag-and-drop. On a
   // phone `accept="image/*"` opens the gallery or camera directly. The chosen
   // files ride the exact drop route — saved into the daemon's dropped folder,
