@@ -100,6 +100,7 @@ export class Conn {
         exit: 'onExit',
         error: 'onError',
         mem: 'onMem',
+        load: 'onLoad',
         config: 'onConfig',
         dropped: 'onDropped',
         dir: 'onDir',

@@ -872,6 +872,21 @@ html, body {
 .tools button:hover { color: var(--text); }
 .tools button.on { color: var(--text); }
 
+/* How busy the machine is. Reads as part of the bar rather than as a control:
+   the same size and colour as the buttons beside it, but nothing to press. */
+#loadstat {
+  font-size: 11px;
+  color: var(--muted);
+  padding: 0 10px;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+/* Pinned. Worth seeing without reading the number. `--t-bright-red` rather
+   than `--bad`, which is defined inside `#settings` and nowhere else — outside
+   it the rule would simply be dropped, and the readout would look normal at
+   100%. `.mdot.bad` reaches for the same token for the same reason. */
+#loadstat.hot { color: var(--t-bright-red); }
+
 #banner {
   padding: 3px 10px;
   font-size: 11px;
@@ -2598,6 +2613,10 @@ html, body {
 
   /* iOS zooms the page in when focusing an input whose font is under 16px. */
   #filter, .pbox input { font-size: 16px; }
+
+  /* The load readout goes: this bar is already short of room at 390px, and
+     what it would push off the end is a terminal tab. */
+  #loadstat { display: none; }
 
   .tab { max-width: 62vw; }
   #palette { padding-top: 6vh; }

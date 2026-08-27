@@ -1,4 +1,4 @@
-//! Per-terminal memory usage.
+//! Per-terminal memory usage, and how busy the machine is as a whole.
 //!
 //! What is measured is not one process but its whole tree: running `claude`
 //! means a shim, a Node runtime, and their children. Reporting only the root
@@ -7,7 +7,10 @@
 
 use std::collections::HashMap;
 
+use crossbeam_channel::Sender;
 use sysinfo::{ProcessesToUpdate, System};
+
+use crate::state::Cmd;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TerminalMem {
@@ -127,4 +130,44 @@ mod tests {
         assert_eq!(got[0].rss_bytes, 0);
         assert_eq!(got[0].processes, 0);
     }
+}
+
+// ------------------------------------------------------------ the machine
+
+/// How often the machine's own load is sampled.
+const EVERY: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Watch the machine's CPU and memory, and push each reading to the actor.
+///
+/// This is a different kind of measurement from `sample` above, and a far
+/// cheaper one. Measured on a laptop with 253 live processes: **35 µs** for
+/// memory and **170 µs** for CPU, against **12 ms** for the process-table walk
+/// that per-terminal memory needs. That is why this one may run all the time
+/// while that one stays behind a button.
+///
+/// The `System` is kept for the life of the thread rather than made afresh each
+/// round, for two reasons. A CPU percentage is the difference between two
+/// readings, so a new `System` has nothing to compare against and its first
+/// answer is nonsense — measured as 100% on an idle machine. And keeping it is
+/// what makes the reading cheap: rebuilding one costs the best part of a
+/// millisecond before anything is even read.
+pub fn watch(tx: Sender<Cmd>) {
+    std::thread::spawn(move || {
+        let mut sys = System::new();
+        // The baseline, thrown away: see above.
+        sys.refresh_cpu_usage();
+        loop {
+            std::thread::sleep(EVERY);
+            sys.refresh_cpu_usage();
+            sys.refresh_memory();
+            let sending = Cmd::Load {
+                cpu_percent: sys.global_cpu_usage(),
+                ram_used: sys.used_memory(),
+                ram_total: sys.total_memory(),
+            };
+            if tx.send(sending).is_err() {
+                return; // the actor is gone; so is the daemon
+            }
+        }
+    });
 }

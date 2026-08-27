@@ -1086,6 +1086,17 @@ function renderTabs() {
   const tools = document.createElement('div');
   tools.className = 'tools';
 
+  // How busy the machine is. Text rather than a button — there is nothing to
+  // press — and it sits with the controls instead of in the tab strip, which is
+  // already short of room. A daemon too old to send this never does, and then
+  // there is nothing here at all.
+  if (current && current.load) {
+    const stat = document.createElement('span');
+    stat.id = 'loadstat';
+    paintLoad(stat, current.load);
+    tools.appendChild(stat);
+  }
+
   // Shown at every width. On a narrow screen the sidebar is a drawer and this
   // is the only way back to it; on a wide one it is a column that can be got out
   // of the way, which is the same question asked of a bigger screen — and the
@@ -1564,6 +1575,17 @@ function startMem() {
   // Sampled periodically rather than streamed: reading the process table is
   // expensive.
   memTimer = setInterval(() => conn.send({ t: 'mem' }), 2000);
+}
+
+/// `CPU 7% · 7.5/15.6 GB` — the machine, not the terminal.
+function paintLoad(el, load) {
+  const gb = (n) => (n / 1073741824).toFixed(1);
+  const cpu = Math.round(load.cpu_percent);
+  el.textContent = `CPU ${cpu}% · ${gb(load.ram_used)}/${gb(load.ram_total)} GB`;
+  // A machine pinned at its ceiling is worth seeing without reading the number,
+  // which is the whole reason this readout is here.
+  el.className = cpu >= 90 ? 'hot' : '';
+  el.title = 'The whole machine — every core, and all of its memory. Not this terminal.';
 }
 
 function toggleMem() {
@@ -2493,6 +2515,17 @@ conn.on.onUpdate = (msg, m) => {
   // machine must not overwrite what the open panel is showing.
   if (m !== current) return;
   settings.setRelease(msg);
+};
+
+conn.on.onLoad = (msg, m) => {
+  m.load = msg;
+  if (m !== current) return;
+  const el = document.getElementById('loadstat');
+  // Painted in place, not through `renderTabs`: this arrives every two seconds,
+  // and rebuilding the tab strip that often would cut across dragging a tab or
+  // a menu opened from one.
+  if (el) paintLoad(el, msg);
+  else renderTabs();
 };
 
 conn.on.onMem = (msg) => {

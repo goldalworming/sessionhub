@@ -354,6 +354,18 @@ pub enum ServerMsg {
         name: String,
         bytes: u64,
     },
+    /// How busy this machine is: sent every couple of seconds, unasked.
+    ///
+    /// Unlike `Mem`, which walks the whole process table and so is only sent
+    /// when the panel asks, this costs a few hundred microseconds to produce —
+    /// cheap enough to push at every client that is connected. A daemon too old
+    /// to send it simply never does, and the readout stays off the screen.
+    Load {
+        /// The whole machine, across every core. 0–100.
+        cpu_percent: f32,
+        ram_used: u64,
+        ram_total: u64,
+    },
     /// Paired machines. **Without tokens** — a client only ever names them, and
     /// the token never leaves this daemon.
     /// The forwarding settings on their own, after one of them changed. The

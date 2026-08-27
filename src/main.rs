@@ -730,6 +730,10 @@ pub fn run_daemon(home: Option<PathBuf>) {
     // hundreds of files and call external CLIs, which must not stall the actor.
     let registry_cfg = registry::spawn(cfg.clone(), tx.clone());
 
+    // How busy the machine is, on its own thread and its own clock. A few
+    // hundred microseconds every couple of seconds — see `memory::watch`.
+    memory::watch(tx.clone());
+
     let actor_cfg = cfg.clone();
     let actor_tx = tx.clone();
     let actor = thread::spawn(move || state::run(actor_cfg, rx, actor_tx, registry_cfg));

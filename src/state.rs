@@ -46,6 +46,8 @@ pub enum Cmd {
     Pty { term: u32, run: u64, event: PtyEvent },
     /// The latest registry scan from the registry thread.
     Registry(Vec<ProjectInfo>),
+    /// The latest reading from the machine sampler.
+    Load { cpu_percent: f32, ram_used: u64, ram_total: u64 },
     /// Answer with (live terminals, total terminals) for `sessionhubd status`.
     Stats { reply: Sender<(usize, usize)> },
     /// Answer with the remote entry of this name. The actor holds the live
@@ -128,6 +130,9 @@ pub fn run(cfg: Config, rx: Receiver<Cmd>, tx: Sender<Cmd>, registry_cfg: Sender
     // to choose between. Held here rather than in the config because it is a
     // menu, not a setting — it is asked for again whenever the token is.
     let mut choices = crate::cloudflare::Found::default();
+    // The machine's last CPU and memory reading, so a client that has just
+    // connected has something to show before the next one arrives.
+    let mut last_load: Option<ServerMsg> = None;
 
     // The things you named because you want them running. Started here, before
     // any client exists: waiting for a browser would make the browser part of
@@ -171,6 +176,9 @@ pub fn run(cfg: Config, rx: Receiver<Cmd>, tx: Sender<Cmd>, registry_cfg: Sender
                 clients.insert(id, Client { tx, rx });
                 info!(client = id, "client connected");
                 send_state(&cfg, &projects, &agent_names, scanned, &clients, &terminals, Some(id));
+                if let Some(load) = &last_load {
+                    send_to(&clients, id, json(load));
+                }
             }
 
             Cmd::ClientDown { id } => {
@@ -1949,6 +1957,17 @@ pub fn run(cfg: Config, rx: Receiver<Cmd>, tx: Sender<Cmd>, registry_cfg: Sender
                     send_state(&cfg, &projects, &agent_names, scanned, &clients, &terminals, None);
                 }
             },
+
+            Cmd::Load { cpu_percent, ram_used, ram_total } => {
+                let msg = ServerMsg::Load { cpu_percent, ram_used, ram_total };
+                // Kept as well as sent: a client that connects between readings
+                // would otherwise show nothing for its first couple of seconds.
+                last_load = Some(msg.clone());
+                let text = json(&msg);
+                for cid in clients.keys().copied().collect::<Vec<_>>() {
+                    send_to(&clients, cid, text.clone());
+                }
+            }
 
             Cmd::Registry(fresh) => {
                 let first = !scanned;
