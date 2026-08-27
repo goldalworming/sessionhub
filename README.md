@@ -2,75 +2,49 @@
 
 <img src="icon.png" alt="" width="96" />
 
-One place to open a terminal into a coding agent (Claude Code, opencode, pi) for each project. The session stays alive even when the UI is closed. You can pick it up from another computer through a browser. Several computers at once can be used from a single window, each in its own tab — see [CONFIG.md](CONFIG.md#many-machines-in-one-window).
+One place to open a terminal into a coding agent (Claude Code, opencode, pi) for
+each project. The session stays alive even when the UI is closed. You can pick
+it up from another computer — or a phone — through a browser, and several
+computers share one window, each in its own tab.
 
-No chat UI, no diff viewer, no worktree manager. Only a project/session sidebar on the left and a terminal in the middle.
+No chat UI, no diff viewer, no worktree manager. Only a project/session sidebar
+on the left and a terminal in the middle.
 
-There is one principle: **the UI and the engine are two different processes.** The agent process is never a child of a window or a tab. Closing the browser does not touch the agent process at all.
+There is one principle: **the UI and the engine are two different processes.**
+The agent process is never a child of a window or a tab. Closing the browser
+does not touch the agent process at all.
 
 ![The three panes: projects and sessions on the left, an agent running in the middle, the file explorer and an image open on the right](screenshot.png)
 
 ## Why
 
-I run coding agents all day. I mostly use Claude Code, sometimes opencode. Two things kept hurting:
+Two things kept hurting: an agent that worked for an hour died because a laptop
+lid closed, and half the time I check on an agent from a phone — no Esc, no
+arrows, no clipboard. sessionhub is the smallest thing that fixes both: a
+daemon that owns the PTYs, and a plain browser page that only *looks at* them.
 
-1. **The session died with the window.** An agent that worked for an hour was gone because a laptop lid closed or a browser tab closed.
-2. **The real work does not stay at the desk.** Half the time I check on an agent from a phone, through a tunnel, on a screen with no Esc, no arrows, no clipboard, and no way to scroll back.
-
-sessionhub is the smallest thing that fixes both: a daemon that owns the PTYs, and a plain browser page that only *looks at* them. Everything else in this repo follows from that split.
-
-### How it differs from T3 Code
-
-[T3 Code](https://betterstack.com/community/guides/ai/t3-code/) is a good control plane, and a fuller product than this one. It is a **chat/task UI first**, with the terminal as a drawer at the bottom — a coherent shape, and the right one if you want your agent work organised as tasks. sessionhub takes the opposite bet, so three things come out differently:
-
-- **The terminal is the whole surface.** The agent's own TUI — its prompts, its modes, its Shift+Tab cycling — is the interface I already know, so sessionhub passes PTY bytes through unchanged and shows nothing of its own. T3 Code gives you a curated view instead, which is what lets it surface task state that a raw PTY cannot.
-- **Nothing sits between you and the agent.** A task harness earns its features by wrapping each thread in its own scaffolding, and that scaffolding travels with every request. sessionhub injects **nothing** — what the agent reads is exactly what you typed — which is the same reason it can offer none of what that scaffolding buys.
-- **A different session registry.** T3 Code keeps its own task history, consistent with its task model. sessionhub's sidebar *is* the CLI's on-disk registry — `~/.claude`, `~/.pi`, the opencode store — so every session your agents ever made is one click from `--resume`, with its full context, whether or not it was born inside sessionhub.
-
-If you want tasks, structure, and a history the app manages for you, T3 Code is the more complete answer. sessionhub only makes sense if the agent's raw terminal is the thing you actually want to reach.
-
-### How it differs from herdr
-
-[herdr](https://herdr.dev/) is the closest cousin. It also keeps agent sessions alive behind a client. Its agent-state sidebar is excellent. This repo borrowed the idea: busy/finished colours and a finish chime are built in. The difference is **where you can be when you use it**:
-
-- herdr is a terminal-native TUI you attach to, remote via SSH. From a phone that means an SSH client, a real keyboard emulator, and no images.
-- sessionhub is a **browser page**. From a phone through the tunnel you get a key bar (Esc, Tab, ⇧Tab, Ctrl, arrows), a **Paste** button (the clipboard API needs a browser), an **Img** button that uploads a photo and types its path at the agent, touch scrollback, and tabs for every paired machine — with each remote machine's token staying on the daemon, never in the browser.
-
-If you live in tmux and SSH, herdr is probably the better fit. If your second screen is a phone, that is exactly the case sessionhub was built around.
-
-### Feature comparison
-
-As I found them in **August 2026**. All three projects move fast, so file an issue if a cell has gone stale — one already was: this table used to claim T3 Code had no multi-machine view, which is wrong, and it is a good feature there.
-
-| | sessionhub | T3 Code | herdr |
-|---|---|---|---|
-| Primary interface | the agent's own terminal, in a browser | task/chat UI, terminal drawer | terminal TUI (tmux-like) |
-| Sessions survive the UI closing | yes — daemon owns the PTY | yes (app-managed tasks) | yes — server/client split |
-| Resumes the CLI's own on-disk sessions | yes (`~/.claude`, `~/.pi`, opencode) | own task history | attaches to its own panes |
-| Prompt/token overhead added | none — raw PTY passthrough | task harness around each thread | none — raw terminal |
-| Phone support | key bar, clipboard Paste, image upload, touch scrollback | browser UI (desktop-shaped) | via SSH client apps |
-| Several machines in one window | yes — tabs via daemon relay; remote tokens never reach the browser | yes | SSH per machine |
-| Agent activity signal | busy/finished colours + finish chime | task status in UI | blocked/working/done/idle sidebar |
-| Install | one binary, no npm, no build step | desktop/web app | one Rust binary |
+Similar tools, and where the line runs: [T3 Code](https://betterstack.com/community/guides/ai/t3-code/)
+is a task/chat UI first, with the terminal as a drawer — the fuller product if
+you want your agent work organised as tasks. [herdr](https://herdr.dev/) keeps
+sessions alive behind a terminal TUI you SSH into — the better fit if you live
+in tmux. sessionhub only makes sense if the agent's own raw terminal is the
+thing you want to reach, from any screen: it passes PTY bytes through
+unchanged, injects nothing into your prompts, and its sidebar is the CLI's own
+on-disk session registry (`~/.claude`, `~/.pi`, opencode), so every session
+your agents ever made is one click from `--resume`.
 
 ## Features
 
 - Sessions survive the UI closing — the daemon owns the PTY
-- Resumes the CLI's own sessions (`~/.claude`, `~/.pi`, opencode)
-- Raw PTY passthrough — nothing injected into your prompts
-- Saved terminals: name a shell and the line it runs, and it comes up with the daemon
-- Tab colours, stored on the daemon so every device sees them
-- Several machines in one window, remote tokens never reach the browser
-- Phone: key bar, Paste, image upload, touch scrollback
-- Tabs or grid, and drag a tab to reorder it
-- File panel with Monaco
-- Drag or paste a file — it uploads to the agent's machine
-- Fork a session
-- Busy/finished colours, a finish chime, and a notice saying which terminal on which machine — click it to go there
-- RAM per terminal, whole process tree
-- Self-update from Settings
-- Give a port a way in from outside, through Cloudflare
-- Search across projects, session titles and parent folders
+- Raw passthrough: what the agent reads is exactly what you typed
+- Resumes and forks the CLI's own sessions, whether or not they were born here
+- Saved terminals: name a shell and the line it runs, and it starts with the daemon
+- Several machines in one window; remote tokens never reach the browser
+- Phone: key bar (Esc, ⏎, ⇧Tab, Ctrl, arrows), Paste, image upload, touch scrollback
+- Busy/finished colours, a finish chime, tab colours stored on the daemon
+- File panel with Monaco; drag or paste a file and it lands on the agent's machine
+- CPU and RAM on the tab bar, RAM per terminal behind a button
+- Self-update from Settings, and a way in from outside through Cloudflare
 - One binary — no npm, no build step
 
 | Shortcut | Action |
@@ -81,24 +55,15 @@ As I found them in **August 2026**. All three projects move fast, so file an iss
 | `Ctrl/Cmd+W` | close the tab; the terminal keeps running |
 | `Ctrl/Cmd+Shift+W` | kill the terminal, with confirmation |
 
-Every other key goes to the agent untouched. Saved terminals start with the
-daemon, before any browser connects — turn that off per terminal on its sidebar
-row. Still not a supervisor: it starts each one once, and nothing restarts one
-that ends.
+Every other key goes to the agent untouched.
 
-## Install
+## Install and run
 
 Download the binary for your machine from
-[Releases](https://github.com/goldalworming/sessionhub/releases/latest), and run
+[Releases](https://github.com/goldalworming/sessionhub/releases/latest) and run
 it. One file — the interface is inside it. On macOS there is a `.app` for
 Applications; it is unsigned, so open it the first time with right-click → Open.
-
-To build it yourself instead: stable Rust, `cargo build --release`, and nothing
-else. The frontend has no build step.
-
-## Run
-
-Double-click it, or:
+To build it yourself: stable Rust, `cargo build --release`, nothing else.
 
 ```
 sessionhubd start          # detaches from this terminal, then exits
@@ -107,36 +72,20 @@ sessionhubd stop
 sessionhubd restart        # stop and start again, to load a new build
 ```
 
-`start` prints the address with the token and opens it:
+`start` prints the address with the token and opens it. A cookie carries the
+token after the first open, once per device. Running `start` again when it is
+already up just prints the address again — the shortest way back to a link you
+lost. There is an icon in the tray, or the menu bar on macOS, with the address,
+the log, and a way to stop it.
 
-```
-http://127.0.0.1:7717/?token=…
-```
-
-Open it once with the token; a cookie carries it after that, once per device.
-Running `start` again when it is already up prints the address and opens it
-again — the shortest way back to a link you lost. `--no-open` skips the browser.
-
-It leaves an icon in the notification area, or the menu bar on macOS: the port,
-how many terminals are live, the address to copy, the log, and a way to stop it
-that first says how many terminals go with it. `--no-tray` skips it.
-
-Closing the terminal you started it from does nothing to it. That is the whole
-reason this project exists.
-
-`restart` **ends every live terminal** — they are children of the daemon — so it
-refuses while any are running unless told `--force`.
+`restart` **ends every live terminal** — they are children of the daemon — so
+it refuses while any are running unless told `--force`.
 
 ## Access from outside
 
-**⚙ Settings → Cloudflare.** Give an address a way in — a dev server here, or
-something on your network that cannot run a tunnel of its own — and it comes
-back as a hostname you can open from anywhere. With a Cloudflare API token the
-names are yours and stay put; without one they are throwaway and change each
-time. What is behind them stays behind the sessionhub token.
-
-**⚙ Settings → Network access** opens the daemon itself to the LAN, and
-`sessionhubd tunnel` puts it on the internet.
+Use Cloudflare: **⚙ Settings → Cloudflare** gives an address a way in — a dev
+server here, or something on your network — and it comes back as a hostname you
+can open from anywhere, still behind the sessionhub token.
 
 > **This exposes a shell.** Anyone with the address and the token can run any
 > command on that computer, as you. Put **Cloudflare Access** in front of it if
