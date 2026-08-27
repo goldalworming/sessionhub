@@ -2559,7 +2559,6 @@ html, body {
 }
 #backdrop[hidden] { display: none; }
 
-#menu-btn { display: none; }
 
 @media (max-width: 720px) {
   /* The sidebar becomes a drawer that covers the screen: at this width, sharing
@@ -2573,7 +2572,6 @@ html, body {
     box-shadow: var(--shadow);
   }
   #splitter { display: none; }
-  #menu-btn { display: block; }
 
   /* At phone width the file panel covers the terminal instead of sharing with
      it — two columns at 390px leave neither readable. */

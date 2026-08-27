@@ -1086,11 +1086,18 @@ function renderTabs() {
   const tools = document.createElement('div');
   tools.className = 'tools';
 
-  // Only visible on a narrow screen, where the sidebar becomes a drawer.
+  // Shown at every width. On a narrow screen the sidebar is a drawer and this
+  // is the only way back to it; on a wide one it is a column that can be got out
+  // of the way, which is the same question asked of a bigger screen — and the
+  // answer used to be a keyboard shortcut nobody had been told about.
   const menuBtn = document.createElement('button');
   menuBtn.id = 'menu-btn';
   menuBtn.textContent = '☰';
-  menuBtn.title = 'Open project list';
+  // Read from the DOM for the same reason the Files button is: this bar is
+  // drawn before anything holds that state.
+  const railOn = !el.sidebar.hidden;
+  menuBtn.className = railOn ? 'on' : '';
+  menuBtn.title = railOn ? 'Hide the project list' : 'Show the project list';
   menuBtn.onclick = toggleSidebar;
   tools.appendChild(menuBtn);
 
@@ -1885,6 +1892,8 @@ function setSidebar(hidden, persist = true) {
   el.backdrop.hidden = hidden || !isNarrow();
   if (persist) localStorage.setItem(LS.hidden, hidden ? '1' : '0');
   relayout();
+  // The ☰ button carries this state now, the way Files carries its own.
+  renderTabs();
 }
 
 function toggleSidebar() {
