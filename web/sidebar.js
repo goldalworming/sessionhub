@@ -824,14 +824,19 @@ function agentRow(ctx, p, a, slot) {
                   !best || Date.parse(s.updated_at) > Date.parse(best.updated_at) ? s : best,
               null)
         : null;
-    resume.disabled = !a.can_pick && !newest;
-    resume.title = a.can_pick
-        ? here
-            ? `Let ${a.name} show its sessions here`
-            : `${a.name} has no sessions in ${p.name} yet — its picker opens anyway`
-        : newest
-          ? `Carry on the newest ${a.name} session here. ${a.name} cannot show a list of its own.`
-          : `${a.name} has nothing to carry on in ${p.name}, and cannot show a list of its own`;
+    // Off whenever this project has no history, whatever the agent can do.
+    // Offering Resume beside the words "no history here" contradicts the row
+    // itself, and an agent handed its own resume flag with nothing to resume
+    // gets to explain that in its own words, which is worse than not asking.
+    resume.disabled = !here;
+    resume.title = !here
+        ? `${a.name} has nothing to carry on in ${p.name}`
+        : a.can_pick
+          ? // Deliberately not "show its sessions": claude opens a list, opencode
+            // takes the last one with `--continue`. Both are "carry on", and the
+            // flag itself is the agent's business, not this row's.
+            `Let ${a.name} pick up where it left off here`
+          : `Carry on the newest ${a.name} session here — it cannot resume on its own`;
     resume.onclick = (e) => {
         e.stopPropagation();
         ctx.closeMenu();

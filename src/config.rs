@@ -45,6 +45,15 @@ pub struct Config {
     /// this machine is already reached by.
     #[serde(default)]
     pub cloudflare: Cloudflare,
+    /// Corrections to guesses earlier versions made, once each.
+    ///
+    /// An empty `picker_args` cannot be told apart from one emptied on purpose,
+    /// so a wrong guess written into thousands of config files can never be put
+    /// right by the filling rule alone — that only touches fields never written.
+    /// Recording which corrections have run lets one be applied once and then
+    /// respected if it is undone by hand.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub applied: Vec<String>,
     /// Whether a paired machine may run commands here without a person
     /// watching — `/api/exec` and `/api/put`.
     ///
@@ -418,16 +427,31 @@ impl Agent {
 ///   claude   `--fork-session` makes a new session id on resume, `--name`
 ///            sets the display name.
 ///   opencode `--fork` continues as a new session; there is no name flag.
-/// How each agent opens its own session picker, verified against its `--help`:
-///   claude  `-r, --resume [value]` — "Resume a conversation by session ID, or
-///           open interactive picker with optional search term". With no value
-///           it is the picker.
-/// Left empty for the rest. opencode and pi are not installed on either machine
-/// this was written on, and a guessed flag that turns out wrong does not fail
-/// quietly — it starts the agent with an argument it will complain about.
+/// How each agent carries on without being told which session, verified against
+/// its own `--help`:
+///   claude    `-r, --resume [value]` — "Resume a conversation by session ID, or
+///             open interactive picker with optional search term". With no value
+///             it is the picker.
+///   opencode  `-c, --continue` — "continue the last session". Not a picker: it
+///             asks nothing and takes the most recent one. That is still the
+///             answer to "carry on here", which is what the button means.
+/// Left empty for the rest. pi is not installed on either machine this was
+/// written on, and a guessed flag that turns out wrong does not fail quietly —
+/// it starts the agent with an argument it will complain about.
+/// One-time corrections: `(id, agent, picker_args)`.
+///
+/// `opencode-continue` exists because earlier versions wrote `picker_args = []`
+/// for opencode — the honest choice at the time, since it was installed on
+/// neither machine and a guessed flag does not fail quietly. Its `--help` since
+/// showed `-c, --continue`, and an empty list is never refilled by the rule
+/// above, so every config already written would have kept a dead Resume button
+/// for ever.
+const MIGRATIONS: &[(&str, &str, &[&str])] = &[("opencode-continue", "opencode", &["--continue"])];
+
 fn known_picker_args(name: &str) -> Vec<String> {
     match name {
         "claude" => vec!["--resume".into()],
+        "opencode" => vec!["--continue".into()],
         _ => Vec::new(),
     }
 }
@@ -643,6 +667,7 @@ impl Default for Config {
             remotes: Vec::new(),
             saved: Vec::new(),
             cloudflare: Cloudflare::default(),
+            applied: Vec::new(),
             remote_commands: true,
         }
     }
@@ -742,6 +767,24 @@ pub fn load_or_create() -> io::Result<Config> {
             agent.picker_args = Some(known_picker_args(name));
             filled_fork = true;
         }
+    }
+
+    // Then the corrections, once each. See `Config::applied`.
+    for (id, agent, args) in MIGRATIONS {
+        if cfg.applied.iter().any(|a| a == id) {
+            continue;
+        }
+        if let Some(a) = cfg.agents.get_mut(*agent) {
+            // Only an empty one is corrected. Anything already filled in is a
+            // decision, whoever made it.
+            if a.picker_args.as_ref().is_some_and(|p| p.is_empty()) {
+                a.picker_args = Some(args.iter().map(|s| (*s).to_string()).collect());
+            }
+        }
+        // Recorded even when the agent is not configured here, so it is never
+        // reconsidered — the point is that it happens exactly once.
+        cfg.applied.push((*id).to_string());
+        filled_fork = true;
     }
 
     let needs_write =
@@ -1185,5 +1228,81 @@ command = "run.bat"
         let back: Config = toml::from_str(&toml::to_string_pretty(&cfg).unwrap()).unwrap();
         assert!(!back.agents["pi"].enabled);
         assert!(back.agents["claude"].enabled);
+    }
+}
+
+#[cfg(test)]
+mod migration_tests {
+    use super::*;
+
+    /// A config as earlier versions wrote it: opencode with an empty picker.
+    fn old_config() -> String {
+        [
+            "port = 7717",
+            "token = \"x\"",
+            "",
+            "[agents.opencode]",
+            "command = \"opencode\"",
+            "resume_args = [\"-s\", \"{session_id}\"]",
+            "enabled = true",
+            "fork_args = [\"-s\", \"{session_id}\", \"--fork\"]",
+            "update_args = [\"upgrade\"]",
+            "picker_args = []",
+            "",
+        ]
+        .join("\n")
+    }
+
+    fn picker_of(cfg: &Config) -> Vec<String> {
+        cfg.agents.get("opencode").unwrap().picker_args.clone().unwrap_or_default()
+    }
+
+    /// The whole point: an empty list written by an older version is corrected.
+    fn apply(text: &str) -> Config {
+        let mut cfg: Config = toml::from_str(text).expect("config parses");
+        for (id, agent, args) in MIGRATIONS {
+            if cfg.applied.iter().any(|a| a == id) {
+                continue;
+            }
+            if let Some(a) = cfg.agents.get_mut(*agent) {
+                if a.picker_args.as_ref().is_some_and(|p| p.is_empty()) {
+                    a.picker_args = Some(args.iter().map(|s| (*s).to_string()).collect());
+                }
+            }
+            cfg.applied.push((*id).to_string());
+        }
+        cfg
+    }
+
+    #[test]
+    fn an_old_empty_picker_is_corrected_once() {
+        let cfg = apply(&old_config());
+        assert_eq!(picker_of(&cfg), vec!["--continue".to_string()]);
+        assert!(cfg.applied.iter().any(|a| a == "opencode-continue"));
+    }
+
+    #[test]
+    fn emptying_it_again_by_hand_is_respected() {
+        // Run once, then empty it deliberately, then run again: the marker is
+        // already recorded, so nothing touches it. A correction that came back
+        // every restart would not be a correction, it would be an argument.
+        let once = apply(&old_config());
+        let mut text = toml::to_string(&once).unwrap();
+        text = text.replace("picker_args = [\"--continue\"]", "picker_args = []");
+        let twice = apply(&text);
+        assert!(picker_of(&twice).is_empty(), "a deliberate choice was overwritten");
+    }
+
+    #[test]
+    fn a_picker_someone_set_is_never_replaced() {
+        let text = old_config().replace("picker_args = []", "picker_args = [\"--mine\"]");
+        assert_eq!(picker_of(&apply(&text)), vec!["--mine".to_string()]);
+    }
+
+    #[test]
+    fn a_new_config_gets_it_from_the_known_list() {
+        assert_eq!(known_picker_args("opencode"), vec!["--continue".to_string()]);
+        assert_eq!(known_picker_args("claude"), vec!["--resume".to_string()]);
+        assert!(known_picker_args("pi").is_empty());
     }
 }
