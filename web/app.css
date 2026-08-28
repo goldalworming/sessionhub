@@ -375,6 +375,38 @@ html, body {
   margin: 7px 8px 2px;
 }
 
+/* The services fold: one line standing for however many are running. It reads
+   as a heading rather than an entry, because that is what it is. */
+.zsvc {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 4px 8px;
+  font-size: 11px;
+  color: var(--muted);
+  cursor: pointer;
+  white-space: nowrap;
+}
+.zsvc:hover { color: var(--text); }
+.zsvc .twist { flex: 0 0 auto; font-size: 9px; }
+.zsvclabel { flex: 0 0 auto; }
+/* Which ones, without opening it — trimmed first when the sidebar is narrow,
+   since the count beside it already carries the meaning. */
+.zsvcnames {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  opacity: 0.75;
+}
+/* Something that should be running is not. This is the one state worth
+   interrupting for, so it takes the warning colour and opens itself. */
+.zsvc.bad { color: var(--t-bright-yellow); }
+.zsvc.bad .dot { border-color: var(--t-bright-yellow); background: none; }
+
+/* Rows inside the fold sit under it. */
+.zrow.zsub { padding-left: 22px; }
+.zrow.zstopped .when { color: var(--t-bright-yellow); }
+
 /* The way back for rows hidden by hand. Quiet — it is a footnote to the zone,
    not one of its entries — but clickable, and it says so on hover. */
 .zback {

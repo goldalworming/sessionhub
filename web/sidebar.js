@@ -21,6 +21,10 @@ const LS_ALIAS = 'sh.alias';
 /// Nothing is deleted anywhere: this is a list of ids in this browser.
 const LS_HIDDEN = 'sh.zonehidden';
 
+/// The fold state of the services group, kept in the same set as the day groups
+/// so there is one place that remembers what is open.
+const SERVICES_KEY = ' services';
+
 /// The top rows are capped so this zone does not slowly turn into a second long
 /// list — its whole value is that it always fits.
 const ZONE_MAX = 8;
@@ -183,6 +187,111 @@ function hiddenToday(ctx) {
 
 // --------------------------------------------------------------- top zone
 
+/// A live terminal that is a service: something named, set to start with the
+/// daemon, and running ever since.
+///
+/// The zone answers "which one was that just now?", and a service is never the
+/// answer to that — it came up with the daemon and has been sitting there. Two
+/// of them on a zone capped at 8 rows is a quarter of it spent on things that
+/// never change.
+function serviceOf(ctx, t) {
+  return (
+    ctx.state.saved.find(
+      (s) => s.autostart && s.live_terminal_id === t.id,
+    ) || null
+  );
+}
+
+/// Named things set to start with the daemon that are NOT running.
+///
+/// The daemon starts each one once and never restarts it (it is not a
+/// supervisor, and says so). So a service that exited is a silent failure —
+/// exactly the case the fold below must not swallow.
+function stoppedServices(ctx) {
+  return ctx.state.saved.filter((s) => s.autostart && s.live_terminal_id === null);
+}
+
+/// The services, as one line that opens.
+///
+/// Folded by default, because a service running is the expected state and
+/// nothing about it needs reading. Folding is only safe because failure is
+/// loud: one that has stopped puts the line in the warning colour, names how
+/// many, and forces the group open — you never have to remember to look.
+function serviceRows(ctx, up, down) {
+  const open = down.length > 0 || toggled.has(SERVICES_KEY);
+  const rows = [];
+
+  const head = el('div', 'zsvc' + (down.length ? ' bad' : '') + (open ? ' open' : ''));
+  head.appendChild(el('span', 'twist', open ? '▾' : '▸'));
+  head.appendChild(el('span', 'dot' + (down.length ? '' : ' live')));
+
+  const total = up.length + down.length;
+  head.appendChild(
+    el(
+      'span',
+      'zsvclabel',
+      down.length
+        ? `${down.length} of ${total} service${total === 1 ? '' : 's'} stopped`
+        : `${total} service${total === 1 ? '' : 's'}`,
+    ),
+  );
+  // Named even while folded: which ones they are is the one thing you might
+  // want without opening it.
+  head.appendChild(
+    el('span', 'zsvcnames', [...up.map((x) => x.s.name), ...down.map((s) => s.name)].join(', ')),
+  );
+  head.title = down.length
+    ? 'Something set to start with sessionhub is not running. Click to see which.'
+    : 'Started with sessionhub and still running. Click to see them.';
+  head.onclick = () => {
+    if (toggled.has(SERVICES_KEY)) toggled.delete(SERVICES_KEY);
+    else toggled.add(SERVICES_KEY);
+    saveToggled();
+    ctx.rerender();
+  };
+  rows.push(head);
+
+  if (!open) return rows;
+
+  for (const { t, s } of up) {
+    const p = ctx.state.projects.find((x) => x.path === t.project);
+    rows.push(
+      zoneRow(ctx, {
+        when: 'live',
+        title: s.name,
+        named: true,
+        project: p ? p.name : t.project,
+        agent: t.agent,
+        live: true,
+        color: t.color,
+        tid: t.id,
+        indent: true,
+        selected: t.id === ctx.activeId,
+        open: () => (ctx.terms.has(t.id) ? ctx.show(t.id) : ctx.attach(t.id)),
+      }),
+    );
+  }
+  // A stopped one keeps its own row whether the group is open or not — it is
+  // the thing worth acting on, and clicking it starts it again.
+  for (const s of down) {
+    const p = ctx.state.projects.find((x) => x.path === s.project);
+    rows.push(
+      zoneRow(ctx, {
+        when: 'stopped',
+        title: s.name,
+        named: true,
+        stopped: true,
+        project: p ? p.name : s.project,
+        agent: s.agent,
+        live: false,
+        indent: true,
+        open: () => ctx.openSaved(s.project, s.name),
+      }),
+    );
+  }
+  return rows;
+}
+
 /// Live terminals, then sessions touched today. Both in one zone because the
 /// question is the same: "which one was that just now?"
 function recentRows(ctx, liveSession) {
@@ -199,8 +308,15 @@ function recentRows(ctx, liveSession) {
     }
   }
 
+  const services = [];
   for (const t of ctx.state.terminals) {
     if (!t.alive) continue;
+    // Set apart before anything else: a service is not what the zone is for.
+    const svc = serviceOf(ctx, t);
+    if (svc) {
+      services.push({ t, s: svc });
+      continue;
+    }
     const hit = byId.get(t.id);
     if (hit) {
       seen.add(hit.s.session_id);
@@ -237,6 +353,12 @@ function recentRows(ctx, liveSession) {
       );
     }
   }
+
+  // The services go in as one folded row, at the head — they are the roof over
+  // the work, not part of it. Folded they cost one line however many there are;
+  // opened, each is an ordinary row with its own menu and colour.
+  const down = stoppedServices(ctx);
+  if (services.length || down.length) out.unshift(...serviceRows(ctx, services, down));
 
   const today = [];
   for (const p of ctx.state.projects) {
@@ -326,7 +448,11 @@ function sessionMenu(ctx, { p, s, inZone }) {
 }
 
 function zoneRow(ctx, o) {
-  const r = el('div', 'zrow' + (o.selected ? ' selected' : ''));
+  const r = el(
+    'div',
+    'zrow' + (o.selected ? ' selected' : '') + (o.indent ? ' zsub' : '') +
+      (o.stopped ? ' zstopped' : ''),
+  );
   r.title = `${o.project} · ${o.agent}\n${o.title}`;
   // The terminal id, for the activity sweep in app.js: busy/done marks are
   // toggled on `[data-tid]` without rebuilding this tree.
