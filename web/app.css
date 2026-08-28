@@ -403,6 +403,25 @@ html, body {
 .zsvc.bad { color: var(--t-bright-yellow); }
 .zsvc.bad .dot { border-color: var(--t-bright-yellow); background: none; }
 
+/* The same fold under a project row, one step further in. */
+.zsvc.pgroup { padding-left: 20px; }
+.session.zsub { padding-left: 34px; }
+
+/* The controls that act on the whole set. Hidden until the row is pointed at,
+   like the other row actions — except when something is stopped, where the way
+   to start it again must not be a thing you have to discover. */
+.gbtn {
+  flex: 0 0 auto;
+  width: 18px;
+  text-align: center;
+  opacity: 0;
+  color: var(--muted);
+  border-radius: var(--radius);
+}
+.zsvc:hover .gbtn { opacity: 1; }
+.zsvc.bad .gbtn { opacity: 1; }
+.gbtn:hover { color: var(--text); background: color-mix(in srgb, var(--text) 12%, transparent); }
+
 /* Rows inside the fold sit under it. */
 .zrow.zsub { padding-left: 22px; }
 .zrow.zstopped .when { color: var(--t-bright-yellow); }

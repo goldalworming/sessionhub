@@ -898,6 +898,30 @@ function terminalMenu(t, { ordering = false } = {}) {
 /// and survives a restart.
 /// Restart a terminal in place. The daemon keeps the terminal id, so the tab
 /// stays where it is and everyone attached stays attached.
+/// Stop a whole set at once, asking once.
+///
+/// Not `killTerminal` in a loop: that asks per terminal, and confirming four
+/// times to stop one app is how a confirmation stops being read.
+function killGroup(ids, label) {
+  if (!ids.length) return;
+  const n = ids.length;
+  if (!confirm(`Stop ${label}? That is ${n} terminal${n === 1 ? '' : 's'}, and whatever they run.`)) {
+    return;
+  }
+  for (const id of ids) conn.send({ t: 'kill', id });
+}
+
+/// Restart a whole set. No question asked: a relaunch keeps the tab, the folder
+/// and the session — it is the recovery, not the loss.
+function relaunchGroup(ids) {
+  for (const id of ids) relaunch(id);
+}
+
+/// Start the named ones that are not running.
+function startGroup(list) {
+  for (const s of list) openSaved(s.project, s.name);
+}
+
 function relaunch(id) {
   const entry = terms.get(id);
   const size = (entry && proposed(entry)) || { cols: 100, rows: 30 };
@@ -1371,6 +1395,10 @@ function sidebarCtx() {
     openMenu,
     closeMenu,
     openSettings,
+    killGroup,
+    relaunchGroup,
+    startGroup,
+    samePath,
     bindMenu,
     terminalMenu,
     killTerminal,

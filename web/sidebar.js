@@ -187,19 +187,20 @@ function hiddenToday(ctx) {
 
 // --------------------------------------------------------------- top zone
 
-/// A live terminal that is a service: something named, set to start with the
-/// daemon, and running ever since.
+/// The saved entry a live terminal is running under, if it has one.
 ///
-/// The zone answers "which one was that just now?", and a service is never the
-/// answer to that — it came up with the daemon and has been sitting there. Two
-/// of them on a zone capped at 8 rows is a quarter of it spent on things that
-/// never change.
+/// Giving a terminal a name is the act that says "this is a part of something,
+/// not a scratch shell" — so that is the line the fold is drawn along. No
+/// separate idea of a group is needed, and nothing has to be assigned by hand:
+/// a backend and a frontend named inside one project are that project's set
+/// because they are named and they are there.
+///
+/// The zone answers "which one was that just now?", and a named thing that has
+/// been running since the daemon came up is never the answer to that. Two of
+/// them on a zone capped at 8 rows is a quarter of it spent on things that do
+/// not change.
 function serviceOf(ctx, t) {
-  return (
-    ctx.state.saved.find(
-      (s) => s.autostart && s.live_terminal_id === t.id,
-    ) || null
-  );
+  return ctx.state.saved.find((s) => s.live_terminal_id === t.id) || null;
 }
 
 /// Named things set to start with the daemon that are NOT running.
@@ -566,10 +567,13 @@ function projectNode(ctx, entry, liveSession, searching) {
 
   if (!expanded) return wrap;
 
-  // Running first, then the named ones waiting to be started. Both sit above the
-  // session history: they are what this project *does*, not what it did.
-  for (const t of ctx.looseTerminals(p.path)) wrap.appendChild(looseRow(ctx, t));
-  for (const s of ctx.savedTerminals(p.path)) wrap.appendChild(savedRow(ctx, s));
+  // The project's named terminals — backend and frontend, say — fold into one
+  // line with the controls for the whole set. What is left over is the scratch
+  // shells: those have no name, belong to nothing, and stay as they are.
+  for (const r of groupRows(ctx, p)) wrap.appendChild(r);
+  for (const t of ctx.looseTerminals(p.path)) {
+    if (!t.name) wrap.appendChild(looseRow(ctx, t));
+  }
 
   // While filtering, day groups are skipped entirely. This is not a
   // simplification: search results hiding behind a fold is the easiest way to
@@ -816,13 +820,16 @@ function agentRow(ctx, p, a, slot) {
     return row;
 }
 
-function looseRow(ctx, t) {
+function looseRow(ctx, t, inGroup) {
   // A named terminal is not "loose" any more — that class greys the title and
   // sets it in italic, which is right for a row called `terminal 7` and wrong
   // for one called `telegram bot`.
   const item = el(
     'div',
-    'session' + (t.name ? '' : ' loose') + (t.id === ctx.activeId ? ' selected' : ''),
+    'session' +
+      (t.name ? '' : ' loose') +
+      (t.id === ctx.activeId ? ' selected' : '') +
+      (inGroup ? ' zsub' : ''),
   );
   item.title = t.name
     ? `${t.name} · ${t.agent} · terminal ${t.id} · ${t.cols}×${t.rows}`
@@ -869,7 +876,7 @@ function looseRow(ctx, t) {
     else ctx.attach(t.id);
     ctx.closeDrawerIfNarrow();
   };
-  bindTerminalMenu(ctx, item, t.id);
+  bindRowMenu(ctx, item, t.id, null);
   return item;
 }
 
@@ -882,8 +889,101 @@ const SAVE_ICON =
 
 /// A saved terminal that is not running: a name, and the command waiting behind
 /// it. Clicking starts the shell in its folder and runs that line.
-function savedRow(ctx, s) {
-  const item = el('div', 'session saved');
+/// A project's named terminals, as one line that opens — with the controls for
+/// the whole set on it.
+///
+/// This is the answer to "backend and frontend crowd the list, but I still need
+/// to stop and restart them easily". Folded it is one line; the ⟳ and ✕ on that
+/// line act on every part at once, which is the thing that was awkward before —
+/// two menus to restart one app.
+///
+/// Folding stays safe for the same reason it does in the zone above: a part that
+/// should be running and is not turns the line yellow and opens it.
+function groupRows(ctx, p) {
+  const mine = ctx.state.saved.filter((s) => ctx.samePath(s.project, p.path));
+  if (!mine.length) return [];
+
+  const up = mine.filter((s) => s.live_terminal_id !== null);
+  const down = mine.filter((s) => s.live_terminal_id === null);
+  // Only something set to start by itself is *missing* when it is not running.
+  // One you simply have not started yet is not a fault, and colouring it as one
+  // would teach you to ignore the colour.
+  const missing = down.filter((s) => s.autostart);
+
+  const open = missing.length > 0 || toggled.has(groupKey(p.path));
+  const rows = [];
+
+  const head = el('div', 'zsvc pgroup' + (missing.length ? ' bad' : '') + (open ? ' open' : ''));
+  head.appendChild(el('span', 'twist', open ? '▾' : '▸'));
+  head.appendChild(el('span', 'dot' + (up.length && !missing.length ? ' live' : '')));
+  head.appendChild(
+    el(
+      'span',
+      'zsvclabel',
+      missing.length
+        ? `${missing.length} of ${mine.length} stopped`
+        : `${up.length} of ${mine.length} running`,
+    ),
+  );
+  head.appendChild(el('span', 'zsvcnames', mine.map((s) => s.name).join(', ')));
+  head.title = 'The named terminals in this project. Click to see them.';
+  head.onclick = (e) => {
+    e.stopPropagation();
+    const k = groupKey(p.path);
+    if (toggled.has(k)) toggled.delete(k);
+    else toggled.add(k);
+    saveToggled();
+    ctx.rerender();
+  };
+
+  // The set's own controls, on the line that stands for the set.
+  const ids = up.map((s) => s.live_terminal_id);
+  if (down.length) {
+    head.appendChild(
+      groupBtn('▶', `Start ${down.length === mine.length ? 'them' : 'the rest'}`, () =>
+        ctx.startGroup(down),
+      ),
+    );
+  }
+  if (ids.length) {
+    head.appendChild(
+      groupBtn('⟳', 'Restart all of them', () => ctx.relaunchGroup(ids)),
+    );
+    head.appendChild(
+      groupBtn('✕', 'Stop all of them', () => ctx.killGroup(ids, p.name)),
+    );
+  }
+  rows.push(head);
+
+  if (!open) return rows;
+  // Running ones first: a stopped part is the one you act on, and it reads
+  // better at the bottom where the eye lands after the list.
+  for (const s of up) {
+    const t = ctx.state.terminals.find((x) => x.id === s.live_terminal_id);
+    if (t) rows.push(looseRow(ctx, t, true));
+  }
+  for (const s of down) rows.push(savedRow(ctx, s, true));
+  return rows;
+}
+
+/// Prefixed rather than suffixed, so it can never collide with a day-group key
+/// (`<path> <bucket>`) whatever a bucket is one day called.
+const groupKey = (path) => `group:${path}`;
+
+/// One control on a group line. `pointerdown` so the fold underneath does not
+/// also toggle, and a title because a symbol on its own is a guess.
+function groupBtn(glyph, title, run) {
+  const b = el('span', 'gbtn', glyph);
+  b.title = title;
+  b.onclick = (e) => {
+    e.stopPropagation();
+    run();
+  };
+  return b;
+}
+
+function savedRow(ctx, s, inGroup) {
+  const item = el('div', 'session saved' + (inGroup ? ' zsub' : ''));
   item.title = s.command
     ? `${s.agent} · runs: ${s.command}`
     : `${s.agent} · opens a shell, runs nothing`;
