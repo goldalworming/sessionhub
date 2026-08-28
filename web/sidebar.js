@@ -13,6 +13,13 @@ import { absoluteDate, dayBucket, BUCKETS } from './format.js';
 
 const LS_BUCKETS = 'sh.buckets';
 const LS_ALIAS = 'sh.alias';
+/// Sessions taken out of the "live & today" zone by hand.
+///
+/// Only out of that zone — the project's own history keeps them. The zone is a
+/// convenience ("which one was that just now?"), so what belongs in it is a
+/// matter of taste; the history is the record, and sessionhub does not own it.
+/// Nothing is deleted anywhere: this is a list of ids in this browser.
+const LS_HIDDEN = 'sh.zonehidden';
 
 /// The top rows are capped so this zone does not slowly turn into a second long
 /// list — its whole value is that it always fits.
@@ -29,6 +36,7 @@ const FLAT_MAX = 3;
 // list of open ones. That way a project never touched needs no record at all.
 const toggled = loadSet(LS_BUCKETS);
 const alias = loadMap(LS_ALIAS);
+const hidden = loadSet(LS_HIDDEN);
 
 function loadSet(key) {
   try {
@@ -48,6 +56,7 @@ function loadMap(key) {
 }
 
 const saveToggled = () => localStorage.setItem(LS_BUCKETS, JSON.stringify([...toggled]));
+const saveHidden = () => localStorage.setItem(LS_HIDDEN, JSON.stringify([...hidden]));
 const saveAlias = () =>
   localStorage.setItem(LS_ALIAS, JSON.stringify(Object.fromEntries(alias)));
 
@@ -109,6 +118,20 @@ export function renderTree(ctx) {
     if (zone.length) {
       tree.appendChild(zoneLabel('live & today', String(zone.length)));
       for (const r of zone) tree.appendChild(r);
+      // Anything hidden by hand says so and offers itself back. Nothing here is
+      // deleted, so nothing should be unreachable — and a row that vanishes with
+      // no way to recall it is the same as one that was lost.
+      const back = hiddenToday(ctx);
+      if (back) {
+        const line = el('div', 'zback', `${back} hidden today · show`);
+        line.title = 'Put them back in this zone. Their history was never touched.';
+        line.onclick = () => {
+          hidden.clear();
+          saveHidden();
+          ctx.rerender();
+        };
+        tree.appendChild(line);
+      }
       tree.appendChild(el('div', 'zsep'));
     }
   }
@@ -141,6 +164,21 @@ function zoneLabel(text, extra) {
   d.appendChild(el('span', null, text));
   if (extra) d.appendChild(el('span', 'zcount', extra));
   return d;
+}
+
+/// How many of the hidden ones would be in the zone today.
+///
+/// Counted rather than taken from the set's size: yesterday's hidden sessions
+/// have dropped out of the zone on their own, and offering to bring back six
+/// when only one would appear is a promise the row cannot keep.
+function hiddenToday(ctx) {
+  let n = 0;
+  for (const p of ctx.state.projects) {
+    for (const s of p.sessions) {
+      if (hidden.has(s.session_id) && dayBucket(s.updated_at) === 'today') n++;
+    }
+  }
+  return n;
 }
 
 // --------------------------------------------------------------- top zone
@@ -204,6 +242,7 @@ function recentRows(ctx, liveSession) {
   for (const p of ctx.state.projects) {
     for (const s of p.sessions) {
       if (seen.has(s.session_id)) continue;
+      if (hidden.has(s.session_id)) continue;
       if (dayBucket(s.updated_at) !== 'today') continue;
       today.push({ p, s });
     }
@@ -220,6 +259,7 @@ function recentRows(ctx, liveSession) {
         project: p.name,
         agent: s.agent,
         live: false,
+        session: { p, s, inZone: true },
         open: () => ctx.spawn(p.path, s.agent, s.session_id),
       }),
     );
@@ -233,12 +273,56 @@ function recentRows(ctx, liveSession) {
 /// often scrolled somewhere else, and the sidebar is where you were looking. The
 /// terminal is looked up when the menu opens rather than captured here, so a row
 /// rendered a minute ago still offers the truth.
-function bindTerminalMenu(ctx, node, id) {
-  if (id === null || id === undefined) return;
+/// Right-click on a row, whatever kind of row it is.
+///
+/// It used to bind only when a terminal was running, and every other row fell
+/// through to the browser's own menu — Copy image, View source, in the middle of
+/// the sidebar. A row that answers a right-click sometimes teaches nothing about
+/// when it will.
+///
+/// A live terminal gets the terminal menu. A session with nothing running gets
+/// what can be done to a session: rename it, fork it, take it out of the zone.
+function bindRowMenu(ctx, node, id, session) {
   ctx.bindMenu(node, () => {
-    const t = ctx.state.terminals.find((x) => x.id === id);
-    return t ? ctx.terminalMenu(t) : [];
+    if (id !== null && id !== undefined) {
+      const t = ctx.state.terminals.find((x) => x.id === id);
+      if (t) return ctx.terminalMenu(t);
+    }
+    return session ? sessionMenu(ctx, session) : [];
   });
+}
+
+/// What can be done to a session that is not running.
+function sessionMenu(ctx, { p, s, inZone }) {
+  const items = [
+    {
+      label: alias.has(s.session_id) ? 'Rename…' : 'Give it a name…',
+      run: () => {
+        // Looked up rather than captured: the menu is built once and may be
+        // acted on after a state broadcast has replaced the tree, and a
+        // reference to a row that is no longer on screen renames nothing.
+        const row = document.querySelector(`[data-sid="${CSS.escape(s.session_id)}"]`);
+        const title = row?.querySelector('.stitle');
+        if (row && title) startRename(ctx, row, title, s);
+      },
+    },
+  ];
+  if (ctx.state.agents.find((a) => a.name === s.agent)?.can_fork) {
+    items.push({ label: 'Fork into a new session…', run: () => ctx.forkSession(p.path, s) });
+  }
+  // Only offered where it does something. From the project's own history this
+  // would read as "delete", and that is not what it does.
+  if (inZone) {
+    items.push({
+      label: 'Hide from live & today',
+      run: () => {
+        hidden.add(s.session_id);
+        saveHidden();
+        ctx.rerender();
+      },
+    });
+  }
+  return items;
 }
 
 function zoneRow(ctx, o) {
@@ -265,11 +349,12 @@ function zoneRow(ctx, o) {
   col.appendChild(meta);
   r.appendChild(col);
 
+  if (o.session) r.dataset.sid = o.session.s.session_id;
   r.onclick = () => {
     o.open();
     ctx.closeDrawerIfNarrow();
   };
-  bindTerminalMenu(ctx, r, o.live ? o.tid : null);
+  bindRowMenu(ctx, r, o.live ? o.tid : null, o.session);
   return r;
 }
 
@@ -456,12 +541,13 @@ function sessionRow(ctx, p, s, liveSession, positions, mixed) {
     item.appendChild(fork);
   }
 
+  item.dataset.sid = s.session_id;
   item.onclick = () => {
     if (live !== null) ctx.attach(live);
     else ctx.spawn(p.path, s.agent, s.session_id);
     ctx.closeDrawerIfNarrow();
   };
-  bindTerminalMenu(ctx, item, live);
+  bindRowMenu(ctx, item, live, { p, s, inZone: false });
   return item;
 }
 

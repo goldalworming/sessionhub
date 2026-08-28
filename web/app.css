@@ -375,6 +375,16 @@ html, body {
   margin: 7px 8px 2px;
 }
 
+/* The way back for rows hidden by hand. Quiet — it is a footnote to the zone,
+   not one of its entries — but clickable, and it says so on hover. */
+.zback {
+  padding: 3px 8px 1px 24px;
+  font-size: 10.5px;
+  color: var(--muted);
+  cursor: pointer;
+}
+.zback:hover { color: var(--text); text-decoration: underline dotted; }
+
 /* ------------------------------------------------------- top zone (2 lines) */
 
 .zrow {
