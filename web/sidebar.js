@@ -746,6 +746,7 @@ function startMenu(ctx, p) {
         rows.push({
             label: `${missing.length} not installed`,
             hint: missing.map((a) => a.name).join(', '),
+            dot: true,
             run: () => ctx.openSettings('agents'),
         });
     }
@@ -755,6 +756,10 @@ function startMenu(ctx, p) {
         rows.push({
             label: 'New terminal',
             hint: 'shell',
+            // A dot like the agents above have, so the four rows share one left
+            // edge. Colourless, because a shell is not an agent and has no
+            // identity to carry — the alignment is the whole point.
+            dot: true,
             run: () => ctx.spawn(p.path, shell.name, null),
         });
     }
@@ -802,18 +807,36 @@ function agentRow(ctx, p, a, slot) {
     resume.type = 'button';
     resume.className = 'secbtn';
     resume.textContent = 'Resume';
-    // Two different reasons it may be off, and they deserve different words:
-    // the agent has no picker of its own, or it has one but nothing to show.
-    resume.disabled = !a.can_pick || !here;
-    resume.title = !a.can_pick
-        ? `${a.name} cannot list its own sessions`
-        : here
-          ? `Let ${a.name} show its sessions here`
-          : `${a.name} has no sessions in ${p.name} yet`;
+    // Resume means "carry on here", and there are two ways to get there.
+    //
+    // An agent with a picker of its own is handed the choice — claude's
+    // `--resume` with no value opens its list, and recognising a conversation
+    // there beats reading a title and a date. An agent without one is not out
+    // of luck: sessionhub knows the ids, so the newest session in this project
+    // is opened directly. opencode is the case that made this necessary — its
+    // `--help` has `-s/--session <id>` and `-c/--continue`, and no picker flag
+    // at all, so the button was permanently dead for it while resuming a named
+    // session from the history worked perfectly well.
+    const newest = here
+        ? p.sessions
+              .filter((s) => s.agent === a.name)
+              .reduce((best, s) =>
+                  !best || Date.parse(s.updated_at) > Date.parse(best.updated_at) ? s : best,
+              null)
+        : null;
+    resume.disabled = !a.can_pick && !newest;
+    resume.title = a.can_pick
+        ? here
+            ? `Let ${a.name} show its sessions here`
+            : `${a.name} has no sessions in ${p.name} yet — its picker opens anyway`
+        : newest
+          ? `Carry on the newest ${a.name} session here. ${a.name} cannot show a list of its own.`
+          : `${a.name} has nothing to carry on in ${p.name}, and cannot show a list of its own`;
     resume.onclick = (e) => {
         e.stopPropagation();
         ctx.closeMenu();
-        ctx.spawn(p.path, a.name, null, true);
+        if (a.can_pick) ctx.spawn(p.path, a.name, null, true);
+        else if (newest) ctx.spawn(p.path, a.name, newest.session_id);
     };
     row.appendChild(resume);
 

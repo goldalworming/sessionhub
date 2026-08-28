@@ -1365,6 +1365,9 @@ html, body {
 /* A row that says what it will run, quietly, at the far end. */
 #menu div.mwide { display: flex; align-items: center; gap: 10px; min-width: 200px; }
 #menu .mhint { margin-left: auto; font-size: 10.5px; color: var(--muted); }
+/* Marks the dot column so a plain row lines up with the agent rows, without
+   claiming a colour of its own. */
+#menu .mdot-plain { background: none; border-color: var(--border); }
 
 /* One agent, both ways to start it. The row is not clickable itself — the two
    buttons are — so it does not take the hover the other rows do. */

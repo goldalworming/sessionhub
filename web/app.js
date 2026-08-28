@@ -1575,6 +1575,18 @@ function openMenu(x, y, items) {
     } else {
       d.textContent = it.label;
     }
+    // A dot, so a plain row lines up with the agent rows above it. Muted and
+    // colourless on purpose: it marks the column, it does not claim an identity
+    // the way an agent's colour does.
+    if (it.dot) {
+      // Built then prepended: `prepend` answers with undefined, not the node,
+      // and setting a class on that throws in the middle of building the menu —
+      // which loses every row after this one.
+      const mark = document.createElement('span');
+      mark.className = 'dot mdot-plain';
+      d.prepend(mark);
+      d.classList.add('mwide');
+    }
     // A quiet word at the right end — what the row will actually run, when the
     // label alone does not say it.
     if (it.hint) {
