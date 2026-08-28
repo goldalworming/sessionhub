@@ -274,8 +274,31 @@ pub fn apply(rel: &Release) -> Result<(), String> {
     }
     info!(bytes = size, tag = %rel.tag, "update downloaded");
 
-    write_and_launch_swapper(&exe, &staged)?;
+    write_and_launch_swapper(&exe, &staged, &rel.tag)?;
     Ok(())
+}
+
+/// Say so if the last swap did not take, then clear the note.
+///
+/// The swapper cannot log — the daemon that owns the log is gone by the time it
+/// runs — so it leaves a line in a file next to the binary and this reads it on
+/// the way up. Without this the only evidence is a version number that did not
+/// move, which reads as "the update button does nothing".
+pub fn report_failed_swap() {
+    let Ok(exe) = std::env::current_exe() else { return };
+    let Some(dir) = exe.parent() else { return };
+    let report = dir.join("sessionhub-swap.log");
+    let Ok(said) = std::fs::read_to_string(&report) else { return };
+    // Windows PowerShell's `-Encoding utf8` writes a byte order mark, and it
+    // would otherwise be the first thing in the log line.
+    let said = said.trim_start_matches('\u{feff}');
+    warn!(
+        detail = said.trim(),
+        path = %report.display(),
+        "the last update did not replace the binary — still running {}",
+        current()
+    );
+    let _ = std::fs::remove_file(&report);
 }
 
 fn ext() -> &'static str {
@@ -311,7 +334,7 @@ fn curl_path() -> PathBuf {
 }
 
 /// Write the handoff script and start it detached.
-fn write_and_launch_swapper(exe: &Path, staged: &Path) -> Result<(), String> {
+fn write_and_launch_swapper(exe: &Path, staged: &Path, tag: &str) -> Result<(), String> {
     let home = crate::config::home();
     let pid = std::process::id();
     let backup = exe.with_extension(if cfg!(windows) { "old.exe" } else { "old" });
@@ -319,35 +342,29 @@ fn write_and_launch_swapper(exe: &Path, staged: &Path) -> Result<(), String> {
 
     if cfg!(windows) {
         let script = dir.join("sessionhub-swap.ps1");
-        let text = format!(
-            "$ErrorActionPreference = 'SilentlyContinue'\r\n\
-             # Wait for the daemon to let go of its own image; a running exe is locked.\r\n\
-             for ($i = 0; $i -lt 120; $i++) {{\r\n\
-             \x20 if (-not (Get-Process -Id {pid} -ErrorAction SilentlyContinue)) {{ break }}\r\n\
-             \x20 Start-Sleep -Milliseconds 500\r\n\
-             }}\r\n\
-             if (Get-Process -Id {pid} -ErrorAction SilentlyContinue) {{\r\n\
-             \x20 # Still there after a minute. Swapping now would put a new binary\r\n\
-             \x20 # under a daemon that still holds the port, and the replacement\r\n\
-             \x20 # cannot bind it. Leave everything exactly as it was.\r\n\
-             \x20 Remove-Item -LiteralPath $PSCommandPath -Force\r\n\
-             \x20 exit 1\r\n\
-             }}\r\n\
-             Remove-Item -LiteralPath '{backup}' -Force\r\n\
-             Move-Item -LiteralPath '{exe}' -Destination '{backup}' -Force\r\n\
-             Move-Item -LiteralPath '{staged}' -Destination '{exe}' -Force\r\n\
-             if (-not (Test-Path -LiteralPath '{exe}')) {{\r\n\
-             \x20 # The swap failed: put back what was working.\r\n\
-             \x20 Move-Item -LiteralPath '{backup}' -Destination '{exe}' -Force\r\n\
-             }}\r\n\
-             Start-Process -FilePath '{exe}' -ArgumentList 'start','--home','{home}' -WindowStyle Hidden\r\n\
-             Remove-Item -LiteralPath $PSCommandPath -Force\r\n",
-            pid = pid,
-            exe = exe.display(),
-            staged = staged.display(),
-            backup = backup.display(),
-            home = home.display(),
-        );
+        let report = dir.join("sessionhub-swap.log");
+        // Windows locks the image of a running executable, and the daemon is not
+        // the only process running this one: `ensure_tray` starts `sessionhubd
+        // tray` as a second process from the same file. Waiting for the daemon's
+        // pid alone left the tray holding the image, `Move-Item` failed, and —
+        // because the old exe was still sitting there — the guard below saw a
+        // file and called it success. The old binary was started again and
+        // nothing anywhere said a word. Three updates in a row went that way.
+        //
+        // So: wait for the daemon, then end anything still running this exe (the
+        // tray is meant to go with the daemon; `start` brings a fresh one back),
+        // and retry the move — a virus scanner reading a freshly downloaded
+        // binary holds it for a moment too. Then CHECK, and if it still did not
+        // work, leave a file saying so rather than pretending.
+        let text = windows_swap_script(WindowsSwap {
+            pid,
+            exe: &exe.display().to_string(),
+            staged: &staged.display().to_string(),
+            backup: &backup.display().to_string(),
+            report: &report.display().to_string(),
+            tag,
+            home: &home.display().to_string(),
+        });
         std::fs::write(&script, text).map_err(|e| format!("cannot write the updater: {e}"))?;
         crate::pty::quiet_command("powershell.exe")
             .args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-File"])
@@ -389,6 +406,79 @@ fn write_and_launch_swapper(exe: &Path, staged: &Path) -> Result<(), String> {
     }
     warn!("update staged; the daemon is about to restart into it");
     Ok(())
+}
+
+/// What the Windows handoff script needs to know.
+pub struct WindowsSwap<'a> {
+    pub pid: u32,
+    pub exe: &'a str,
+    pub staged: &'a str,
+    pub backup: &'a str,
+    pub report: &'a str,
+    pub tag: &'a str,
+    pub home: &'a str,
+}
+
+/// The handoff script, as text — kept apart from writing and running it so the
+/// thing that has gone wrong twice can be read, and tested, on its own.
+pub fn windows_swap_script(s: WindowsSwap<'_>) -> String {
+    let WindowsSwap { pid, exe, staged, backup, report, tag, home } = s;
+    format!(
+            "$ErrorActionPreference = 'SilentlyContinue'\r\n\
+             for ($i = 0; $i -lt 120; $i++) {{\r\n\
+             \x20 if (-not (Get-Process -Id {pid} -ErrorAction SilentlyContinue)) {{ break }}\r\n\
+             \x20 Start-Sleep -Milliseconds 500\r\n\
+             }}\r\n\
+             if (Get-Process -Id {pid} -ErrorAction SilentlyContinue) {{\r\n\
+             \x20 # Still there after a minute. Swapping now would put a new binary\r\n\
+             \x20 # under a daemon that still holds the port, and the replacement\r\n\
+             \x20 # cannot bind it. Leave everything exactly as it was.\r\n\
+             \x20 Remove-Item -LiteralPath $PSCommandPath -Force\r\n\
+             \x20 exit 1\r\n\
+             }}\r\n\
+             $swapped = $false\r\n\
+             $why = 'never tried'\r\n\
+             for ($try = 0; $try -lt 20; $try++) {{\r\n\
+             \x20 # Anything else running either name. The tray is a second\r\n\
+             \x20 # process on the same image, and after a previous update a\r\n\
+             \x20 # surviving one is running from the BACKUP name — renamed out\r\n\
+             \x20 # from under it. That one keeps the backup locked forever, and\r\n\
+             \x20 # a locked backup is what stops the next update dead.\r\n\
+             \x20 Get-Process -ErrorAction SilentlyContinue |\r\n\
+             \x20   Where-Object {{ $_.Path -eq '{exe}' -or $_.Path -eq '{backup}' }} |\r\n\
+             \x20   Stop-Process -Force -ErrorAction SilentlyContinue\r\n\
+             \x20 Start-Sleep -Milliseconds 300\r\n\
+             \x20 Remove-Item -LiteralPath '{backup}' -Force -ErrorAction SilentlyContinue\r\n\
+             \x20 if (Test-Path -LiteralPath '{backup}') {{\r\n\
+             \x20   # Still there, so something still holds it. A rename always\r\n\
+             \x20   # works even on a running image, so move it out of the way\r\n\
+             \x20   # instead of insisting on the name.\r\n\
+             \x20   $aside = '{backup}' + '.' + [DateTime]::UtcNow.Ticks\r\n\
+             \x20   Move-Item -LiteralPath '{backup}' -Destination $aside -Force -ErrorAction SilentlyContinue\r\n\
+             \x20 }}\r\n\
+             \x20 Move-Item -LiteralPath '{exe}' -Destination '{backup}' -Force -ErrorAction SilentlyContinue\r\n\
+             \x20 if (-not (Test-Path -LiteralPath '{exe}')) {{\r\n\
+             \x20   Move-Item -LiteralPath '{staged}' -Destination '{exe}' -Force -ErrorAction SilentlyContinue\r\n\
+             \x20   if (Test-Path -LiteralPath '{exe}') {{ $swapped = $true; break }}\r\n\
+             \x20   # The new one would not go in. Put the old one back.\r\n\
+             \x20   Move-Item -LiteralPath '{backup}' -Destination '{exe}' -Force -ErrorAction SilentlyContinue\r\n\
+             \x20   $why = 'the new binary could not be moved into place'\r\n\
+             \x20 }} else {{\r\n\
+             \x20   $why = 'the old binary could not be moved aside - something is running it'\r\n\
+             \x20 }}\r\n\
+             \x20 Start-Sleep -Milliseconds 500\r\n\
+             }}\r\n\
+             if (-not $swapped) {{\r\n\
+             \x20 # Loud, on disk, beside the binary: the daemon reads this on its\r\n\
+             \x20 # next start and puts it in the log. A silent failure here looks\r\n\
+             \x20 # exactly like a successful update that did nothing.\r\n\
+             \x20 $when = Get-Date -Format o\r\n\
+             \x20 $note = \"$when update to {tag} did not go in: $why\"\r\n\
+             \x20 Set-Content -LiteralPath '{report}' -Value $note -Encoding utf8\r\n\
+             }}\r\n\
+             Start-Process -FilePath '{exe}' -ArgumentList 'start','--home','{home}' -WindowStyle Hidden\r\n\
+             Remove-Item -LiteralPath $PSCommandPath -Force\r\n",
+    )
 }
 
 #[cfg(test)]
@@ -554,5 +644,88 @@ mod tests {
         // truthful rather than blaming the release.
         let empty = parse_release(b"{}", "windows-x86_64.exe").unwrap_err();
         assert!(empty.contains("no release in it"), "{empty}");
+    }
+}
+
+#[cfg(test)]
+mod swap_tests {
+    use super::*;
+
+    fn script() -> String {
+        windows_swap_script(WindowsSwap {
+            pid: 4242,
+            exe: r"C:\app\sessionhubd.exe",
+            staged: r"C:\app\sessionhubd-new.exe",
+            backup: r"C:\app\sessionhubd.old.exe",
+            report: r"C:\app\sessionhub-swap.log",
+            tag: "v0.0.19",
+            home: r"C:\Users\x",
+        })
+    }
+
+    #[test]
+    fn it_waits_for_the_daemon_before_touching_anything() {
+        let s = script();
+        let wait = s.find("Get-Process -Id 4242").expect("no wait for the daemon");
+        let move_ = s.find("Move-Item").expect("no move at all");
+        assert!(wait < move_, "the swap must not start before the daemon is gone");
+    }
+
+    #[test]
+    fn it_ends_whatever_else_is_running_that_same_binary() {
+        // The bug this exists for: the tray is a second process on the same
+        // image, and Windows will not move a file that is running.
+        let s = script();
+        assert!(s.contains(r"$_.Path -eq 'C:\app\sessionhubd.exe'"), "{s}");
+        assert!(s.contains("Stop-Process -Force"), "nothing ends the holder");
+    }
+
+    #[test]
+    fn it_checks_the_swap_and_leaves_a_note_when_it_fails() {
+        let s = script();
+        assert!(s.contains("$swapped = $true"), "success is never recorded");
+        assert!(s.contains("if (-not $swapped)"), "failure is never noticed");
+        assert!(s.contains(r"C:\app\sessionhub-swap.log"), "failure is never written down");
+        assert!(s.contains("v0.0.19"), "the note does not say which version");
+    }
+
+    #[test]
+    fn it_puts_the_old_binary_back_when_the_new_one_will_not_go_in() {
+        let s = script();
+        let restore = format!(
+            "Move-Item -LiteralPath '{}' -Destination '{}'",
+            r"C:\app\sessionhubd.old.exe", r"C:\app\sessionhubd.exe"
+        );
+        assert!(s.contains(&restore), "there is no way back");
+    }
+
+    #[test]
+    fn it_always_starts_something_again() {
+        let s = script();
+        assert!(s.contains(r"Start-Process -FilePath 'C:\app\sessionhubd.exe'"));
+        assert!(s.contains(r"'start','--home','C:\Users\x'"));
+    }
+}
+
+#[cfg(test)]
+mod swap_dump {
+    use super::*;
+    /// Not an assertion: writes the real script where a live test can run it,
+    /// so what is exercised is the text this code actually produces.
+    #[test]
+    #[ignore]
+    fn dump() {
+        let dir = std::env::var("SWAP_DIR").expect("SWAP_DIR");
+        let pid: u32 = std::env::var("SWAP_PID").unwrap().parse().unwrap();
+        let text = windows_swap_script(WindowsSwap {
+            pid,
+            exe: &format!(r"{dir}\sessionhubd.exe"),
+            staged: &format!(r"{dir}\sessionhubd-new.exe"),
+            backup: &format!(r"{dir}\sessionhubd.old.exe"),
+            report: &format!(r"{dir}\sessionhub-swap.log"),
+            tag: "v0.0.19",
+            home: &format!(r"{dir}\home"),
+        });
+        std::fs::write(format!(r"{dir}\swap.ps1"), text).unwrap();
     }
 }

@@ -957,6 +957,12 @@ pub fn run_daemon(home: Option<PathBuf>) {
     init_logging();
     let started = Instant::now();
 
+    // Did the last update actually go in? An update that fails leaves a note
+    // beside the binary, because the alternative is what happened on one
+    // machine here: three updates in a row that downloaded, restarted, and came
+    // back on the old version without a word anywhere.
+    update::report_failed_swap();
+
     if let Err(e) = daemon::write_pid_file(cfg.port) {
         error!(error = %e, "could not write pid file");
     }
