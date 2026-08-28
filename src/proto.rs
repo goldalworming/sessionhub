@@ -145,6 +145,9 @@ pub enum ClientMsg {
     /// Replace this machine's token. Everything holding the old one stops
     /// working the moment it is done — which is the point of asking.
     RotateToken,
+    /// Write the skill that teaches an agent on THIS machine how to reach the
+    /// others. Overwrites whatever is there.
+    InstallSkill,
     /// Change the storage limits for dropped files, then sweep right away.
     SetDrops {
         max_age_hours: u64,
@@ -440,6 +443,11 @@ pub enum ServerMsg {
         cloudflare: CloudflareInfo,
         /// Whether another machine may run commands here unattended.
         remote_commands: bool,
+        /// Where the agent skill would go, and whether it is already there:
+        /// `missing`, `current`, or `stale` — written by an older version, or
+        /// edited by hand.
+        skill_path: String,
+        skill_state: String,
         /// That this daemon understands `set_remote_commands` at all. Read the
         /// same way `can_move` is: absent means no, and no switch is drawn —
         /// an older daemon would drop the message without answering, leaving a

@@ -1900,35 +1900,32 @@ html, body {
 .span2 { grid-column: 1 / -1; }
 .afoot { display: flex; gap: 8px; }
 
-.agent .del {
-  font: inherit;
-  font-size: 11px;
-  padding: 4px 10px;
-  border-radius: var(--radius);
-  border: 1px solid var(--border);
-  background: var(--bg);
-  color: var(--muted);
-  cursor: pointer;
-}
-.agent .del:hover { color: var(--bad); border-color: var(--bad); }
-.agent .del.armed { color: var(--bad); border-color: var(--bad); font-weight: 600; }
-/* The sign-out button borrows the Forget look — same two-click arming, same
-   colours — but lives outside an .agent row, so it needs the rules by name. */
-.signoutrow { margin-top: 18px; padding-top: 12px; border-top: 1px solid var(--border); }
-.signoutrow .del {
+/* The button that takes something away: Forget, Close, Sign out, New token.
+   Quiet until pointed at, then red — and red again while it is armed for the
+   second click.
+
+   Written against `.del` itself rather than against whichever row holds it.
+   It began as `.agent .del`, and every later one — the sign-out row, then
+   Cloudflare's Forget token and Close — either copied the block or, worse, got
+   nothing and fell through to the browser's own white button in the middle of a
+   dark panel. `.del` only ever appears inside this panel, so the class is the
+   right place for its own look. */
+#settings .del {
   flex: 0 0 auto;
   font: inherit;
   font-size: 11px;
-  color: var(--muted);
-  background: none;
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
   padding: 4px 10px;
+  border-radius: var(--radius);
+  border: 1px solid var(--border);
+  background: none;
+  color: var(--muted);
   cursor: pointer;
   white-space: nowrap;
 }
-.signoutrow .del:hover { color: var(--bad); border-color: var(--bad); }
-.signoutrow .del.armed { color: var(--bad); border-color: var(--bad); font-weight: 600; }
+#settings .del:hover { color: var(--bad); border-color: var(--bad); }
+#settings .del.armed { color: var(--bad); border-color: var(--bad); font-weight: 600; }
+
+.signoutrow { margin-top: 18px; padding-top: 12px; border-top: 1px solid var(--border); }
 .signoutrow .sstat { margin-top: 8px; }
 
 .addbtn {

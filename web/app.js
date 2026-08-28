@@ -1888,6 +1888,9 @@ const settings = new Settings(
   // whose settings are open, not to whichever one the browser happens to be
   // talking to.
   () => conn.send({ t: 'rotate_token' }),
+  // The skill teaches an agent running ON that machine how to reach the others,
+  // so it is written where that agent lives — the machine the panel is showing.
+  () => conn.send({ t: 'install_skill' }),
   (limits) => conn.send(limits ? { t: 'set_drops', ...limits } : { t: 'sweep_drops' }),
   (name) => conn.send({ t: 'remove_agent', name }),
   // Forgetting a machine always goes to the LOCAL daemon: the paired list is its

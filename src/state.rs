@@ -420,6 +420,13 @@ pub fn run(cfg: Config, rx: Receiver<Cmd>, tx: Sender<Cmd>, registry_cfg: Sender
                             cloudflare,
                             remote_commands,
                             can_run_remotely: true,
+                            skill_path: crate::skill::path().display().to_string(),
+                            skill_state: match crate::skill::state() {
+                                crate::skill::State::Missing => "missing",
+                                crate::skill::State::Current => "current",
+                                crate::skill::State::Stale => "stale",
+                            }
+                            .to_string(),
                         };
                         if let Ok(text) = serde_json::to_string(&msg) {
                             let _ = out.try_send(Out::Text(text));
@@ -1592,6 +1599,34 @@ pub fn run(cfg: Config, rx: Receiver<Cmd>, tx: Sender<Cmd>, registry_cfg: Sender
                             }),
                         );
                     }
+                    if tx.send(Cmd::ClientMsg { id, msg: ClientMsg::Config }).is_err() {
+                        return;
+                    }
+                }
+
+                ClientMsg::InstallSkill => {
+                    match crate::skill::install() {
+                        Ok(where_) => {
+                            info!(path = %where_.display(), "wrote the agent skill");
+                        }
+                        Err(e) => {
+                            warn!(error = %e, "could not write the agent skill");
+                            send_to(
+                                &clients,
+                                id,
+                                json(&ServerMsg::Error {
+                                    code: "skill_failed".into(),
+                                    message: format!(
+                                        "Could not write {}: {e}",
+                                        crate::skill::path().display()
+                                    ),
+                                }),
+                            );
+                            continue;
+                        }
+                    }
+                    // The pane redraws from the config message, which is what
+                    // carries the new state of the file.
                     if tx.send(Cmd::ClientMsg { id, msg: ClientMsg::Config }).is_err() {
                         return;
                     }

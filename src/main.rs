@@ -19,6 +19,7 @@ mod registry;
 mod remote;
 mod ring;
 mod service;
+mod skill;
 mod state;
 mod tray;
 mod tunnel;

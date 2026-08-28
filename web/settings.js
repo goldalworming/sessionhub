@@ -62,6 +62,7 @@ export class Settings {
     onLan,
     onRemoteCommands,
     onRotateToken,
+    onInstallSkill,
     onDrops,
     onRemove,
     onForget,
@@ -83,6 +84,7 @@ export class Settings {
     this.onLan = onLan;
     this.onRemoteCommands = onRemoteCommands || (() => {});
     this.onRotateToken = onRotateToken || (() => {});
+    this.onInstallSkill = onInstallSkill || (() => {});
     this.onDrops = onDrops;
     this.onRemove = onRemove;
     this.onForget = onForget || (() => {});
@@ -205,6 +207,8 @@ export class Settings {
     this.configPath = msg.config_path || '';
     this.lanAccess = !!msg.lan_access;
     this.remoteCommands = !!msg.remote_commands;
+    this.skillPath = msg.skill_path || '';
+    this.skillState = msg.skill_state || '';
     // A daemon too old to know the message would drop it without answering,
     // leaving a switch that flips back by itself. So it is not drawn at all.
     this.canRunRemotely = msg.can_run_remotely === true;
@@ -553,6 +557,61 @@ export class Settings {
               'panel still work — only unattended commands and sent files are turned away.',
       ),
     );
+    wrap.appendChild(this.skillRow());
+    return wrap;
+  }
+
+  /// Teach the agent on this machine that the other machines are reachable.
+  ///
+  /// The commands are useless to an agent that does not know they exist, and
+  /// telling it by hand means writing the same paragraph into every project. A
+  /// skill is read only when what is being asked sounds like it needs one — so
+  /// this writes it, because looking up where skills live is exactly the small
+  /// friction that means a feature never gets used.
+  ///
+  /// This half is about the agent running HERE reaching outwards, which is the
+  /// opposite direction from the switch above it. They share a row because they
+  /// are the two ends of the same rope, and a person arriving at either one is
+  /// looking for the other.
+  skillRow() {
+    const wrap = document.createElement('div');
+    if (!this.skillPath) return wrap;
+
+    const row = document.createElement('div');
+    row.className = 'usagebar';
+    const label = document.createElement('span');
+    label.className = 'usage';
+    label.textContent =
+      this.skillState === 'current'
+        ? 'An agent here already knows how to use the other machines.'
+        : 'Teach an agent here how to put those machines to work.';
+    row.appendChild(label);
+
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'secbtn';
+    btn.textContent =
+      { current: 'Skill added', stale: 'Update skill', missing: 'Add skill' }[this.skillState] ||
+      'Add skill';
+    btn.disabled = this.skillState === 'current';
+    btn.onclick = () => {
+      btn.disabled = true;
+      btn.textContent = 'Writing…';
+      this.note.textContent = 'Writing the skill…';
+      this.onInstallSkill();
+    };
+    row.appendChild(btn);
+    wrap.appendChild(row);
+
+    const where = document.createElement('div');
+    where.className = 'sstat muted';
+    where.textContent =
+      this.skillState === 'stale'
+        ? `A different version is at ${this.skillPath} — updating overwrites it.`
+        : `Written to ${this.skillPath}. It tells the agent about \`sessionhubd run\`, ` +
+          '`push` and `pull`, and is only read when a task actually sounds like ' +
+          'another machine is needed.';
+    wrap.appendChild(where);
     return wrap;
   }
 
