@@ -624,6 +624,14 @@ pub struct AgentBrief {
     /// `false` for agents that can fork but take no session name from the CLI —
     /// the dialog has to say so rather than promise a name that ends up ignored.
     pub fork_takes_name: bool,
+    /// Whether its command can actually be found on this machine.
+    ///
+    /// Every new `config.toml` enables claude, opencode and pi, so a machine
+    /// with one of them installed was still being offered all three. Settings
+    /// has always known — it shows `resolved` and counts the broken ones — but
+    /// the sidebar was never told, and offering to start something that cannot
+    /// start is worse than not offering it.
+    pub found: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]

@@ -511,7 +511,28 @@ function startRename(ctx, item, title, s) {
 function startMenu(ctx, p) {
     const shell = ctx.state.agents.find((a) => a.name === 'terminal');
     const agents = ctx.state.agents.filter((a) => a.name !== 'terminal');
-    const rows = agents.map((a, i) => ({ node: agentRow(ctx, p, a, i) }));
+    // Every new config.toml enables claude, opencode and pi, so a machine with
+    // one of them installed was offered all three — and a row with two buttons
+    // for something that cannot start is worse than a line of text was. Agents
+    // whose command is nowhere on this machine are left out.
+    //
+    // `found === false` and not `!found`: a daemon too old to send the field
+    // leaves it undefined, and there the old behaviour — show everything — is
+    // the right guess.
+    const missing = agents.filter((a) => a.found === false);
+    const rows = agents
+        .filter((a) => a.found !== false)
+        .map((a, i) => ({ node: agentRow(ctx, p, a, i) }));
+
+    // Nothing vanishes without a word. One quiet line says how many, and the
+    // place that can fix or disable them is one click away.
+    if (missing.length) {
+        rows.push({
+            label: `${missing.length} not installed`,
+            hint: missing.map((a) => a.name).join(', '),
+            run: () => ctx.openSettings('agents'),
+        });
+    }
 
     if (shell) {
         rows.push({ sep: true });

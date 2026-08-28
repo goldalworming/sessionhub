@@ -1370,6 +1370,7 @@ function sidebarCtx() {
     focusProject,
     openMenu,
     closeMenu,
+    openSettings,
     bindMenu,
     terminalMenu,
     killTerminal,
@@ -1949,14 +1950,22 @@ const settings = new Settings(
   (name) => conn.send({ t: 'remove_forward', name }),
 );
 
-document.getElementById('settings-btn').onclick = () => {
+/// Open Settings, optionally straight at one section.
+///
+/// Shared by the toolbar button and by anything that needs to send someone to
+/// the place a problem is fixed — the ＋ menu points at Agents when an agent's
+/// command cannot be found.
+function openSettings(section) {
   // What an update would cost, counted fresh each time the panel opens.
   settings.liveTerminals = state.terminals.filter((t) => t.alive).length;
   settings.setMachine(current);
+  if (section) settings.section = section;
   settings.show();
   conn.send({ t: 'config' });
   closeDrawerIfNarrow();
-};
+}
+
+document.getElementById('settings-btn').onclick = () => openSettings();
 
 // ---------------------------------------------------------------- shortcuts
 
