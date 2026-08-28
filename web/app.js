@@ -1369,6 +1369,7 @@ function sidebarCtx() {
     show,
     focusProject,
     openMenu,
+    closeMenu,
     bindMenu,
     terminalMenu,
     killTerminal,
@@ -1519,6 +1520,18 @@ function forgetSaved(project, name) {
 function openMenu(x, y, items) {
   el.menu.textContent = '';
   for (const it of items) {
+    // A row that builds itself. Most menu entries are a word and an action, but
+    // the one for starting an agent carries two buttons — New and Resume are
+    // different answers to the same question and reading the list twice to find
+    // the second was the whole problem with the old shape.
+    if (it.node) {
+      el.menu.appendChild(it.node);
+      continue;
+    }
+    if (it.sep) {
+      el.menu.appendChild(document.createElement('hr'));
+      continue;
+    }
     const d = document.createElement('div');
     // A colour is easier to recognise than its name, so the swatch leads and the
     // word follows. `data-color` rather than an inline style: the palette lives
@@ -1532,6 +1545,15 @@ function openMenu(x, y, items) {
       d.appendChild(document.createTextNode(it.label));
     } else {
       d.textContent = it.label;
+    }
+    // A quiet word at the right end — what the row will actually run, when the
+    // label alone does not say it.
+    if (it.hint) {
+      const h = document.createElement('span');
+      h.className = 'mhint';
+      h.textContent = it.hint;
+      d.appendChild(h);
+      d.classList.add('mwide');
     }
     if (it.on) d.classList.add('mon');
     d.onclick = () => {

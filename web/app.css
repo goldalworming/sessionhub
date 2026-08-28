@@ -1295,6 +1295,42 @@ html, body {
   white-space: nowrap;
 }
 #menu div:hover { background: color-mix(in srgb, var(--accent) 22%, transparent); }
+#menu hr {
+  height: 0;
+  margin: 4px 0;
+  border: 0;
+  border-top: 1px solid var(--border);
+}
+/* A row that says what it will run, quietly, at the far end. */
+#menu div.mwide { display: flex; align-items: center; gap: 10px; min-width: 200px; }
+#menu .mhint { margin-left: auto; font-size: 10.5px; color: var(--muted); }
+
+/* One agent, both ways to start it. The row is not clickable itself — the two
+   buttons are — so it does not take the hover the other rows do. */
+#menu .magent {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 12px;
+  cursor: default;
+  white-space: nowrap;
+}
+#menu .magent:hover { background: none; }
+.magent .maname { font-weight: 600; }
+.magent .macount { margin-right: auto; font-size: 10.5px; color: var(--muted); }
+/* Nothing to resume reads differently from "three sessions", and the eye should
+   catch that before it reaches the greyed-out button. */
+.magent .macount.none { font-style: italic; opacity: 0.75; }
+.magent .secbtn { padding: 2px 9px; font-size: 10.5px; }
+
+/* Recognise an agent by its colour without reading the name. The palette is the
+   terminal's own, so the sidebar and the screen agree about what green means. */
+.magent .dot[data-slot='0'] { background: var(--t-bright-green); border-color: var(--t-bright-green); }
+.magent .dot[data-slot='1'] { background: var(--t-bright-blue); border-color: var(--t-bright-blue); }
+.magent .dot[data-slot='2'] { background: var(--t-bright-magenta); border-color: var(--t-bright-magenta); }
+.magent .dot[data-slot='3'] { background: var(--t-bright-yellow); border-color: var(--t-bright-yellow); }
+.magent .dot[data-slot='4'] { background: var(--t-bright-cyan); border-color: var(--t-bright-cyan); }
+.magent .dot[data-slot='5'] { background: var(--t-bright-red); border-color: var(--t-bright-red); }
 
 /* ---------------------------------------------------------- command palette */
 

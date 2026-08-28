@@ -346,20 +346,7 @@ function projectNode(ctx, entry, liveSession, searching) {
   add.onclick = (e) => {
     e.stopPropagation();
     const r = add.getBoundingClientRect();
-    ctx.openMenu(
-      r.left,
-      r.bottom + 2,
-      ctx.state.agents.flatMap((a) => [
-        { label: `New ${a.name}`, run: () => ctx.spawn(p.path, a.name, null) },
-        // Only for agents that can show a list of their own. The rows below
-        // resume a session you already picked out; this hands the choosing to
-        // the agent, which is what you want when its own list is easier to
-        // recognise a conversation in than a title and a date.
-        ...(a.can_pick
-          ? [{ label: `Resume ${a.name}…`, run: () => ctx.spawn(p.path, a.name, null, true) }]
-          : []),
-      ]),
-    );
+    ctx.openMenu(r.left, r.bottom + 2, startMenu(ctx, p));
   };
   row.appendChild(add);
 
@@ -509,6 +496,91 @@ function startRename(ctx, item, title, s) {
     else if (e.key === 'Escape') finish(false);
   };
   input.onblur = () => finish(true);
+}
+
+/// The menu behind ＋ : one row per agent, with both ways to start it.
+///
+/// It used to be a flat list — `New claude`, `Resume claude…`, `New opencode` —
+/// where the two things you can do with one agent sat apart and every agent
+/// added two more lines to read. One row per agent puts the choice where the
+/// eye already is, and says in passing what there is to resume.
+///
+/// The shell is kept out of that grid and put at the foot: it is not an agent,
+/// it has no history to resume, and a Resume button greyed out beside it would
+/// only raise the question of why.
+function startMenu(ctx, p) {
+    const shell = ctx.state.agents.find((a) => a.name === 'terminal');
+    const agents = ctx.state.agents.filter((a) => a.name !== 'terminal');
+    const rows = agents.map((a, i) => ({ node: agentRow(ctx, p, a, i) }));
+
+    if (shell) {
+        rows.push({ sep: true });
+        rows.push({
+            label: 'New terminal',
+            hint: 'shell',
+            run: () => ctx.spawn(p.path, shell.name, null),
+        });
+    }
+    return rows;
+}
+
+/// One agent: what history it has here, and the two buttons.
+function agentRow(ctx, p, a, slot) {
+    const here = p.sessions.filter((s) => s.agent === a.name).length;
+    const live = ctx.state.terminals.some(
+        (t) => t.alive && t.agent === a.name && t.project === p.path,
+    );
+
+    const row = el('div', 'magent');
+
+    const dot = el('span', 'dot' + (live ? ' live' : ''));
+    // Colour by position, so an agent keeps the same one across every project
+    // and can be recognised without reading. The palette is in the stylesheet.
+    if (!live) dot.dataset.slot = String(slot % 6);
+    dot.title = live ? `${a.name} is running here` : '';
+    row.appendChild(dot);
+
+    row.appendChild(el('span', 'maname', a.name));
+
+    const count = el(
+        'span',
+        'macount' + (here ? '' : ' none'),
+        here ? `${here} session${here === 1 ? '' : 's'}` : 'no history here',
+    );
+    row.appendChild(count);
+
+    const New = document.createElement('button');
+    New.type = 'button';
+    New.className = 'secbtn primary';
+    New.textContent = 'New';
+    New.title = `Start ${a.name} in ${p.name}`;
+    New.onclick = (e) => {
+        e.stopPropagation();
+        ctx.closeMenu();
+        ctx.spawn(p.path, a.name, null);
+    };
+    row.appendChild(New);
+
+    const resume = document.createElement('button');
+    resume.type = 'button';
+    resume.className = 'secbtn';
+    resume.textContent = 'Resume';
+    // Two different reasons it may be off, and they deserve different words:
+    // the agent has no picker of its own, or it has one but nothing to show.
+    resume.disabled = !a.can_pick || !here;
+    resume.title = !a.can_pick
+        ? `${a.name} cannot list its own sessions`
+        : here
+          ? `Let ${a.name} show its sessions here`
+          : `${a.name} has no sessions in ${p.name} yet`;
+    resume.onclick = (e) => {
+        e.stopPropagation();
+        ctx.closeMenu();
+        ctx.spawn(p.path, a.name, null, true);
+    };
+    row.appendChild(resume);
+
+    return row;
 }
 
 function looseRow(ctx, t) {
