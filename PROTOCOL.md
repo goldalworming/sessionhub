@@ -91,6 +91,7 @@ The answer is `{"t":"dropped",…}`, or `error` with the code `drop_failed`.
 {"t":"remove_agent","name":"pi"}
 {"t":"browse","path":"C:\\data\\code"}
 {"t":"make_dir","parent":"C:\\data\\code","name":"new-project"}
+{"t":"make_entry","parent":"C:\\data\\code\\notex\\src","name":"lib.rs","dir":false}
 {"t":"add_project","path":"C:\\data\\code\\new-project"}
 {"t":"remove_project","path":"C:\\data\\code\\new-project"}
 {"t":"tree","path":"C:\\data\\code\\notex"}
@@ -112,6 +113,19 @@ The answer is `{"t":"dropped",…}`, or `error` with the code `drop_failed`.
 - `set_agent` and `set_lan_access` write to `config.toml` and are then always
   answered with the latest `config`, so a client never has to guess what was
   stored.
+- `make_entry` creates one empty file or one folder for the file panel and answers
+  `made` with the new path and its parent; the panel then asks for that parent
+  again, so the daemon's own listing — which is also the one that sorts — stays
+  the single truth. `make_dir` is the folder picker's older, separate message and
+  answers with a `dir` listing instead.
+- A name is one component and is checked before anything touches the disk: no
+  `\`, `/`, `:`, no `.` or `..`, none of `< > " | ? *`. A client cannot write
+  outside the folder it named. The file is created with `create_new`, so an
+  existing one is never truncated by a second attempt.
+- `tree` answers carry `can_make`, which says this daemon understands
+  `make_entry`. It rides on the folder listing rather than on `config` because
+  the file panel can be pointed at another machine, and then it is that daemon's
+  age that decides. Absent means no, and the panel offers no way to create.
 - `set_agent` with a name that does not exist yet **creates** a new agent — this is
   how you add your own harness. New names are filtered (`[a-z][a-z0-9_-]*`, at most
   24 letters); names that already exist in the config are not filtered, so that a

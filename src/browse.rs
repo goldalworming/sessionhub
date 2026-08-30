@@ -78,20 +78,40 @@ pub fn list(path: &str, projects: &[String]) -> Result<DirList, String> {
 
 /// Create a folder inside `parent`. Returns its path.
 pub fn make_dir(parent: &str, name: &str) -> Result<PathBuf, String> {
+    make_entry(parent, name, true)
+}
+
+/// A name typed by a person, checked before it is allowed anywhere near the
+/// disk. It must be **one component**: a client that could call its new file
+/// `..\..\thing` would be writing outside the folder it named, which is the
+/// whole risk in taking a name over the wire at all.
+fn check_name<'a>(name: &'a str, what: &str) -> Result<&'a str, String> {
     let name = name.trim();
     if name.is_empty() {
-        return Err("Give the folder a name.".into());
+        return Err(format!("Give the {what} a name."));
     }
-    // A name from a client is not a path: one component, never crossing out.
     if name.contains(['/', '\\', ':']) || Path::new(name).components().count() != 1 {
-        return Err("A folder name cannot contain \\ / or :".into());
+        return Err(format!("A {what} name cannot contain \\ / or :"));
     }
     if name == "." || name == ".." {
-        return Err("That is not a folder name.".into());
+        return Err(format!("That is not a {what} name."));
     }
     if name.contains(['<', '>', '"', '|', '?', '*']) {
-        return Err("A folder name cannot contain < > \" | ? *".into());
+        return Err(format!("A {what} name cannot contain < > \" | ? *"));
     }
+    Ok(name)
+}
+
+/// Create one folder or one empty file inside `parent`, and say where it is.
+///
+/// The file is created with `create_new`, which is atomic: two clients racing
+/// cannot both believe they made it, and an existing file is never truncated.
+/// The folder check is `exists()` first because `create_dir` alone would report
+/// the same error for "already there" and for "the disk said no", and those
+/// deserve different words.
+pub fn make_entry(parent: &str, name: &str, dir: bool) -> Result<PathBuf, String> {
+    let what = if dir { "folder" } else { "file" };
+    let name = check_name(name, what)?;
 
     let base = normalize(parent);
     if !base.is_dir() {
@@ -101,7 +121,15 @@ pub fn make_dir(parent: &str, name: &str) -> Result<PathBuf, String> {
     if full.exists() {
         return Err(format!("`{name}` already exists here."));
     }
-    fs::create_dir(&full).map_err(|e| format!("Could not create `{name}`: {e}"))?;
+    if dir {
+        fs::create_dir(&full).map_err(|e| format!("Could not create `{name}`: {e}"))?;
+    } else {
+        fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&full)
+            .map_err(|e| format!("Could not create `{name}`: {e}"))?;
+    }
     Ok(full)
 }
 
@@ -226,7 +254,29 @@ mod tests {
     fn folder_names_cannot_be_paths() {
         for bad in ["", "  ", "..", ".", "a/b", "a\\b", "C:", "x<y", "q|r"] {
             assert!(make_dir(".", bad).is_err(), "{bad:?} seharusnya ditolak");
+            assert!(make_entry(".", bad, false).is_err(), "{bad:?} juga untuk berkas");
         }
+    }
+
+    /// The two halves of creating a file: it appears, and a second attempt does
+    /// not quietly empty the first one.
+    #[test]
+    fn a_new_file_is_created_once_and_never_overwritten() {
+        let dir = std::env::temp_dir().join(format!("sh-make-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let parent = dir.to_string_lossy().into_owned();
+
+        let made = make_entry(&parent, "notes.md", false).expect("file dibuat");
+        assert!(made.is_file());
+        fs::write(&made, b"isi").unwrap();
+
+        assert!(make_entry(&parent, "notes.md", false).is_err(), "yang kedua ditolak");
+        assert_eq!(fs::read(&made).unwrap(), b"isi", "isinya tidak boleh hilang");
+
+        let sub = make_entry(&parent, "sub", true).expect("folder dibuat");
+        assert!(sub.is_dir());
+
+        fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

@@ -2138,6 +2138,29 @@ sidePanel = new SidePanel(el.side, {
     syncScope();
   },
   theme: () => (document.documentElement.dataset.theme === 'dark' ? 'dark' : 'light'),
+  // The same context menu as the sidebar and the folder picker, so the explorer
+  // does not grow a third one that drifts.
+  menu: (x, y, items) => openMenu(x, y, items),
+  make: {
+    ask: (dir, folder) =>
+      ask.show({
+        title: dir ? 'New folder' : 'New file',
+        // A file usually wants its extension typed, so nothing is prefilled;
+        // the note says where it will land, which is the thing that is easy to
+        // get wrong when the tree is deep.
+        value: '',
+        note: `In ${folder}`,
+        ok: 'Create',
+      }),
+    send: (parent, name, dir) => conn.send({ t: 'make_entry', parent, name, dir }),
+  },
+  /// A shell in the folder that was right-clicked. Deliberately not routed
+  /// through `add_project`: a folder inside a project is not a project of its
+  /// own, and the sidebar should not fill up with subdirectories.
+  shell: (path) => {
+    spawn(path, 'terminal', null);
+    closeDrawerIfNarrow();
+  },
   /// Which machine the open files belong to. The image viewer fetches over HTTP
   /// rather than the socket, so it is the one thing that has to be told.
   via: () => current?.via || '',
@@ -2174,6 +2197,7 @@ const sidePane = {
 };
 
 conn.on.onTree = (msg) => sidePanel.tree.update(msg);
+conn.on.onMade = (msg) => sidePanel.tree.made(msg);
 conn.on.onFile = (msg) => sidePanel.openFile(msg);
 conn.on.onSaved = (msg) => {
   sidePanel.editor.saved(msg.path);

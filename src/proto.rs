@@ -77,10 +77,18 @@ pub enum ClientMsg {
         #[serde(default)]
         path: String,
     },
-    /// Create a folder, then step into it.
+    /// Create a folder, then step into it. The folder picker's own message; the
+    /// file panel uses `make_entry`, which answers with the tree's shape.
     MakeDir {
         parent: String,
         name: String,
+    },
+    /// Create one empty file or one folder from the file panel.
+    MakeEntry {
+        parent: String,
+        name: String,
+        /// `true` for a folder, `false` for an empty file.
+        dir: bool,
     },
     /// Make a folder a project, and save it to `config.toml`.
     AddProject {
@@ -416,6 +424,14 @@ pub enum ServerMsg {
     Dir(DirList),
     /// One folder's contents for the file panel.
     Tree(TreeList),
+    /// What `make_entry` created. The panel then asks for the parent folder
+    /// again and opens or expands what came back — rather than this message
+    /// carrying a listing that the tree would have to merge by hand.
+    Made {
+        path: String,
+        parent: String,
+        is_dir: bool,
+    },
     /// One file's contents.
     File(FileBody),
     /// The file is saved; the new `modified_ms` is how a client knows its copy
@@ -531,6 +547,13 @@ pub struct TreeList {
     pub entries: Vec<FileEntry>,
     /// `true` when the folder was too full and the list was cut.
     pub truncated: bool,
+    /// That this daemon understands `make_entry`. Read the same way `can_move`
+    /// is: absent means no, and the panel offers no way to create anything.
+    ///
+    /// It rides on the folder listing rather than on `config`, because the
+    /// panel can be pointed at another machine — and then it is *that* daemon,
+    /// the one that answered this listing, whose age decides.
+    pub can_make: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]

@@ -80,6 +80,9 @@ export class SidePanel {
       root: on.root,
       projects: on.projects,
       pick: on.pick,
+      menu: on.menu,
+      make: on.make,
+      shell: on.shell,
     });
     this.editor = new Editor(this.body, {
       save: on.save,

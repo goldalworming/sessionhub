@@ -616,6 +616,27 @@ pub fn run(cfg: Config, rx: Receiver<Cmd>, tx: Sender<Cmd>, registry_cfg: Sender
                     });
                 }
 
+                ClientMsg::MakeEntry { parent, name, dir } => {
+                    let Some(out) = clients.get(&id).map(|c| c.tx.clone()) else { continue };
+                    // On its own thread for the same reason browsing is: a slow
+                    // or sleeping disk must not stop every other terminal.
+                    std::thread::spawn(move || {
+                        let msg = match crate::browse::make_entry(&parent, &name, dir) {
+                            Ok(p) => ServerMsg::Made {
+                                path: p.to_string_lossy().into_owned(),
+                                parent: crate::browse::normalize(&parent)
+                                    .to_string_lossy()
+                                    .into_owned(),
+                                is_dir: dir,
+                            },
+                            Err(e) => ServerMsg::Error { code: "make_failed".into(), message: e },
+                        };
+                        if let Ok(text) = serde_json::to_string(&msg) {
+                            let _ = out.try_send(Out::Text(text));
+                        }
+                    });
+                }
+
                 ClientMsg::AddProject { path } => {
                     let path = path.trim().to_string();
                     match std::fs::metadata(&path) {

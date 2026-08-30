@@ -105,6 +105,7 @@ export class Conn {
         dropped: 'onDropped',
         dir: 'onDir',
         tree: 'onTree',
+        made: 'onMade',
         file: 'onFile',
         saved: 'onSaved',
         last_command: 'onLastCommand',

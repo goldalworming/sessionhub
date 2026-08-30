@@ -57,7 +57,12 @@ pub fn list(path: &str) -> Result<TreeList, String> {
             .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
     });
 
-    Ok(TreeList { path: dir.to_string_lossy().into_owned(), entries, truncated })
+    Ok(TreeList {
+        path: dir.to_string_lossy().into_owned(),
+        entries,
+        truncated,
+        can_make: true,
+    })
 }
 
 /// Read one file to show in the editor.
@@ -120,8 +125,9 @@ pub fn is_image(path: &Path) -> bool {
     matches!(ext.as_str(), "png" | "jpg" | "jpeg" | "gif" | "webp" | "avif" | "bmp" | "ico")
 }
 
-/// Write an existing file back. Deliberately refuses to create a new one: this
-/// panel is a viewer and an editor, not a file manager.
+/// Write an existing file back. Deliberately refuses to create a new one:
+/// saving is for a file you are looking at, and a typo in a path must not
+/// silently leave a new file behind. Creating is its own act — `make_entry`.
 pub fn write(path: &str, text: &str) -> Result<u64, String> {
     let file = crate::browse::normalize(path);
     let meta = fs::metadata(&file).map_err(|e| format!("Cannot open {}: {e}", file.display()))?;
