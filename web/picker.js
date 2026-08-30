@@ -5,14 +5,18 @@
 // folders that make sense are over there too — and this is exactly what makes
 // it useful from a phone.
 
+import { agentMenuRows } from './sidebar.js';
+
 export class Picker {
   /// `on.browse(path)` asks for a folder's contents, `on.mkdir(parent, name)`
   /// creates one and steps in, `on.add(path)` makes it a project,
   /// `on.remove(path)` takes it out again.
   ///
   /// `on.agents()` names the agents that can be offered, and
-  /// `on.openWith(path, agent, isProject)` starts one in the folder — adding it
-  /// as a project first when it is not one yet. `on.menu(x, y, items)` shows
+  /// `on.openWith(path, agent, isProject, {pick, resume})` starts one in the
+  /// folder — adding it as a project first when it is not one yet.
+  /// `on.sessionsFor(path)` and `on.liveIn(path)` tell the agent rows what
+  /// history and what running terminal the folder already has. `on.menu(x, y, items)` shows
   /// the app's context menu; the picker brings the choices, not the menu.
   ///
   /// `on.recall()` returns the folder last opened and `on.remember` stores it —
@@ -245,21 +249,29 @@ export class Picker {
     }
     const r = e.currentTarget.getBoundingClientRect();
     const { path, is_project } = this.dir;
+    // The very rows the ＋ on a sidebar project opens, built by the same
+    // function. This menu answers the same question — which agent, here — and
+    // when it had a list of its own the two drifted apart: the sidebar grew a
+    // row per agent with New and Resume side by side while this one still
+    // offered `New claude` / `Resume claude…` as separate lines.
+    //
+    // A folder already in the sidebar brings its history along, so the counts
+    // and a working Resume appear here too. One that is not a project yet has
+    // none, and every Resume says so rather than pretending.
     this.on.menu(
       r.left,
       r.bottom + 4,
-      agents.flatMap((a) => {
-        const start = (pick) => () => {
-          this.note.textContent = `Starting ${a.name}…`;
-          this.on.openWith(path, a.name, is_project, pick);
-        };
-        const rows = [{ label: `New ${a.name}`, run: start(false) }];
-        // An agent that can show its own session list says so; the rest cannot
-        // be asked.
-        if (a.can_pick) {
-          rows.push({ label: `Resume ${a.name}…`, run: start(true) });
-        }
-        return rows;
+      agentMenuRows({
+        agents,
+        sessions: this.on.sessionsFor(path),
+        live: this.on.liveIn(path),
+        where: path.split(/[\\/]/).filter(Boolean).pop() || path,
+        closeMenu: () => this.on.closeMenu(),
+        openSettings: () => this.on.openSettings('agents'),
+        start: (agent, o) => {
+          this.note.textContent = `Starting ${agent}…`;
+          this.on.openWith(path, agent, is_project, o);
+        },
       }),
     );
   }

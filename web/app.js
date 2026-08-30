@@ -2261,16 +2261,24 @@ const picker = new Picker(document.body, {
   // daemon only ever sends the enabled ones, so no filtering here either.
   agents: () => state.agents,
   menu: (x, y, items) => openMenu(x, y, items),
+  closeMenu: () => closeMenu(),
+  openSettings: (section) => openSettings(section),
+  // What the picker cannot know on its own: a folder it is looking at may
+  // already be a project with history, and then its agent rows should show the
+  // same counts and offer the same Resume as the sidebar does.
+  sessionsFor: (path) => (state.projects.find((p) => p.path === path) || {}).sessions || [],
+  liveIn: (path) => state.terminals.filter((t) => t.alive && t.project === path).map((t) => t.agent),
   // Choosing an agent from the picker: what the dialog was really opened for.
   // Adding the project is bookkeeping that comes along — through the same
   // `add_project` path as the add-only button, so the reveal-in-sidebar and
   // the error handling that path already has keep working.
-  openWith: (path, agent, isProject, pick) => {
+  openWith: (path, agent, isProject, o) => {
     if (!isProject) {
       awaitingProject = path;
       conn.send({ t: 'add_project', path });
     }
-    spawn(path, agent, null, pick);
+    if (o.resume) spawn(path, agent, o.resume);
+    else spawn(path, agent, null, !!o.pick);
     picker.close();
   },
 });

@@ -406,7 +406,7 @@ fn merge_paths(first: &str, second: &str) -> String {
     seen.join(":")
 }
 
-/// Candidate file names: as given first, then every extension in PATHEXT.
+/// Candidate file names: every extension in PATHEXT, then the bare name.
 fn with_extensions(base: &Path) -> impl Iterator<Item = PathBuf> + '_ {
     let exts: Vec<String> = if cfg!(windows) {
         std::env::var("PATHEXT")
@@ -422,11 +422,23 @@ fn with_extensions(base: &Path) -> impl Iterator<Item = PathBuf> + '_ {
     } else {
         Vec::new()
     };
-    std::iter::once(base.to_path_buf()).chain(exts.into_iter().map(move |ext| {
-        let mut s = base.as_os_str().to_os_string();
-        s.push(ext);
-        PathBuf::from(s)
-    }))
+    // On Windows the extensions are tried FIRST, and the bare name only as a
+    // last resort. npm installs three files side by side — `opencode` (a shell
+    // script, for unix), `opencode.cmd` and `opencode.ps1` — and the
+    // extensionless one is a real file that passes `is_file()` while
+    // `CreateProcessW` cannot run it at all: "%1 is not a valid Win32
+    // application". Taking it first is what made opencode unstartable here
+    // while `opencode` worked perfectly in any shell.
+    //
+    // On unix `exts` is empty, so this is exactly the bare name and nothing
+    // changes.
+    exts.into_iter()
+        .map(move |ext| {
+            let mut s = base.as_os_str().to_os_string();
+            s.push(ext);
+            PathBuf::from(s)
+        })
+        .chain(std::iter::once(base.to_path_buf()))
 }
 
 /// Terminal capabilities are announced by the emulator, and here the emulator is
@@ -594,6 +606,28 @@ mod tests {
     fn resolves_absolute_path_without_touching_path_env() {
         let me = std::env::current_exe().unwrap();
         assert_eq!(resolve_command(me.to_str().unwrap()), Some(me));
+    }
+
+    /// The order the candidates are tried in, which is the whole of the opencode
+    /// bug: npm lays down `opencode` (a unix sh script), `opencode.cmd` and
+    /// `opencode.ps1` in one directory. All three are files, so whichever comes
+    /// first wins — and the extensionless one cannot be started by Windows at
+    /// all. The extensions must come first and the bare name last.
+    #[test]
+    fn windows_tries_the_extensions_before_the_bare_name() {
+        let names: Vec<String> = with_extensions(Path::new("C:/npm/opencode"))
+            .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        if cfg!(windows) {
+            assert!(names.len() > 1, "PATHEXT produced no candidates: {names:?}");
+            assert_eq!(names.last().map(String::as_str), Some("opencode"));
+            let cmd = names.iter().position(|n| n == "opencode.cmd");
+            let bare = names.iter().position(|n| n == "opencode");
+            assert!(cmd < bare, "the .cmd must be tried before the bare name: {names:?}");
+        } else {
+            // Nothing to add on unix, and nothing to reorder.
+            assert_eq!(names, vec!["opencode".to_string()]);
+        }
     }
 
     #[test]

@@ -725,8 +725,35 @@ function startRename(ctx, item, title, s) {
 /// it has no history to resume, and a Resume button greyed out beside it would
 /// only raise the question of why.
 function startMenu(ctx, p) {
-    const shell = ctx.state.agents.find((a) => a.name === 'terminal');
-    const agents = ctx.state.agents.filter((a) => a.name !== 'terminal');
+  return agentMenuRows({
+    agents: ctx.state.agents,
+    sessions: p.sessions,
+    live: ctx.state.terminals.filter((t) => t.alive && t.project === p.path).map((t) => t.agent),
+    where: p.name,
+    closeMenu: () => ctx.closeMenu(),
+    openSettings: () => ctx.openSettings('agents'),
+    start: (agent, o) => {
+      if (o.resume) ctx.spawn(p.path, agent, o.resume);
+      else ctx.spawn(p.path, agent, null, !!o.pick);
+    },
+  });
+}
+
+/// The rows themselves, apart from where they are opened from.
+///
+/// Exported because the folder picker offers the same choice — "open an agent
+/// here" — and had grown its own flat list of `New claude` / `Resume claude…`
+/// lines. Two lists answering one question drift, and this one had: the sidebar
+/// gained rows with both buttons while the picker kept the old shape.
+///
+/// `sessions` may be empty, which is the picker's usual case: a folder that is
+/// not a project yet has no history, so every Resume is off and says why.
+export function agentMenuRows(o) {
+  const { agents, start, closeMenu, openSettings } = o;
+  const shell = agents.find((a) => a.name === 'terminal');
+  const list = agents.filter((a) => a.name !== 'terminal');
+  const sessions = o.sessions || [];
+  const live = o.live || [];
     // Every new config.toml enables claude, opencode and pi, so a machine with
     // one of them installed was offered all three — and a row with two buttons
     // for something that cannot start is worse than a line of text was. Agents
@@ -735,117 +762,126 @@ function startMenu(ctx, p) {
     // `found === false` and not `!found`: a daemon too old to send the field
     // leaves it undefined, and there the old behaviour — show everything — is
     // the right guess.
-    const missing = agents.filter((a) => a.found === false);
-    const rows = agents
-        .filter((a) => a.found !== false)
-        .map((a, i) => ({ node: agentRow(ctx, p, a, i) }));
+  const missing = list.filter((a) => a.found === false);
+  const rows = list
+    .filter((a) => a.found !== false)
+    .map((a, i) => ({
+      node: agentRow(a, i, {
+        sessions,
+        where: o.where,
+        live: live.includes(a.name),
+        start,
+        closeMenu,
+      }),
+    }));
 
-    // Nothing vanishes without a word. One quiet line says how many, and the
-    // place that can fix or disable them is one click away.
-    if (missing.length) {
-        rows.push({
-            label: `${missing.length} not installed`,
-            hint: missing.map((a) => a.name).join(', '),
-            dot: true,
-            run: () => ctx.openSettings('agents'),
-        });
-    }
+  // Nothing vanishes without a word. One quiet line says how many, and the
+  // place that can fix or disable them is one click away.
+  if (missing.length) {
+    rows.push({
+      label: `${missing.length} not installed`,
+      hint: missing.map((a) => a.name).join(', '),
+      dot: true,
+      run: () => openSettings(),
+    });
+  }
 
-    if (shell) {
-        rows.push({ sep: true });
-        rows.push({
-            label: 'New terminal',
-            hint: 'shell',
-            // A dot like the agents above have, so the four rows share one left
-            // edge. Colourless, because a shell is not an agent and has no
-            // identity to carry — the alignment is the whole point.
-            dot: true,
-            run: () => ctx.spawn(p.path, shell.name, null),
-        });
-    }
-    return rows;
+  if (shell) {
+    rows.push({ sep: true });
+    rows.push({
+      label: 'New terminal',
+      hint: 'shell',
+      // A dot like the agents above have, so the four rows share one left
+      // edge. Colourless, because a shell is not an agent and has no
+      // identity to carry — the alignment is the whole point.
+      dot: true,
+      run: () => start(shell.name, {}),
+    });
+  }
+  return rows;
 }
 
 /// One agent: what history it has here, and the two buttons.
-function agentRow(ctx, p, a, slot) {
-    const here = p.sessions.filter((s) => s.agent === a.name).length;
-    const live = ctx.state.terminals.some(
-        (t) => t.alive && t.agent === a.name && t.project === p.path,
-    );
+///
+/// Takes plain values rather than the sidebar's context, so the picker — which
+/// has no project, no terminal list and no spawn of its own — can build the
+/// very same row for a folder it is only looking at.
+function agentRow(a, slot, o) {
+  const mine = o.sessions.filter((s) => s.agent === a.name);
+  const here = mine.length;
 
-    const row = el('div', 'magent');
+  const row = el('div', 'magent');
 
-    const dot = el('span', 'dot' + (live ? ' live' : ''));
-    // Colour by position, so an agent keeps the same one across every project
-    // and can be recognised without reading. The palette is in the stylesheet.
-    if (!live) dot.dataset.slot = String(slot % 6);
-    dot.title = live ? `${a.name} is running here` : '';
-    row.appendChild(dot);
+  const dot = el('span', 'dot' + (o.live ? ' live' : ''));
+  // Colour by position, so an agent keeps the same one across every project
+  // and can be recognised without reading. The palette is in the stylesheet.
+  if (!o.live) dot.dataset.slot = String(slot % 6);
+  dot.title = o.live ? `${a.name} is running here` : '';
+  row.appendChild(dot);
 
-    row.appendChild(el('span', 'maname', a.name));
+  row.appendChild(el('span', 'maname', a.name));
 
-    const count = el(
-        'span',
-        'macount' + (here ? '' : ' none'),
-        here ? `${here} session${here === 1 ? '' : 's'}` : 'no history here',
-    );
-    row.appendChild(count);
+  const count = el(
+    'span',
+    'macount' + (here ? '' : ' none'),
+    here ? `${here} session${here === 1 ? '' : 's'}` : 'no history here',
+  );
+  row.appendChild(count);
 
-    const New = document.createElement('button');
-    New.type = 'button';
-    New.className = 'secbtn primary';
-    New.textContent = 'New';
-    New.title = `Start ${a.name} in ${p.name}`;
-    New.onclick = (e) => {
-        e.stopPropagation();
-        ctx.closeMenu();
-        ctx.spawn(p.path, a.name, null);
-    };
-    row.appendChild(New);
+  const New = document.createElement('button');
+  New.type = 'button';
+  New.className = 'secbtn primary';
+  New.textContent = 'New';
+  New.title = `Start ${a.name} in ${o.where}`;
+  New.onclick = (e) => {
+    e.stopPropagation();
+    o.closeMenu();
+    o.start(a.name, {});
+  };
+  row.appendChild(New);
 
-    const resume = document.createElement('button');
-    resume.type = 'button';
-    resume.className = 'secbtn';
-    resume.textContent = 'Resume';
-    // Resume means "carry on here", and there are two ways to get there.
-    //
-    // An agent with a picker of its own is handed the choice — claude's
-    // `--resume` with no value opens its list, and recognising a conversation
-    // there beats reading a title and a date. An agent without one is not out
-    // of luck: sessionhub knows the ids, so the newest session in this project
-    // is opened directly. opencode is the case that made this necessary — its
-    // `--help` has `-s/--session <id>` and `-c/--continue`, and no picker flag
-    // at all, so the button was permanently dead for it while resuming a named
-    // session from the history worked perfectly well.
-    const newest = here
-        ? p.sessions
-              .filter((s) => s.agent === a.name)
-              .reduce((best, s) =>
-                  !best || Date.parse(s.updated_at) > Date.parse(best.updated_at) ? s : best,
-              null)
-        : null;
-    // Off whenever this project has no history, whatever the agent can do.
-    // Offering Resume beside the words "no history here" contradicts the row
-    // itself, and an agent handed its own resume flag with nothing to resume
-    // gets to explain that in its own words, which is worse than not asking.
-    resume.disabled = !here;
-    resume.title = !here
-        ? `${a.name} has nothing to carry on in ${p.name}`
-        : a.can_pick
-          ? // Deliberately not "show its sessions": claude opens a list, opencode
-            // takes the last one with `--continue`. Both are "carry on", and the
-            // flag itself is the agent's business, not this row's.
-            `Let ${a.name} pick up where it left off here`
-          : `Carry on the newest ${a.name} session here — it cannot resume on its own`;
-    resume.onclick = (e) => {
-        e.stopPropagation();
-        ctx.closeMenu();
-        if (a.can_pick) ctx.spawn(p.path, a.name, null, true);
-        else if (newest) ctx.spawn(p.path, a.name, newest.session_id);
-    };
-    row.appendChild(resume);
+  const resume = document.createElement('button');
+  resume.type = 'button';
+  resume.className = 'secbtn';
+  resume.textContent = 'Resume';
+  // Resume means "carry on here", and there are two ways to get there.
+  //
+  // An agent with a picker of its own is handed the choice — claude's
+  // `--resume` with no value opens its list, and recognising a conversation
+  // there beats reading a title and a date. An agent without one is not out
+  // of luck: sessionhub knows the ids, so the newest session in this project
+  // is opened directly. opencode is the case that made this necessary — its
+  // `--help` has `-s/--session <id>` and `-c/--continue`, and no picker flag
+  // at all, so the button was permanently dead for it while resuming a named
+  // session from the history worked perfectly well.
+  const newest = here
+    ? mine.reduce(
+        (best, s) => (!best || Date.parse(s.updated_at) > Date.parse(best.updated_at) ? s : best),
+        null,
+      )
+    : null;
+  // Off whenever this folder has no history, whatever the agent can do.
+  // Offering Resume beside the words "no history here" contradicts the row
+  // itself, and an agent handed its own resume flag with nothing to resume
+  // gets to explain that in its own words, which is worse than not asking.
+  resume.disabled = !here;
+  resume.title = !here
+    ? `${a.name} has nothing to carry on in ${o.where}`
+    : a.can_pick
+      ? // Deliberately not "show its sessions": claude opens a list, opencode
+        // takes the last one with `--continue`. Both are "carry on", and the
+        // flag itself is the agent's business, not this row's.
+        `Let ${a.name} pick up where it left off here`
+      : `Carry on the newest ${a.name} session here — it cannot resume on its own`;
+  resume.onclick = (e) => {
+    e.stopPropagation();
+    o.closeMenu();
+    if (a.can_pick) o.start(a.name, { pick: true });
+    else if (newest) o.start(a.name, { resume: newest.session_id });
+  };
+  row.appendChild(resume);
 
-    return row;
+  return row;
 }
 
 function looseRow(ctx, t, inGroup) {
