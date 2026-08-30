@@ -360,6 +360,20 @@ impl Default for Drops {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Agent {
     pub command: String,
+    /// Arguments this agent always takes, before every other kind.
+    ///
+    /// `command` is a program, not a command line: it goes to `CreateProcessW`
+    /// as the name of a file to run, so `omp --autoapprove` there is looked up
+    /// as one file with a space and a dash in its name, and of course never
+    /// found. An agent that must always be started with a flag had nowhere to
+    /// put it — this is that place.
+    ///
+    /// Prefixed to resuming, forking and the agent's own picker alike, since it
+    /// is part of how the command is invoked at all. Not to `update_args`: an
+    /// updater is a different job, and a flag meant for a session has no
+    /// business in it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub args: Vec<String>,
     #[serde(default)]
     pub resume_args: Vec<String>,
     /// Extra environment for this agent. Applied last, so it can override
@@ -619,6 +633,7 @@ fn default_agents() -> BTreeMap<String, Agent> {
         "claude".into(),
         Agent {
             command: "claude".into(),
+            args: Vec::new(),
             resume_args: vec!["--resume".into(), "{session_id}".into()],
             env: BTreeMap::new(),
             enabled: true,
@@ -631,6 +646,7 @@ fn default_agents() -> BTreeMap<String, Agent> {
         "opencode".into(),
         Agent {
             command: "opencode".into(),
+            args: Vec::new(),
             resume_args: vec!["-s".into(), "{session_id}".into()],
             env: BTreeMap::new(),
             enabled: true,
@@ -643,6 +659,7 @@ fn default_agents() -> BTreeMap<String, Agent> {
         "pi".into(),
         Agent {
             command: "pi".into(),
+            args: Vec::new(),
             resume_args: vec!["--session".into(), "{session_id}".into()],
             env: BTreeMap::new(),
             enabled: true,
@@ -740,6 +757,7 @@ pub fn load_or_create() -> io::Result<Config> {
             TERMINAL_AGENT.to_string(),
             Agent {
                 command: default_shell(),
+                args: Vec::new(),
                 resume_args: Vec::new(),
                 env: BTreeMap::new(),
                 enabled: true,
@@ -767,6 +785,43 @@ pub fn load_or_create() -> io::Result<Config> {
             agent.picker_args = Some(known_picker_args(name));
             filled_fork = true;
         }
+    }
+
+    // A command line written where a program was wanted.
+    //
+    // `command = "omp --autoapprove"` is the natural thing to type and it can
+    // never work: the string is handed to the OS as a file name, so it is looked
+    // for as one file called `omp --autoapprove`. Before `args` existed there
+    // was nowhere else to put the flag, so the config on disk may well hold one.
+    // Rather than leave the agent permanently broken with only a red line to
+    // explain it, the flags are moved across.
+    //
+    // Deliberately narrow, because a path with a space in it must never be cut
+    // in two: only when the whole string does not resolve, the first word does,
+    // every remaining word begins with `-`, and `args` is still empty.
+    for (name, agent) in cfg.agents.iter_mut() {
+        if !agent.args.is_empty() || !agent.command.contains(' ') {
+            continue;
+        }
+        let mut words = agent.command.split_whitespace();
+        let Some(program) = words.next() else { continue };
+        let rest: Vec<String> = words.map(|w| w.to_string()).collect();
+        if rest.is_empty() || !rest.iter().all(|w| w.starts_with('-')) {
+            continue;
+        }
+        if crate::pty::resolve_command(&agent.command).is_some()
+            || crate::pty::resolve_command(program).is_none()
+        {
+            continue;
+        }
+        tracing::info!(
+            agent = %name,
+            command = %agent.command,
+            "the command held flags; moving them into `args`"
+        );
+        agent.command = program.to_string();
+        agent.args = rest;
+        filled_fork = true;
     }
 
     // Then the corrections, once each. See `Config::applied`.
@@ -915,6 +970,7 @@ mod tests {
         // clicking "New terminal" send a flag the shell does not understand.
         let a = Agent {
             command: default_shell(),
+            args: Vec::new(),
             resume_args: Vec::new(),
             env: BTreeMap::new(),
             enabled: true,
@@ -1033,10 +1089,70 @@ mod tests {
         assert!(cf.ready());
     }
 
+    /// `command` is a program, not a command line — a flag written into it is
+    /// looked up as part of the file name and never found. `args` is where it
+    /// goes, and an older config that has never heard of the field must still
+    /// load.
+    #[test]
+    fn start_arguments_survive_a_write_and_an_older_config_still_loads() {
+        let toml = r#"
+port = 7777
+token = "t"
+
+[agents.omp]
+command = "omp"
+args = ["--autoapprove"]
+resume_args = ["--resume"]
+"#;
+        let cfg: Config = toml::from_str(toml).expect("config parses");
+        assert_eq!(cfg.agents["omp"].args, vec!["--autoapprove".to_string()]);
+
+        let written = toml::to_string(&cfg).expect("config serialises");
+        let again: Config = toml::from_str(&written).expect("what was written parses back");
+        assert_eq!(again.agents["omp"].args, vec!["--autoapprove".to_string()]);
+
+        // The field is skipped when empty, so a config written before it existed
+        // is not rewritten with noise — and one still loads.
+        let older = r#"
+port = 7777
+token = "t"
+
+[agents.claude]
+command = "claude"
+resume_args = ["--resume", "{session_id}"]
+"#;
+        let cfg: Config = toml::from_str(older).expect("a config without `args` parses");
+        assert!(cfg.agents["claude"].args.is_empty());
+        assert!(
+            !toml::to_string(&cfg).unwrap().contains("args = []"),
+            "an empty list must not be written out"
+        );
+    }
+
+    /// The narrowness of the command-line split. A path with a space in it is
+    /// the case that must never be cut, and it is common on Windows.
+    #[test]
+    fn a_path_with_a_space_is_not_mistaken_for_a_command_line() {
+        let looks_splittable = |command: &str| {
+            let mut words = command.split_whitespace();
+            let program = words.next().unwrap_or_default();
+            let rest: Vec<&str> = words.collect();
+            !rest.is_empty()
+                && rest.iter().all(|w| w.starts_with('-'))
+                && !program.is_empty()
+        };
+        assert!(looks_splittable("omp --autoapprove"));
+        assert!(looks_splittable("claude --dangerously-skip-permissions"));
+        assert!(!looks_splittable(r"C:\Program Files\thing\agent.exe"));
+        assert!(!looks_splittable("agent serve"));
+        assert!(!looks_splittable("claude"));
+    }
+
     #[test]
     fn fork_capability_comes_from_the_arguments_themselves() {
         let mut a = Agent {
             command: "x".into(),
+            args: Vec::new(),
             resume_args: vec![],
             env: BTreeMap::new(),
             enabled: true,

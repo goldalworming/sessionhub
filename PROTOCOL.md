@@ -85,7 +85,7 @@ The answer is `{"t":"dropped",…}`, or `error` with the code `drop_failed`.
 {"t":"kill","id":3}
 {"t":"mem"}
 {"t":"config"}
-{"t":"set_agent","name":"claude","command":"claude",
+{"t":"set_agent","name":"claude","command":"claude","args":[],
  "resume_args":["--resume","{session_id}"],
  "fork_args":["--resume","{session_id}","--fork-session"],"enabled":true}
 {"t":"remove_agent","name":"pi"}
@@ -116,6 +116,13 @@ The answer is `{"t":"dropped",…}`, or `error` with the code `drop_failed`.
   how you add your own harness. New names are filtered (`[a-z][a-z0-9_-]*`, at most
   24 letters); names that already exist in the config are not filtered, so that a
   newly introduced rule does not lock up an old setup.
+- `command` names a **program**, never a command line — it is handed to the OS as
+  the name of a file to run, so `omp --autoapprove` there is looked up as one file
+  with a space in its name. Flags that agent always needs go in `args`, which is
+  prefixed to resuming, forking and the agent's own picker alike. Not to
+  `update_args`: an updater is a different job. An omitted `args` means "do not
+  touch what is stored", so a client that has never heard of the field cannot
+  erase it.
 - An omitted `fork_args` means "do not touch what is stored"; an empty list means
   that agent genuinely cannot fork. A new agent starts from an empty list, not from
   a guess.

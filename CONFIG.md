@@ -35,7 +35,7 @@ resume_args = ["--session", "{session_id}"]
 command = "powershell.exe"
 ```
 
-The **⚙ Settings** button at the bottom left of the sidebar edits this file from the browser. You can add an agent, remove it, enable or disable it, change its command, and edit resume and fork arguments. The panel also checks each command on PATH and shows the result. So an agent that is not installed yet is caught right there — not only when a spawn fails.
+The **⚙ Settings** button at the bottom left of the sidebar edits this file from the browser. You can add an agent, remove it, enable or disable it, change its command, and edit its start, resume and fork arguments. The panel also checks each command on PATH and shows the result. So an agent that is not installed yet is caught right there — not only when a spawn fails.
 
 A disabled agent disappears from the `+` menu. It is rejected when spawned. Its sessions stop being scanned, so they no longer fill up the sidebar.
 
@@ -53,6 +53,22 @@ If the shell does not answer within 4 seconds, the inherited PATH is used anyway
 [agents.opencode]
 command = "C:\\Users\\name\\AppData\\Roaming\\nvm\\v22.17.0\\opencode.cmd"
 ```
+
+`command` is a **program**, not a command line. It is handed to the operating
+system as the name of a file to run, so `command = "omp --autoapprove"` is looked
+up as a single file whose name contains a space and a dash — and never found.
+Flags an agent always needs go in `args`:
+
+```toml
+[agents.omp]
+command = "omp"
+args = ["--autoapprove"]
+```
+
+`args` comes first every time that agent starts: on a new session, on a resume,
+on a fork, and when it opens its own session picker. The one exception is
+`update_args` — an updater is a different job, and a flag meant for a session has
+no business in it. **Settings → Agents** has the field as *Start args*.
 
 ### Adding your own harness
 

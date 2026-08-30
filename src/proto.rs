@@ -55,6 +55,11 @@ pub enum ClientMsg {
     SetAgent {
         name: String,
         command: String,
+        /// Arguments always passed, before the others. Omitted means "leave what
+        /// is stored alone" — an older frontend does not know about this field
+        /// and must not wipe it by saying nothing.
+        #[serde(default)]
+        args: Option<Vec<String>>,
         #[serde(default)]
         resume_args: Vec<String>,
         enabled: bool,
@@ -580,6 +585,8 @@ pub struct DropInfo {
 pub struct AgentInfo {
     pub name: String,
     pub command: String,
+    /// Arguments always passed to this agent, before every other kind.
+    pub args: Vec<String>,
     pub resume_args: Vec<String>,
     pub enabled: bool,
     /// The full path when the command resolves, `null` when it does not — so

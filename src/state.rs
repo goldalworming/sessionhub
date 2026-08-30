@@ -380,6 +380,7 @@ pub fn run(cfg: Config, rx: Receiver<Cmd>, tx: Sender<Cmd>, registry_cfg: Sender
                                 live: live.get(&name).copied().unwrap_or(0),
                                 name,
                                 command: a.command,
+                                args: a.args,
                                 resume_args: a.resume_args,
                                 enabled: a.enabled,
                             })
@@ -434,7 +435,14 @@ pub fn run(cfg: Config, rx: Receiver<Cmd>, tx: Sender<Cmd>, registry_cfg: Sender
                     });
                 }
 
-                ClientMsg::SetAgent { name, command, resume_args, enabled, fork_args } => {
+                ClientMsg::SetAgent {
+                    name,
+                    command,
+                    args,
+                    resume_args,
+                    enabled,
+                    fork_args,
+                } => {
                     let name = name.trim().to_lowercase();
                     let command = command.trim().to_string();
                     // New names are filtered; ones already in the config are left
@@ -463,6 +471,7 @@ pub fn run(cfg: Config, rx: Receiver<Cmd>, tx: Sender<Cmd>, registry_cfg: Sender
                     let entry = cfg.agents.entry(name.clone()).or_insert_with(|| {
                         crate::config::Agent {
                             command: command.clone(),
+                            args: Vec::new(),
                             resume_args: Vec::new(),
                             env: Default::default(),
                             enabled,
@@ -481,6 +490,9 @@ pub fn run(cfg: Config, rx: Receiver<Cmd>, tx: Sender<Cmd>, registry_cfg: Sender
                         }
                     });
                     entry.command = command;
+                    if let Some(a) = args {
+                        entry.args = a;
+                    }
                     entry.resume_args = resume_args;
                     entry.enabled = enabled;
                     if let Some(f) = fork_args {
@@ -2186,9 +2198,15 @@ fn fork_terminal(
     let fallback = format!("fork {}", &session_id[..session_id.len().min(8)]);
     let name = if name.trim().is_empty() { fallback.as_str() } else { name.trim() };
 
-    let args: Vec<String> = pattern
+    let args: Vec<String> = agent_cfg
+        .args
         .iter()
-        .map(|a| a.replace("{session_id}", session_id).replace("{name}", name))
+        .cloned()
+        .chain(
+            pattern
+                .iter()
+                .map(|a| a.replace("{session_id}", session_id).replace("{name}", name)),
+        )
         .collect();
 
     build_terminal(cfg, id, run, project, agent, args, None, cols, rows, tx)
@@ -2226,7 +2244,7 @@ fn spawn_terminal(
         ));
     }
 
-    let args: Vec<String> = match &resume {
+    let rest: Vec<String> = match &resume {
         Some(sid) => agent_cfg
             .resume_args
             .iter()
@@ -2238,6 +2256,9 @@ fn spawn_terminal(
         None if pick => agent_cfg.picker_args.clone().unwrap_or_default(),
         None => Vec::new(),
     };
+    // Always first: a flag the agent needs in order to run at all belongs before
+    // whatever this particular start is about.
+    let args: Vec<String> = agent_cfg.args.iter().cloned().chain(rest).collect();
 
     build_terminal(cfg, id, run, project, agent, args, resume, cols, rows, tx)
 }

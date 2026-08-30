@@ -1616,6 +1616,7 @@ export class Settings {
 
     let pick = null;
     let cmd = null;
+    let start = null;
     let args = null;
     let forks = null;
 
@@ -1661,6 +1662,21 @@ export class Settings {
       cmd.spellcheck = false;
       cmd.placeholder = 'name on PATH, or full path';
       body.appendChild(cmd);
+
+      // Offered for a shell too: `pwsh -NoLogo` is exactly this, and a shell is
+      // the one agent whose start flags are most likely to be wanted.
+      //
+      // It exists because Command is a program, not a command line — it is
+      // handed to the OS as the name of a file to run, so `omp --autoapprove`
+      // there is looked up as one file with a space in its name and never
+      // found. This is where the flag goes instead.
+      field('Start args', 'Always passed, before the resume or fork arguments.');
+      start = document.createElement('input');
+      start.type = 'text';
+      start.value = (a.args || []).join(' ');
+      start.spellcheck = false;
+      start.placeholder = 'empty = none';
+      body.appendChild(start);
 
       // A plain shell has no session to resume, so the field is not offered —
       // filling it in is what makes "New terminal" fail.
@@ -1715,6 +1731,7 @@ export class Settings {
       this.onSave({
         name: a.name,
         command: cmd ? cmd.value : a.command,
+        args: start ? split(start.value) : a.args || [],
         resume_args: args ? split(args.value) : a.resume_args,
         fork_args: forks ? split(forks.value) : a.fork_args || [],
         enabled: cb.checked,
@@ -1722,6 +1739,7 @@ export class Settings {
     };
     cb.onchange = save;
     if (cmd) cmd.onchange = save;
+    if (start) start.onchange = save;
     if (args) args.onchange = save;
     if (forks) forks.onchange = save;
     if (pick) {
@@ -1796,6 +1814,11 @@ export class Settings {
     };
     const key = field('Name', 'aider', 'Lowercase letters, digits, - and _');
     const cmd = field('Command', 'name on PATH, or full path');
+    const start = field(
+      'Start args',
+      'empty = none',
+      'Always passed. Command holds the program alone — a flag belongs here.',
+    );
     const args = field(
       'Resume args',
       'empty = no saved sessions, just opens a shell',
@@ -1836,11 +1859,12 @@ export class Settings {
       this.onSave({
         name: n,
         command: cmd.value.trim(),
+        args: split(start.value),
         resume_args: split(args.value),
         fork_args: split(forks.value),
         enabled: true,
       });
-      for (const i of [key, cmd, args, forks]) i.value = '';
+      for (const i of [key, cmd, start, args, forks]) i.value = '';
       this.adding = false;
     };
     actions.appendChild(add);
