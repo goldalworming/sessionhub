@@ -82,6 +82,9 @@ export class Settings {
     this.onUpdateAgent = onUpdateAgent || (() => {});
     this.onSave = onSave;
     this.onLan = onLan;
+    /// `onLanAddr(addr)` chooses which address network access uses; '' = all.
+    /// Set after construction — the argument list here is long enough.
+    this.onLanAddr = () => {};
     this.onRemoteCommands = onRemoteCommands || (() => {});
     this.onRotateToken = onRotateToken || (() => {});
     this.onInstallSkill = onInstallSkill || (() => {});
@@ -213,6 +216,11 @@ export class Settings {
     // leaving a switch that flips back by itself. So it is not drawn at all.
     this.canRunRemotely = msg.can_run_remotely === true;
     this.lanUrl = msg.lan_url || '';
+    this.lanAddrs = Array.isArray(msg.lan_addrs) ? msg.lan_addrs : [];
+    this.lanAddr = msg.lan_addr || '';
+    // A daemon too old to know `set_lan_addr` would drop it without answering,
+    // and the chooser would spring back on its own. So it is not drawn at all.
+    this.canPickLan = msg.can_pick_lan === true;
     this.pairUrl = msg.pair_url || '';
     this.drops = msg.drops || null;
     this.setCloudflare(msg.cloudflare, false);
@@ -482,6 +490,8 @@ export class Settings {
       ),
     );
 
+    pane.appendChild(this.addressRows());
+
     if (this.lanUrl) {
       pane.appendChild(
         this.secretRow(this.lanUrl, {
@@ -507,6 +517,70 @@ export class Settings {
     pane.appendChild(this.signOutRows());
     pane.appendChild(this.rotateRows());
     return pane;
+  }
+
+  /// Which address network access uses.
+  ///
+  /// sessionhub listens on every address it finds, and shows the one it thinks
+  /// is most reachable. On a machine with VMware or Docker installed that guess
+  /// used to be wrong: their adapters carry ordinary private addresses that
+  /// reach nothing outside this computer, and one of them was being offered as
+  /// *the* address while the real Wi-Fi went unmentioned. The order is fixed
+  /// now, but a guess is still a guess — so it can be said outright.
+  ///
+  /// The adapter's name is the point of the list. `192.168.88.1` and
+  /// `192.168.0.108` look alike; "VMware Network Adapter VMnet8" and "Wi-Fi" do
+  /// not.
+  addressRows() {
+    const wrap = document.createElement('div');
+    wrap.className = 'secret';
+    if (!this.canPickLan || !this.lanAddrs.length) return wrap;
+
+    const cap = document.createElement('div');
+    cap.className = 'seclabel';
+    cap.textContent = 'Network to use';
+    wrap.appendChild(cap);
+
+    const row = document.createElement('div');
+    row.className = 'secrow';
+    const pick = document.createElement('select');
+    pick.className = 'lanpick';
+
+    const all = document.createElement('option');
+    all.value = '';
+    all.textContent = `All addresses (${this.lanAddrs.length})`;
+    pick.appendChild(all);
+
+    for (const a of this.lanAddrs) {
+      const o = document.createElement('option');
+      o.value = a.addr;
+      o.textContent = `${a.name} — ${a.addr}`;
+      pick.appendChild(o);
+    }
+    // A stored address the machine no longer has is kept in the list rather than
+    // silently swapped for "All": the daemon has already fallen back to all of
+    // them, and the panel should say which choice is being ignored.
+    if (this.lanAddr && !this.lanAddrs.some((a) => a.addr === this.lanAddr)) {
+      const gone = document.createElement('option');
+      gone.value = this.lanAddr;
+      gone.textContent = `${this.lanAddr} — not on this machine now`;
+      pick.appendChild(gone);
+    }
+    pick.value = this.lanAddr;
+    pick.onchange = () => {
+      this.note.textContent = 'Moving…';
+      this.onLanAddr(pick.value);
+    };
+    row.appendChild(pick);
+    wrap.appendChild(row);
+
+    const hint = document.createElement('div');
+    hint.className = 'sechint';
+    hint.textContent = this.lanAddr
+      ? 'Only this address is open. Choose All if a device cannot reach it.'
+      : 'Every address is open; the link above shows the most reachable one.';
+    wrap.appendChild(hint);
+    return wrap;
   }
 
   /// Whether a paired machine may put this one to work.

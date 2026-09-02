@@ -1990,6 +1990,11 @@ const settings = new Settings(
   (name) => conn.send({ t: 'remove_forward', name }),
 );
 
+// Which address network access uses. Through the facade, like the switch it
+// belongs beside: the addresses being chosen between are those of the machine
+// whose panel is open.
+settings.onLanAddr = (addr) => conn.send({ t: 'set_lan_addr', addr });
+
 /// Open Settings, optionally straight at one section.
 ///
 /// Shared by the toolbar button and by anything that needs to send someone to

@@ -98,6 +98,7 @@ The answer is `{"t":"dropped",…}`, or `error` with the code `drop_failed`.
 {"t":"open_file","path":"C:\\data\\code\\notex\\src\\main.rs"}
 {"t":"save_file","path":"C:\\data\\code\\notex\\src\\main.rs","text":"fn main() {}\n"}
 {"t":"set_lan_access","enabled":true}
+{"t":"set_lan_addr","addr":"192.168.0.108"}
 {"t":"set_drops","max_age_hours":24,"max_total_mb":100,"max_file_mb":20}
 {"t":"sweep_drops"}
 {"t":"remotes"}
@@ -113,6 +114,21 @@ The answer is `{"t":"dropped",…}`, or `error` with the code `drop_failed`.
 - `set_agent` and `set_lan_access` write to `config.toml` and are then always
   answered with the latest `config`, so a client never has to guess what was
   stored.
+- Network access opens **every** address this machine has, because there is no
+  way to know which one the other side will try. `set_lan_addr` narrows it to
+  one; an empty string — or anything that is not an address — means all of them
+  again. It only re-opens the listener when access is already on: choosing an
+  address is not a request to open the machine up.
+- A stored address that is not on this machine any more is ignored and all of
+  them are opened instead. A laptop that moved to another network would
+  otherwise come back listening to nothing, including to the panel that is the
+  only way to fix it.
+- `config` carries `lan_addrs`: every address found right now, most reachable
+  first, each with the adapter it belongs to and whether it is currently bound.
+  The adapter's name is what makes the list usable — two private addresses look
+  alike, `Wi-Fi` and `VMware Network Adapter VMnet8` do not. `can_pick_lan` says
+  this daemon understands `set_lan_addr`; absent means no, and no chooser is
+  drawn.
 - `make_entry` creates one empty file or one folder for the file panel and answers
   `made` with the new path and its parent; the panel then asks for that parent
   again, so the daemon's own listing — which is also the one that sorts — stays

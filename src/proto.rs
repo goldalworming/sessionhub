@@ -147,6 +147,10 @@ pub enum ClientMsg {
         cols: u16,
         rows: u16,
     },
+    /// Which address network access should use. Empty means every one of them.
+    SetLanAddr {
+        addr: String,
+    },
     SetLanAccess {
         enabled: bool,
     },
@@ -450,6 +454,15 @@ pub enum ServerMsg {
         drops: DropInfo,
         /// The stored network access setting.
         lan_access: bool,
+        /// Every address this machine has right now, most reachable first, each
+        /// with the adapter it belongs to. What makes the list readable: two
+        /// private addresses look alike, "Wi-Fi" and "VMware VMnet8" do not.
+        lan_addrs: Vec<NetAddr>,
+        /// Which one was chosen, or empty for all of them.
+        lan_addr: String,
+        /// That this daemon understands `set_lan_addr`. Read the same way
+        /// `can_move` is: absent means no, and no chooser is drawn.
+        can_pick_lan: bool,
         /// The address actually being listened on, token included. `None` when
         /// access is off or this machine has no LAN address.
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -633,6 +646,15 @@ pub struct AgentInfo {
     /// How many terminals are alive using this agent. The UI uses it to warn
     /// before removing.
     pub live: usize,
+}
+
+/// One address this machine can be reached at, and the adapter it lives on.
+#[derive(Debug, Clone, Serialize)]
+pub struct NetAddr {
+    pub name: String,
+    pub addr: String,
+    /// `true` when network access is actually listening on it now.
+    pub live: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]

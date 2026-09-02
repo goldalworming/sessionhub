@@ -91,6 +91,7 @@ pub fn serve(
     REMOTE_COMMANDS.store(cfg.remote_commands, Ordering::Relaxed);
 
     let lan_wanted = cfg.lan_access;
+    let lan_addr = cfg.lan_addr.clone();
     // Addresses that were open before the daemon stopped: the tunnel still
     // points at them, so their listeners have to come back with it.
     let reopen: Vec<(String, u16, String)> = cfg
@@ -127,7 +128,7 @@ pub fn serve(
     }
 
     if lan_wanted {
-        match set_lan_access(true) {
+        match set_lan_access(true, &lan_addr) {
             Ok(Some(addr)) => info!(%addr, "also listening on the local network"),
             Ok(None) => warn!("lan access is on but no local network address was found"),
             Err(e) => warn!(error = %e, "could not open the local network listener"),
@@ -319,7 +320,7 @@ fn refuse_remote_commands(sock: &mut TcpStream) -> io::Result<()> {
     )
 }
 
-pub fn set_lan_access(on: bool) -> Result<Option<SocketAddr>, String> {
+pub fn set_lan_access(on: bool, only: &str) -> Result<Option<SocketAddr>, String> {
     let Some(ctx) = CTX.get() else {
         return Err("server is not running yet".into());
     };
@@ -342,10 +343,11 @@ pub fn set_lan_access(on: bool) -> Result<Option<SocketAddr>, String> {
     // with Wi-Fi and a VPN has several addresses and no way to know which one
     // the other side will try; binding a single guess is how "network access:
     // on" came to mean "refused" for everyone on the actual LAN.
-    let ips = crate::config::lan_ips();
-    if ips.is_empty() {
+    let all = crate::config::lan_ips();
+    if all.is_empty() {
         return Ok(None);
     }
+    let ips = chosen_addrs(all, only);
 
     let stop = Arc::new(AtomicBool::new(false));
     let mut addrs = Vec::new();
@@ -376,8 +378,34 @@ pub fn set_lan_access(on: bool) -> Result<Option<SocketAddr>, String> {
     Ok(Some(shown))
 }
 
+/// Narrow the addresses to the one that was chosen, if there is one.
+///
+/// A choice that is not on this machine any more is ignored rather than obeyed:
+/// a laptop that moved to another network would otherwise come back listening
+/// to nothing — including to the panel that is the only way to fix it. Anything
+/// that is not an address at all, the empty string included, means all of them.
+fn chosen_addrs(all: Vec<std::net::IpAddr>, only: &str) -> Vec<std::net::IpAddr> {
+    match only.trim().parse::<std::net::IpAddr>() {
+        Ok(want) if all.contains(&want) => vec![want],
+        Ok(want) => {
+            warn!(%want, "the chosen address is not on this machine; opening all of them");
+            all
+        }
+        Err(_) => all,
+    }
+}
+
 pub fn lan_listening() -> Option<SocketAddr> {
     LAN.lock().ok().and_then(|s| s.as_ref().map(|l| l.shown))
+}
+
+/// Every address network access is actually bound to right now.
+///
+/// The setting says what was asked for; this says what happened. They differ
+/// whenever an interface came or went, which is exactly when the panel has
+/// something worth showing.
+pub fn lan_bound() -> Vec<SocketAddr> {
+    LAN.lock().ok().and_then(|s| s.as_ref().map(|l| l.addrs.clone())).unwrap_or_default()
 }
 
 fn accept_loop(listener: TcpListener, ctx: ServeCtx, stop: Option<Arc<AtomicBool>>) {
@@ -1504,6 +1532,28 @@ fn token_ok(expected: &str, given: Option<&str>) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use super::chosen_addrs;
+
+    fn ips(list: &[&str]) -> Vec<std::net::IpAddr> {
+        list.iter().map(|s| s.parse().unwrap()).collect()
+    }
+
+    /// Choosing one address, and the two ways of not choosing.
+    #[test]
+    fn a_chosen_address_narrows_the_listener_but_a_stale_one_does_not() {
+        let all = ips(&["192.168.0.108", "192.168.88.1"]);
+
+        assert_eq!(chosen_addrs(all.clone(), "192.168.88.1"), ips(&["192.168.88.1"]));
+        // Nothing chosen: every address, which is the default.
+        assert_eq!(chosen_addrs(all.clone(), ""), all);
+        assert_eq!(chosen_addrs(all.clone(), "   "), all);
+        // A choice from another network. Falling back to all is what keeps the
+        // panel reachable after the laptop moved.
+        assert_eq!(chosen_addrs(all.clone(), "10.1.2.3"), all);
+        // Junk is not an address and is read as "all", never stored as a bind.
+        assert_eq!(chosen_addrs(all.clone(), "not-an-address"), all);
+    }
+
     use super::*;
 
     const HEAD: &str = "GET /ws?token=abc&x=1 HTTP/1.1\r\n\

@@ -1837,6 +1837,20 @@ html, body {
   padding: 5px 7px;
 }
 .secval:focus { outline: 1px solid var(--accent); }
+/* The address chooser sits in a `.secrow` beside the links it decides, so it
+   wears the same box as the field next to it rather than the browser's own. */
+.lanpick {
+  flex: 1 1 auto;
+  min-width: 0;
+  font: inherit;
+  font-size: 12px;
+  color: var(--text);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 5px 7px;
+}
+.lanpick:focus { outline: 1px solid var(--accent); }
 .secbtn {
   flex: 0 0 auto;
   font: inherit;

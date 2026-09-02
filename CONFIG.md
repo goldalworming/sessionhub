@@ -10,6 +10,7 @@ another device. See [README.md](README.md) for what sessionhub is.
 ```toml
 port = 7717
 lan_access = false   # true opens it to the local network — see the warning below
+lan_addr = ""        # which address to open; empty means all of them
 token = "…"
 
 projects = [
@@ -234,6 +235,31 @@ opens or closes is only the second listener. So turning it on and off does not
 need a daemon restart, and no terminal dies with it. The choice is saved as
 `lan_access` in `config.toml`. Both `sessionhubd start` and `status` show the
 LAN address too.
+
+#### Which network
+
+A computer usually has more than one address. sessionhub listens on **all** of
+them, because there is no way to know which one the phone in your hand will try,
+and it shows the one it judges most reachable in the link.
+
+Judging can go wrong. VMware, VirtualBox, Hyper-V, Docker and WSL each add an
+adapter with an ordinary private address that reaches nothing outside this
+computer — and one of those was being offered as *the* address while the real
+Wi-Fi went unmentioned. Those adapters are now ranked last, so the link shows a
+real network again.
+
+When you want to say it outright, **Settings → Network access → Network to use**
+lists every address with the adapter it belongs to:
+
+    All addresses (3)
+    Wi-Fi — 192.168.0.108
+    VMware Network Adapter VMnet8 — 192.168.88.1
+
+Choosing one opens only that address; **All addresses** goes back to opening
+every one. The choice is saved as `lan_addr`. If that address is not on the
+machine the next time it starts — a laptop that moved — it is ignored and all of
+them are opened, because a machine that comes back listening to nothing cannot
+be fixed from the panel.
 
 Older configs that still use `bind` are moved once on first run. A non-loopback
 address becomes `lan_access = true`. Everything else becomes `false`. Then the

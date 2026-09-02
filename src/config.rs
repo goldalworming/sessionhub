@@ -22,6 +22,17 @@ pub struct Config {
     /// listener is added or removed.
     #[serde(default)]
     pub lan_access: bool,
+    /// Which of this machine's addresses network access uses. Empty means all
+    /// of them, which is the default and nearly always right.
+    ///
+    /// It exists because "all" is not always right: a machine with VMware or
+    /// Docker installed carries private addresses that reach nothing outside
+    /// itself, and someone who knows which network they mean should be able to
+    /// say so and have the links agree. An address that is no longer on this
+    /// machine is ignored rather than obeyed — a laptop that moved must not
+    /// come back unreachable.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub lan_addr: String,
     /// A leftover from the old bind-address setting. Read once so it can be
     /// migrated to `lan_access`, then dropped from the file.
     #[serde(default, skip_serializing)]
@@ -529,8 +540,18 @@ fn migrate_bind(bind: &str) -> bool {
 /// So the interfaces are enumerated instead, and the listener opens on all of
 /// them.
 pub fn lan_ips() -> Vec<std::net::IpAddr> {
-    let mut out: Vec<std::net::IpAddr> = Vec::new();
-    for (_name, data) in &sysinfo::Networks::new_with_refreshed_list() {
+    lan_ips_named().into_iter().map(|(_, ip)| ip).collect()
+}
+
+/// The same list with the adapter each address belongs to.
+///
+/// The name is what makes the list readable: `192.168.88.1` and
+/// `192.168.0.108` say nothing about which one a phone can reach, while
+/// "VMware Network Adapter VMnet8" and "Wi-Fi" say everything. It also decides
+/// the order — see `reach_rank`.
+pub fn lan_ips_named() -> Vec<(String, std::net::IpAddr)> {
+    let mut out: Vec<(String, std::net::IpAddr)> = Vec::new();
+    for (name, data) in &sysinfo::Networks::new_with_refreshed_list() {
         for net in data.ip_networks() {
             // IPv4 only: the rest of the pairing path speaks `host:port`, and a
             // bare IPv6 address in there would be read as a port separator.
@@ -540,21 +561,38 @@ pub fn lan_ips() -> Vec<std::net::IpAddr> {
                 continue;
             }
             let ip = std::net::IpAddr::V4(v4);
-            if !out.contains(&ip) {
-                out.push(ip);
+            if !out.iter().any(|(_, seen)| *seen == ip) {
+                out.push((name.to_string(), ip));
             }
         }
     }
-    out.sort_by_key(|ip| reach_rank(*ip));
+    out.sort_by_key(|(name, ip)| reach_rank(name, *ip));
     out
+}
+
+/// Adapters that exist for software rather than for a network: the host side of
+/// a virtual machine's private switch, a container bridge, a tunnel.
+///
+/// They carry a perfectly ordinary private address, so nothing about the number
+/// gives them away — and on a machine with VMware installed, one of them was
+/// being offered as *the* address to reach this computer at while the real
+/// Wi-Fi went unmentioned. Nobody outside this machine can reach them.
+fn is_virtual_adapter(name: &str) -> bool {
+    let n = name.to_ascii_lowercase();
+    [
+        "vmware", "vmnet", "virtualbox", "vboxnet", "hyper-v", "vethernet", "docker", "wsl",
+        "npcap", "loopback", "bridge", "utun", "tailscale", "zerotier", "hamachi", "radmin",
+    ]
+    .iter()
+    .any(|k| n.contains(k))
 }
 
 /// How useful an address is to somebody trying to reach this machine. Lower
 /// sorts first, and first is what the pairing link shows.
-fn reach_rank(ip: std::net::IpAddr) -> u8 {
+fn reach_rank(name: &str, ip: std::net::IpAddr) -> u8 {
     let std::net::IpAddr::V4(v4) = ip else { return 3 };
     let [a, b, ..] = v4.octets();
-    if v4.is_private() {
+    let base = if v4.is_private() {
         0 // the Wi-Fi or Ethernet address a phone in the same room can use
     } else if a == 100 && (64..128).contains(&b) {
         // Carrier-grade NAT — Tailscale and its kin. Real, but only reachable
@@ -562,7 +600,10 @@ fn reach_rank(ip: std::net::IpAddr) -> u8 {
         2
     } else {
         1
-    }
+    };
+    // Never a first suggestion, never in front of a real one — but still listed,
+    // because a VM on that private switch is a device that can genuinely use it.
+    if is_virtual_adapter(name) { base + 4 } else { base }
 }
 
 /// The single address worth showing. Falls back to asking the routing table,
@@ -675,6 +716,7 @@ impl Default for Config {
     fn default() -> Self {
         Config {
             port: default_port(),
+            lan_addr: String::new(),
             lan_access: false,
             bind: None,
             token: String::new(),
@@ -909,20 +951,47 @@ mod tests {
         let tailscale: std::net::IpAddr = "100.127.22.178".parse().unwrap();
         let public: std::net::IpAddr = "203.0.113.7".parse().unwrap();
 
-        assert!(reach_rank(lan) < reach_rank(tailscale));
+        assert!(reach_rank("Wi-Fi", lan) < reach_rank("Tailscale", tailscale));
         // A routable address still beats one that only works inside a tunnel.
-        assert!(reach_rank(public) < reach_rank(tailscale));
+        assert!(reach_rank("Ethernet", public) < reach_rank("Tailscale", tailscale));
 
         let mut all = vec![tailscale, public, lan];
-        all.sort_by_key(|ip| reach_rank(*ip));
+        all.sort_by_key(|ip| reach_rank("Ethernet", *ip));
         assert_eq!(all, vec![lan, public, tailscale]);
+    }
+
+    /// The bug on a laptop with VMware installed: `192.168.88.1` on VMnet8 was
+    /// offered as the address to reach the machine at, while the Wi-Fi it was
+    /// actually on went unmentioned. Both are private, so only the adapter's
+    /// name can tell them apart.
+    #[test]
+    fn a_virtual_adapter_never_outranks_a_real_one() {
+        let vmnet: std::net::IpAddr = "192.168.88.1".parse().unwrap();
+        let wifi: std::net::IpAddr = "192.168.0.108".parse().unwrap();
+
+        assert!(
+            reach_rank("Wi-Fi", wifi) < reach_rank("VMware Network Adapter VMnet8", vmnet),
+            "the real network must come first"
+        );
+        for fake in [
+            "VMware Network Adapter VMnet1",
+            "VirtualBox Host-Only Network",
+            "vEthernet (Default Switch)",
+            "Docker Desktop bridge",
+            "utun3",
+        ] {
+            assert!(is_virtual_adapter(fake), "{fake} seharusnya dikenali virtual");
+        }
+        for real in ["Wi-Fi", "Ethernet", "Ethernet 2", "en0", "wlan0"] {
+            assert!(!is_virtual_adapter(real), "{real} bukan adapter virtual");
+        }
     }
 
     #[test]
     fn carrier_grade_nat_is_recognised_by_its_whole_range() {
         // 100.64.0.0/10, not "anything starting with 100": 100.63 and 100.128
         // are ordinary public addresses.
-        let cgnat = |s: &str| reach_rank(s.parse().unwrap()) == 2;
+        let cgnat = |s: &str| reach_rank("Ethernet", s.parse().unwrap()) == 2;
         assert!(cgnat("100.64.0.1"));
         assert!(cgnat("100.127.22.178"));
         assert!(!cgnat("100.63.255.255"));

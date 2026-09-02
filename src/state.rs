@@ -333,6 +333,7 @@ pub fn run(cfg: Config, rx: Receiver<Cmd>, tx: Sender<Cmd>, registry_cfg: Sender
                     let agents: Vec<(String, crate::config::Agent)> =
                         cfg.agents.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
                     let lan_access = cfg.lan_access;
+                    let lan_addr = cfg.lan_addr.clone();
                     let remote_commands = cfg.remote_commands;
                     let token = cfg.token.clone();
                     let limits = cfg.drops.clone();
@@ -397,6 +398,17 @@ pub fn run(cfg: Config, rx: Receiver<Cmd>, tx: Sender<Cmd>, registry_cfg: Sender
                         // alive, not from the setting — if opening it failed, the
                         // panel must not promise a dead URL.
                         let listening = crate::http::lan_listening();
+                        // Read fresh rather than from the config: a laptop moves,
+                        // and the panel should show where it is now.
+                        let bound = crate::http::lan_bound();
+                        let lan_addrs: Vec<crate::proto::NetAddr> = crate::config::lan_ips_named()
+                            .into_iter()
+                            .map(|(name, ip)| crate::proto::NetAddr {
+                                name,
+                                addr: ip.to_string(),
+                                live: bound.iter().any(|a| a.ip() == ip),
+                            })
+                            .collect();
                         let lan_url = listening.map(|a| format!("http://{a}/?token={token}"));
                         // The pairing link: one line to paste on another machine.
                         // Four input boxes are four chances to get it wrong.
@@ -416,6 +428,9 @@ pub fn run(cfg: Config, rx: Receiver<Cmd>, tx: Sender<Cmd>, registry_cfg: Sender
                                 bytes,
                             },
                             lan_access,
+                            lan_addrs,
+                            lan_addr,
+                            can_pick_lan: true,
                             lan_url,
                             pair_url,
                             cloudflare,
@@ -1580,8 +1595,41 @@ pub fn run(cfg: Config, rx: Receiver<Cmd>, tx: Sender<Cmd>, registry_cfg: Sender
                     }
                 }
 
+                ClientMsg::SetLanAddr { addr } => {
+                    // Empty means all, and anything that is not an address is
+                    // read as empty rather than stored to confuse the next start.
+                    let addr = addr.trim();
+                    let addr = if addr.parse::<std::net::IpAddr>().is_ok() { addr } else { "" };
+                    cfg.lan_addr = addr.to_string();
+                    if let Err(e) = crate::config::save(&cfg) {
+                        warn!(error = %e, "could not save config");
+                    }
+                    // Re-open on the new choice, but only when it is already on:
+                    // choosing an address is not a request to open the machine up.
+                    if cfg.lan_access {
+                        match crate::http::set_lan_access(true, &cfg.lan_addr) {
+                            Ok(Some(a)) => info!(%a, chosen = %cfg.lan_addr, "network access moved"),
+                            Ok(None) => info!("no address to open"),
+                            Err(e) => {
+                                warn!(error = %e, "could not move network access");
+                                send_to(
+                                    &clients,
+                                    id,
+                                    json(&ServerMsg::Error {
+                                        code: "lan_failed".into(),
+                                        message: format!("Could not change the address: {e}"),
+                                    }),
+                                );
+                            }
+                        }
+                    }
+                    if tx.send(Cmd::ClientMsg { id, msg: ClientMsg::Config }).is_err() {
+                        return;
+                    }
+                }
+
                 ClientMsg::SetLanAccess { enabled } => {
-                    match crate::http::set_lan_access(enabled) {
+                    match crate::http::set_lan_access(enabled, &cfg.lan_addr) {
                         Ok(Some(addr)) => info!(%addr, "network access opened"),
                         Ok(None) if enabled => {
                             // No LAN address at all: the machine is off the network.
