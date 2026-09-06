@@ -19,12 +19,23 @@ export class Picker {
   /// history and what running terminal the folder already has. `on.menu(x, y, items)` shows
   /// the app's context menu; the picker brings the choices, not the menu.
   ///
-  /// `on.recall()` returns the folder last opened and `on.remember` stores it —
+  /// `on.recall()` returns the folder last opened **on the machine now
+  /// showing** and `on.remember` stores it —
   /// so opening this picker tomorrow lands where you left off instead of going
   /// home and making you walk down again.
   constructor(root, on) {
     this.on = on;
     this.dir = null;
+    /// Which machine the folder on screen belongs to.
+    ///
+    /// A path only means something on the machine it was browsed on:
+    /// `C:\data\code\analisa-video` exists on one laptop and nowhere else, and
+    /// carrying it across left the panel showing that laptop's folder list under
+    /// a red "No such file or directory" from the machine actually being used.
+    this.scope = null;
+    /// Whether a failed browse has already fallen back to home, so a home that
+    /// fails too cannot loop.
+    this.retried = false;
 
     this.el = document.createElement('div');
     this.el.id = 'picker';
@@ -90,9 +101,21 @@ export class Picker {
     return !this.el.hidden;
   }
 
+  /// The machine now showing. Its folders are not the last machine's folders,
+  /// so what is on screen is dropped rather than carried across; `recall` then
+  /// supplies the folder last used over there.
+  setScope(key) {
+    if (key === this.scope) return;
+    this.scope = key;
+    this.dir = null;
+    this.retried = false;
+    if (this.open) this.show();
+  }
+
   show() {
     this.el.hidden = false;
     this.note.textContent = 'Loading…';
+    this.retried = false;
     this.disarmMkdir();
     // Empty means "start from home" — the daemon decides where that is.
     this.on.browse(this.dir?.path || this.on.recall() || '');
@@ -104,6 +127,7 @@ export class Picker {
 
   go(path) {
     this.note.textContent = 'Loading…';
+    this.retried = false;
     this.disarmMkdir();
     this.on.browse(path);
   }
@@ -143,6 +167,13 @@ export class Picker {
     this.note.textContent = message;
     this.note.classList.add('bad');
     setTimeout(() => this.note.classList.remove('bad'), 6000);
+    // Nothing on screen and the folder asked for is gone — a remembered one
+    // since deleted. An error above an empty panel leaves nowhere to click, so
+    // home is tried once; that one always exists.
+    if (!this.dir && !this.retried) {
+      this.retried = true;
+      this.on.browse('');
+    }
   }
 
   paintRoots() {

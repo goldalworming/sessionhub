@@ -29,7 +29,10 @@ const LS = {
   theme: 'sh.theme',
   hidden: 'sh.sidebar.hidden',
   bookmarks: 'sh.bookmarks',
-  pickerPath: 'sh.picker.path',
+  /// Per machine: `C:\data\code\x` means nothing on a laptop that does not
+  /// have it, and reopening the picker there landed on a red error above
+  /// another machine's folder list.
+  pickerPath: 'sh.picker.path.',
   layout: 'sh.layout',
   filesOpen: 'sh.files.open',
   filesWidth: 'sh.files.width',
@@ -284,6 +287,7 @@ let memById = new Map();
 /// Created later, but declared here so `applyTheme`, which runs earlier, can
 /// check it without tripping over the TDZ.
 let sidePanel = null;
+let picker = null;
 /// The project chosen by hand, through a project name in the sidebar or the
 /// picker in the Explorer. The last action wins: choosing a project beats the
 /// active terminal, and switching terminals takes it back.
@@ -309,6 +313,9 @@ function fileScope() {
 
 function syncScope() {
   if (sidePanel) sidePanel.setScope(fileScope());
+  // The picker walks the disk of the machine now showing, so it is scoped to
+  // the machine alone — not to the project the Explorer happens to be on.
+  if (picker) picker.setScope(current?.id || null);
 }
 
 /// The project the Explorer shows: the hand-picked one, then the active
@@ -2268,7 +2275,7 @@ if (localStorage.getItem(LS.filesOpen) === '1') sidePane.show();
 
 // ------------------------------------------------------------- new project
 
-const picker = new Picker(document.body, {
+picker = new Picker(document.body, {
   browse: (path) => conn.send({ t: 'browse', path }),
   mkdir: (parent, name) => conn.send({ t: 'make_dir', parent, name }),
   add: (path) => {
@@ -2284,8 +2291,21 @@ const picker = new Picker(document.body, {
   },
   // The last folder survives into the next session. Projects tend to be related
   // — the next one is nearly always a neighbour of the last.
-  recall: () => localStorage.getItem(LS.pickerPath) || '',
-  remember: (path) => localStorage.setItem(LS.pickerPath, path),
+  recall: () => {
+    // One key held the folder for every machine until this became per machine.
+    // Read it once for this computer — where it was at least correct — and then
+    // take it out rather than leaving it behind forever.
+    const stale = localStorage.getItem('sh.picker.path');
+    if (stale !== null) {
+      localStorage.removeItem('sh.picker.path');
+      if (!localStorage.getItem(LS.pickerPath + 'local')) {
+        localStorage.setItem(LS.pickerPath + 'local', stale);
+      }
+    }
+    return localStorage.getItem(LS.pickerPath + (current?.id || 'local')) || '';
+  },
+  remember: (path) =>
+    localStorage.setItem(LS.pickerPath + (current?.id || 'local'), path),
   // The same agents, the same menu, as the ＋ on a sidebar project row — the
   // daemon only ever sends the enabled ones, so no filtering here either.
   agents: () => state.agents,
