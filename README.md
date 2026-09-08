@@ -63,7 +63,9 @@ Download the binary for your machine from
 [Releases](https://github.com/goldalworming/sessionhub/releases/latest) and run
 it. One file — the interface is inside it. On macOS there is a `.app` for
 Applications; it is unsigned, so open it the first time with right-click → Open.
-To build it yourself: stable Rust, `cargo build --release`, nothing else.
+The Linux build is statically linked against musl, so it runs on any x86_64
+distribution whatever its glibc — tested on Ubuntu 18.04, whose glibc is from
+2018. To build it yourself: stable Rust, `cargo build --release`, nothing else.
 
 ```
 sessionhubd start          # detaches from this terminal, then exits
@@ -92,6 +94,56 @@ can open from anywhere, still behind the sessionhub token.
 > it is more than a moment. If a URL ever leaked — a screenshot, a chat, a shared
 > log — replace the token: **⚙ Settings → Network access → New token**, or
 > `sessionhubd token rotate`.
+
+### On a server with a public address
+
+A machine on the internet — a VPS, say — is the one place where the warning
+above stops being theoretical: the port is found by scanners within minutes, and
+sessionhub speaks plain HTTP, so the token would cross the network in the clear.
+Leave **Network access off** so the daemon stays on `127.0.0.1:7717`, and put
+something in front of it.
+
+**A Cloudflare tunnel is the better answer**, and it is the one to reach for
+first. Nothing inbound needs to be open at all — the server's firewall can drop
+every incoming port, `cloudflared` dials out, and Cloudflare Access can sit in
+front as a real second factor rather than a single token in a URL. A hostname
+arranged that way is also what `sessionhubd run --on <machine>` reaches, so the
+same setup makes the server usable from another computer.
+
+If you would rather terminate TLS yourself, sessionhub works behind a reverse
+proxy. **Caddy** needs no more than this, and arranges the certificate itself:
+
+```
+sh.example.com {
+    reverse_proxy 127.0.0.1:7717
+}
+```
+
+**nginx** needs three things spelled out, and two of them are easy to miss:
+
+```nginx
+location / {
+    proxy_pass http://127.0.0.1:7717;
+    proxy_http_version 1.1;
+    proxy_set_header Upgrade $http_upgrade;   # without this /ws never upgrades
+    proxy_set_header Connection "upgrade";
+    proxy_set_header Host $host;
+    proxy_read_timeout 86400;                 # a terminal idles for hours
+    proxy_buffering off;                      # let output stream, not pool
+}
+```
+
+`proxy_read_timeout` is the one that bites: a terminal waiting for a build to
+finish sends nothing, and nginx's default cuts it off after 60 seconds.
+
+Two things to know either way:
+
+- It must be the **root of a hostname**, not a subpath. Every asset is referenced
+  absolutely (`/app.css`, `/vendor/xterm.js`, `/ws`), so `example.com/sessionhub/`
+  will not work.
+- TLS protects the wire; it does not add a second factor. What is behind it is
+  still a shell reachable with one token in a URL, so put Cloudflare Access,
+  basic auth, mTLS, or an IP allowlist in front of it.
 
 ## Putting another machine to work
 

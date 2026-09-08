@@ -36,24 +36,45 @@ There is no CI. Nothing here needs a runner.
 
        CARGO_TARGET_DIR=<somewhere else> cargo build --release
 
-3. **Mac build**, then bring the binary back:
+3. **Linux build — from Windows, no VM and no WSL.** Nothing here links C, so
+   Rust's own `rust-lld` and its bundled musl are enough; only the linker has to
+   be named, because cargo otherwise looks for `cc`:
+
+       rustup target add x86_64-unknown-linux-musl
+
+       LLD="$(rustc --print sysroot)/lib/rustlib/x86_64-pc-windows-msvc/bin/rust-lld.exe"
+       CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER="$LLD" \
+       CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_RUSTFLAGS="-C linker-flavor=ld.lld -C link-self-contained=yes" \
+       CARGO_TARGET_DIR=<somewhere else> cargo build --release --target x86_64-unknown-linux-musl
+
+   The result is a **static-pie** ELF with no `PT_INTERP`, so it runs on any
+   x86_64 distribution regardless of its glibc — verified on Ubuntu 18.04
+   (glibc 2.27): it starts, serves `/api/status` and `/api/exec`, and opens a
+   real PTY.
+
+   **Do not publish a `linux-arm64` asset** until there is a build made for
+   Android. `asset_suffix()` (`src/update.rs`) returns `linux-arm64` on an
+   aarch64 Android target too, so a daemon under Termux would offer it as an
+   update and then install a binary that cannot run against Bionic.
+
+4. **Mac build**, then bring the binary back:
 
        python ../push_to_mac.py --build
        python ../fetch_from_mac.py data/code/sessionhubd/target/release/sessionhubd <local path>
 
-4. **The .app bundle** — a Mach-O has nowhere to keep an icon, so Finder needs
+5. **The .app bundle** — a Mach-O has nowhere to keep an icon, so Finder needs
    this. Send the script and the icon over, build there, bring back the zip:
 
        python ../put_to_mac.py assets/make-app.sh data/code/make-app.sh assets/sessionhub.icns data/code/sessionhub.icns
        python ../mac.py 'cd ~/data/code && sh make-app.sh $HOME/data/code/sessionhubd/target/release/sessionhubd $HOME/data/code/sessionhub.icns <version> $HOME/data/code/appbuild'
        python ../fetch_from_mac.py data/code/appbuild/sessionhub-<version>-macos-arm64.app.zip <local path>
 
-5. **The frontend bundle**, when `web/` moved since the last release. Raise
+6. **The frontend bundle**, when `web/` moved since the last release. Raise
    `version` in `web/version.json` first:
 
        sessionhubd bundle-web sessionhub-web-<web version>.shweb
 
-6. **Create the release**, then upload:
+7. **Create the release**, then upload:
 
        python ../create_release.py v<version> <full commit sha> "<title>" <notes.md>
        python ../upload_asset.py <file> <asset name>
@@ -66,6 +87,7 @@ Parsed by the updater (`src/update.rs`), so they must be exact:
 | --- | --- |
 | `sessionhubd-<version>-windows-x86_64.exe` | what self-update installs |
 | `sessionhubd-<version>-macos-arm64` | likewise, on the Mac |
+| `sessionhubd-<version>-linux-x86_64` | likewise, on Linux — the static musl build |
 | `sessionhub-<version>-macos-arm64.app.zip` | beside the binary, never instead of it — the updater matches the suffix `macos-arm64` and cannot swap a zip into place |
 | `sessionhub-web-<web version>.shweb` | installs from Settings, no restart |
 
