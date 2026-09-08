@@ -49,7 +49,7 @@ export class MachineBar {
       '<p class="pdhint">On the other machine, open <b>⚙ Settings → Network access</b> ' +
       'and copy its pairing link.</p>' +
       '<input class="pdlink" type="text" spellcheck="false" ' +
-      'placeholder="sessionhub://192.168.0.115:7717/pair#token=…" />' +
+      'placeholder="sessionhub://192.168.0.115:7717/pair#token=… or https://box.example.com/pair#token=…" />' +
       '<div class="pdnote"></div>' +
       '<p class="pdwarn">The link carries that machine\'s token, and it grants a ' +
       'full shell there. Only paste links you asked for.</p>' +

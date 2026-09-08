@@ -585,7 +585,7 @@ fn relay_file(sock: &mut TcpStream, req: &Request, r: &crate::config::Remote) ->
         r.token,
         crate::remote::percent_encode(&path),
     );
-    match crate::remote::http_get(&r.addr, &url) {
+    match crate::remote::http_get(&crate::remote::Peer::of(r), &url) {
         Ok(body) => serve_file_bytes(sock, &path, &body),
         Err(e) => respond(sock, 502, "text/plain; charset=utf-8", e.as_bytes()),
     }
@@ -617,7 +617,7 @@ fn relay_exec(sock: &mut TcpStream, req: &Request, r: &crate::config::Remote) ->
     if let Some(t) = asked {
         url.push_str(&format!("&timeout={t}"));
     }
-    match crate::remote::http_get_slow(&r.addr, &url, wait) {
+    match crate::remote::http_get_slow(&crate::remote::Peer::of(r), &url, wait) {
         Ok(body) => respond(sock, 200, "application/json", &body),
         Err(e) => respond(sock, 502, "text/plain; charset=utf-8", e.as_bytes()),
     }
@@ -638,7 +638,7 @@ fn relay_put(
         r.token,
         crate::remote::percent_encode(&path),
     );
-    match crate::remote::http_put(&r.addr, &url, &body) {
+    match crate::remote::http_put(&crate::remote::Peer::of(r), &url, &body) {
         Ok(answer) => respond(sock, 200, "application/json", &answer),
         Err(e) => respond(sock, 502, "text/plain; charset=utf-8", e.as_bytes()),
     }

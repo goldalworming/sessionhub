@@ -384,7 +384,70 @@ Turned off, commands and sent files are refused with a 403 that names the switch
 **Reading** a file is not covered — the file panel has always read from a paired
 machine, and breaking that is not what this switch is for.
 
-> The traffic is **not encrypted**, exactly as with Network access. The token proves who is calling; it does not hide what is being said. A paired machine means **full access** to that machine — that daemon does hand out a shell. Use it only on networks you trust, or over a VPN — the pairing link accepts a VPN address just as it accepts a LAN address.
->
-> **`https://` connections are not supported**: pairing speaks plain HTTP and requires `host:port`, so a `sessionhubd tunnel` URL cannot be paired. To cross the internet, run it over a VPN.
+> On a `host:port` address the traffic is **not encrypted**, exactly as with Network access. The token proves who is calling; it does not hide what is being said. A paired machine means **full access** to that machine — that daemon does hand out a shell. Use it only on networks you trust, over a VPN, or over `https://` as below.
+
+### Over the internet, through a tunnel
+
+A machine behind a Cloudflare tunnel is paired at its hostname, with no port:
+
+```
+https://box.example.com/pair#token=…
+```
+
+That reaches it for `machines`, `run`, `push` and `pull` — everything an agent
+needs to work on that computer. **A terminal tab to it is not supported**, and
+asking for one says so rather than hanging: a tab needs a socket that can be
+split between two threads, and a TLS connection cannot be. The file panel can
+still read its files.
+
+Nothing changes on the machine being reached. It goes on serving plain HTTP on
+loopback, cloudflared connects to it there, and its own **Network access can stay
+off** — which is the point: nothing is open on its network at all. It does not
+need a newer version either. Two things have to be true over there:
+
+- **Settings → Network access → Remote commands** is on. It is by default. With
+  it off, `run` and `push` are refused with a 403 naming the switch; `pull` still
+  works.
+- The tunnel's ingress sends that hostname to `http://localhost:7717`. sessionhub
+  will not arrange this one for you — its Cloudflare panel refuses to give a
+  hostname to its own port, on purpose — so it is set in the Cloudflare dashboard
+  or in cloudflared's config.
+
+HTTPS is spoken by handing the request to the system's `curl`, the same way
+updates are downloaded. Nothing is passed on the command line, where any other
+process on the machine could read it: the URL carries the token, so it goes into
+a config file curl reads from standard input.
+
+> `curl` honours `HTTPS_PROXY` and `ALL_PROXY` from the daemon's environment,
+> while a plain `host:port` connection does not. On a machine behind a corporate
+> proxy the two kinds of address can therefore behave differently.
+
+#### Behind Cloudflare Access
+
+If that hostname sits behind an Access policy — which is the usual reason to put
+it behind Zero Trust — create a **service token** in Cloudflare and give it to the
+machine that calls:
+
+```toml
+[[remotes]]
+name = "box"
+addr = "https://box.example.com"
+token = "…"
+access_id = "abc123.access"
+access_secret = "…"
+```
+
+Both or neither: half a service token is answered with a login page, so it is
+refused before anything is dialled. The pairing link can carry them, which saves
+editing the file by hand:
+
+```
+https://box.example.com/pair#token=…&cf_id=…&cf_secret=…
+```
+
+Without them, Access answers with its login page and sessionhub says so by name
+rather than complaining that the reply was not JSON.
+
+There is no way to skip certificate verification, deliberately. A self-signed
+certificate is refused with a message that says so.
 

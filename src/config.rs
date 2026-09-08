@@ -319,12 +319,23 @@ pub fn check_saved_name(name: &str) -> Result<(), String> {
 pub struct Remote {
     /// The name clients use for it; also its tab label.
     pub name: String,
-    /// `host:port` of the daemon over there.
+    /// Where the daemon over there is: `host:port` on a local network, or
+    /// `https://box.example.com` for one behind a tunnel.
     pub addr: String,
     pub token: String,
     /// The version that machine answered with when it was last paired.
     #[serde(default)]
     pub version: String,
+    /// A Cloudflare Access service token, for a machine whose hostname sits
+    /// behind an Access policy. Both halves or neither — half a token is
+    /// answered with a login page, which reads like a broken daemon.
+    ///
+    /// Per machine rather than global: two machines behind two Access
+    /// applications have two different service tokens.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub access_id: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub access_secret: String,
 }
 
 /// Limits for files dropped from the browser into `~/.sessionhub/dropped/`.

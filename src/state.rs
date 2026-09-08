@@ -1192,10 +1192,16 @@ pub fn run(cfg: Config, rx: Receiver<Cmd>, tx: Sender<Cmd>, registry_cfg: Sender
                     // that fails to open with nothing to explain it. Off the
                     // actor, because it calls another machine.
                     let token = current.token.clone();
+                    // Carried across: changing where a machine lives does not
+                    // change what it takes to be let in.
+                    let access_id = current.access_id.clone();
+                    let access_secret = current.access_secret.clone();
                     let probing = wanted.clone();
                     let (done, wait) = crossbeam_channel::bounded(1);
                     std::thread::spawn(move || {
-                        let _ = done.send(crate::remote::probe(&probing, &token));
+                        let peer = crate::remote::Peer::at(&probing)
+                            .with_access(&access_id, &access_secret);
+                        let _ = done.send(crate::remote::probe(&peer, &token));
                     });
                     let outcome = wait
                         .recv_timeout(std::time::Duration::from_secs(20))
@@ -2446,7 +2452,20 @@ fn remotes_msg(cfg: &Config) -> ServerMsg {
 /// none was given — an address that moved usually moved only in front of the
 /// colon.
 fn full_addr(typed: &str, current: &str) -> Result<String, String> {
-    let typed = typed.trim().trim_start_matches("http://").trim_end_matches('/');
+    let raw = typed.trim();
+    if raw.is_empty() {
+        return Err("An address is needed, like 192.168.0.101:7717.".into());
+    }
+    // An https address carries its own port — 443 unless it says otherwise — so
+    // the current entry's port must not be pinned onto it. That is how a working
+    // `https://box.example.com` used to turn into `https://box.example.com:7717`
+    // and pass every check below.
+    if let Ok(t) = crate::remote::parse_addr(raw) {
+        if t.tls {
+            return Ok(t.canonical());
+        }
+    }
+    let typed = raw.trim_start_matches("http://").trim_end_matches('/');
     if typed.is_empty() {
         return Err("An address is needed, like 192.168.0.101:7717.".into());
     }
@@ -2487,7 +2506,9 @@ fn pair_remote(
     if crate::remote::is_self(&addr, our_port) {
         return Err(format!("{addr} is this machine. Pair with a different one."));
     }
-    let status = crate::remote::probe(&addr, &parsed.token)?;
+    let peer = crate::remote::Peer::at(&addr)
+        .with_access(&parsed.access_id, &parsed.access_secret);
+    let status = crate::remote::probe(&peer, &parsed.token)?;
 
     // Re-pairing the same address keeps the existing name, so tabs and stored
     // projects do not get renamed behind your back.
@@ -2504,7 +2525,14 @@ fn pair_remote(
         }
     };
 
-    Ok(crate::config::Remote { name, addr, token: parsed.token, version: status.version })
+    Ok(crate::config::Remote {
+        name,
+        addr,
+        token: parsed.token,
+        version: status.version,
+        access_id: parsed.access_id,
+        access_secret: parsed.access_secret,
+    })
 }
 
 /// Run something slow away from the actor and wait for it.
@@ -3076,6 +3104,27 @@ mod tests {
         // IPv6 carries colons of its own; only a `]:port` tail is a port.
         assert_eq!(full_addr("[fe80::1]", "x:7717").unwrap(), "[fe80::1]:7717");
         assert_eq!(full_addr("[fe80::1]:7788", "x:7717").unwrap(), "[fe80::1]:7788");
+    }
+
+    /// The trap this had: an https address carries its own port, and pinning the
+    /// current entry's port onto it produced `https://box.example.com:7717` —
+    /// which then passed every check below and quietly stopped working.
+    #[test]
+    fn an_https_address_does_not_get_a_port_pinned_onto_it() {
+        assert_eq!(
+            full_addr("https://box.example.com", "10.0.0.1:7717").unwrap(),
+            "https://box.example.com"
+        );
+        assert_eq!(
+            full_addr("  https://box.example.com/  ", "10.0.0.1:7717").unwrap(),
+            "https://box.example.com"
+        );
+        assert_eq!(
+            full_addr("https://box.example.com:8443", "10.0.0.1:7717").unwrap(),
+            "https://box.example.com:8443"
+        );
+        // A LAN address still borrows the port it had.
+        assert_eq!(full_addr("192.168.0.9", "10.0.0.1:7788").unwrap(), "192.168.0.9:7788");
     }
 
     #[test]

@@ -286,7 +286,7 @@ fn call(api_token: &str, method: &str, url: &str, body: Option<&str>) -> Result<
     }
     args.push(url.to_string());
 
-    let out = crate::pty::quiet_command(curl_path())
+    let out = crate::pty::quiet_command(crate::pty::curl_path())
         .args(&args)
         .output()
         .map_err(|e| format!("could not run curl: {e}"))?;
@@ -362,17 +362,6 @@ fn write_private(path: &PathBuf, text: &str) -> Result<(), String> {
         let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
     }
     Ok(())
-}
-
-/// The system's own curl, by absolute path on Windows — `curl` on PATH there is
-/// often an alias for PowerShell's `Invoke-WebRequest`, which takes different
-/// arguments entirely. The same reasoning as `update.rs`.
-fn curl_path() -> PathBuf {
-    if cfg!(windows) {
-        PathBuf::from(r"C:\Windows\System32\curl.exe")
-    } else {
-        PathBuf::from("curl")
-    }
 }
 
 #[cfg(test)]

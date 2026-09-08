@@ -19,7 +19,7 @@
 //! What this costs the user is stated plainly in the UI rather than hidden: the
 //! daemon restarts, and every live terminal is a child of it.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Command;
 
 use tracing::{info, warn};
@@ -310,7 +310,7 @@ fn ext() -> &'static str {
 }
 
 fn curl(args: &[&str]) -> Result<Vec<u8>, String> {
-    let out = crate::pty::quiet_command(curl_path())
+    let out = crate::pty::quiet_command(crate::pty::curl_path())
         .args(args)
         .output()
         .map_err(|e| format!("could not run curl: {e}"))?;
@@ -319,18 +319,6 @@ fn curl(args: &[&str]) -> Result<Vec<u8>, String> {
         return Err(format!("download failed: {}", why.trim()));
     }
     Ok(out.stdout)
-}
-
-/// The system's own curl, by absolute path on Windows.
-///
-/// `curl` on PATH there is often an alias for PowerShell's `Invoke-WebRequest`,
-/// which takes different arguments entirely.
-fn curl_path() -> PathBuf {
-    if cfg!(windows) {
-        PathBuf::from(r"C:\Windows\System32\curl.exe")
-    } else {
-        PathBuf::from("curl")
-    }
 }
 
 /// Write the handoff script and start it detached.

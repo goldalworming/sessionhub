@@ -441,6 +441,20 @@ fn with_extensions(base: &Path) -> impl Iterator<Item = PathBuf> + '_ {
         .chain(std::iter::once(base.to_path_buf()))
 }
 
+/// The system's own curl, by absolute path on Windows.
+///
+/// `curl` on PATH there is often an alias for PowerShell's `Invoke-WebRequest`,
+/// which takes different arguments entirely. Lives here rather than in any one
+/// caller because three modules now shell out to it — updates, the Cloudflare
+/// API, and reaching a machine over https.
+pub fn curl_path() -> std::path::PathBuf {
+    if cfg!(windows) {
+        std::path::PathBuf::from(r"C:\Windows\System32\curl.exe")
+    } else {
+        std::path::PathBuf::from("curl")
+    }
+}
+
 /// Terminal capabilities are announced by the emulator, and here the emulator is
 /// this daemon together with the xterm.js in front of it — not the environment
 /// of whichever process happened to run `sessionhubd start`.
