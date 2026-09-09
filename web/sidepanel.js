@@ -84,6 +84,7 @@ export class SidePanel {
       make: on.make,
       shell: on.shell,
       up: on.up,
+      copy: on.copy,
     });
     this.editor = new Editor(this.body, {
       save: on.save,

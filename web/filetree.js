@@ -25,7 +25,7 @@ export class FileTree {
   /// and the folder picker use, so one theme covers all three. `make(parent,
   /// name, dir)` creates something, and `shell(path)` opens a terminal in a
   /// folder. Both are optional: without them the panel is exactly what it was.
-  constructor(host, { list, open, root, projects, pick, menu, make, shell, up }) {
+  constructor(host, { list, open, root, projects, pick, menu, make, shell, up, copy }) {
     this.onList = list;
     this.onOpen = open;
     this.getRoot = root;
@@ -37,6 +37,8 @@ export class FileTree {
     /// `up(path, name)` moves the whole tree to the folder above. Optional: a
     /// daemon too old to say what that folder is gets no `..` row at all.
     this.onUp = up;
+    /// `copy(path)` puts one path on the clipboard, ready to paste.
+    this.onCopy = copy;
     /// Whether the daemon that answered the last listing understands
     /// `make_entry`. An older one does not, and then nothing is offered rather
     /// than a menu entry that would go unanswered. Absent means no.
@@ -237,6 +239,19 @@ export class FileTree {
     const name = folder.split(/[\\/]/).filter(Boolean).pop() || folder;
 
     const items = [];
+    // The row's own path, and the row's own action — so it leads, above the
+    // things that are made *in* a folder. Right-clicking a file means that
+    // file; the `..` row means the folder it leads to; a `Loading…` row names
+    // nothing, so it falls back to the folder it sits in.
+    if (this.onCopy) {
+      const target = r && r.path && !r.note ? r.path : folder;
+      items.push({
+        label: 'Copy path',
+        hint: r && r.isDir === false ? 'file' : 'folder',
+        run: () => this.onCopy(target),
+      });
+      items.push({ sep: true });
+    }
     if (this.canMake && this.onMake) {
       items.push({ label: 'New file…', hint: name, run: () => this.askName(folder, false) });
       items.push({ label: 'New folder…', hint: name, run: () => this.askName(folder, true) });
@@ -334,11 +349,11 @@ export class FileTree {
   walk(path, depth, rows) {
     const state = this.dirs.get(path);
     if (!state || state.loading) {
-      rows.push({ path: `${path} loading`, name: 'Loading…', depth, note: true });
+      rows.push({ path: `${path}\0loading`, name: 'Loading…', depth, note: true });
       return;
     }
     if (state.failed) {
-      rows.push({ path: `${path} failed`, name: 'Could not read this folder', depth, note: true });
+      rows.push({ path: `${path}\0failed`, name: 'Could not read this folder', depth, note: true });
       return;
     }
     const q = this.filter;
@@ -351,7 +366,7 @@ export class FileTree {
     }
     if (state.truncated) {
       rows.push({
-        path: `${path} more`,
+        path: `${path}\0more`,
         name: 'Too many entries — only the first 5000 are shown',
         depth,
         note: true,
