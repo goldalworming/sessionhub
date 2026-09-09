@@ -21,6 +21,7 @@ mod ring;
 mod service;
 mod skill;
 mod state;
+mod tasks;
 mod tray;
 mod tunnel;
 mod typed;

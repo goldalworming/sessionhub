@@ -111,6 +111,22 @@ The answer is `{"t":"dropped",…}`, or `error` with the code `drop_failed`.
   is not finished yet, and that must not drag the PTY down with it.
 - `resize` from a client that is not attached is ignored.
 - `spawn` attaches the sender straight away, so no follow-up `attach` is needed.
+- `working` on a terminal means something is running under it that is not the
+  agent itself: a background command, a build, a dev server. It is read from the
+  **process tree**, sampled every couple of seconds, so it holds for every
+  harness — it is a fact about the operating system, not about the agent. The
+  daemon learns what each terminal looks like at rest by keeping the smallest
+  process count it has seen, which calibrates per harness (`claude` rests at one
+  process, `opencode` at three) without anything being hardcoded.
+- `jobs` names that work, when the harness writes it down. Claude Code does: a
+  `tool_use` opens one with a description, a `<task-notification>` closes it.
+  Other harnesses leave the list empty and only `working` is known. Absent on a
+  daemon too old to send either, which reads as "no".
+- The tree is the authority, the transcript only supplies the words. A job the
+  transcript opened and never closed — the notification is written when the
+  agent is told, and it is not always told — is dropped once the tree has been
+  at rest for a few samples. Measured on a real session: four jobs left open,
+  one actually running.
 - `set_agent` and `set_lan_access` write to `config.toml` and are then always
   answered with the latest `config`, so a client never has to guess what was
   stored.
@@ -207,7 +223,10 @@ The answer is `{"t":"dropped",…}`, or `error` with the code `drop_failed`.
    ]}
  ],
  "terminals":[{"id":3,"project":"C:\\data\\code\\notex","agent":"claude",
-               "alive":true,"cols":120,"rows":32,"session_id":"a1b2…"}]}
+               "alive":true,"cols":120,"rows":32,"session_id":"a1b2…",
+               "working":true,
+               "jobs":[{"label":"Download Detour final film","kind":"shell",
+                        "since_ms":1788948611000}]}]}
 
 {"t":"attached","id":3,"cols":120,"rows":32}
 {"t":"size","id":3,"cols":100,"rows":30}

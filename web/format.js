@@ -37,6 +37,21 @@ function dayDiff(then, now) {
 /// `24d ago` tells you the distance but not the identity: thirty sessions with
 /// exactly the same title can only be told apart when the date is something
 /// memorable, not a countdown that shifts every day.
+/// How long something has been going: `45s`, `12m`, `1h 4m`.
+///
+/// Short because it sits at the end of a sidebar row that already carries a
+/// name — the point is the order of magnitude, not the second.
+export function elapsedShort(sinceMs, now = Date.now()) {
+  if (!sinceMs) return '';
+  const secs = Math.max(0, Math.round((now - sinceMs) / 1000));
+  if (secs < 60) return `${secs}s`;
+  const mins = Math.floor(secs / 60);
+  if (mins < 60) return `${mins}m`;
+  const hours = Math.floor(mins / 60);
+  const rest = mins % 60;
+  return rest ? `${hours}h ${rest}m` : `${hours}h`;
+}
+
 export function absoluteDate(iso, now = Date.now()) {
   const t = Date.parse(iso);
   if (Number.isNaN(t)) return '';

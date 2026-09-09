@@ -2,7 +2,7 @@
 // xterm.js is loaded as a classic script from /vendor (UMD, no ESM build).
 
 import { Conn } from './conn.js';
-import { relativeTime, bytes, basename } from './format.js';
+import { relativeTime, bytes, basename, elapsedShort } from './format.js';
 import { Palette } from './palette.js';
 import { Settings } from './settings.js';
 import { Ask } from './ask.js';
@@ -1717,13 +1717,45 @@ const toasts = new Toasts(document.getElementById('stage'));
 /// Built from the machine's own state rather than the global one: the terminal
 /// that finished is very often on a machine you are not looking at, which is
 /// exactly when being told is worth anything.
-function announceDone(m, id) {
+/// Notice work that has just finished under a terminal.
+///
+/// Compared against the last state message rather than polled: the daemon only
+/// speaks when something changed, so a `working` that went true → false is the
+/// completion itself. What it was called comes from the job list as it was
+/// *before* it emptied — afterwards there is nothing left to name.
+function noteBackground(m, fresh) {
+  const was = m.background || new Map();
+  const now = new Map();
+  for (const t of fresh) {
+    if (t.working === true) now.set(t.id, t.jobs || []);
+  }
+  m.background = now;
+
+  for (const [id, jobs] of was) {
+    if (now.has(id)) continue;
+    const entry = m.terms.get(id);
+    // The agent may still be mid-sentence — a subagent that finished while the
+    // conversation carries on is not the end of anything worth a chime.
+    if (entry?.streaming) continue;
+    if (lookedAt(m, id)) continue;
+    if (entry) entry.done = true;
+    if (soundOn) ding();
+    announceDone(m, id, jobs[0]?.label || '');
+  }
+  // After the bookkeeping, so a rise and a fall are both drawn in one pass.
+  paintAllActivity(m);
+}
+
+function announceDone(m, id, job = '') {
   const t = m.state.terminals.find((x) => x.id === id);
   if (!t) return;
   const session = m.state.projects
     .flatMap((p) => p.sessions)
     .find((s) => s.session_id && s.session_id === t.session_id);
-  const what = t.name || session?.title || `terminal ${t.id}`;
+  // The job's own name when there is one: "Download Detour final film
+  // finished" is the sentence you were waiting for, and the session title is
+  // not.
+  const what = job || t.name || session?.title || `terminal ${t.id}`;
   const where = basename(t.project);
   // The machine is named only when it is not the one on screen. On a single
   // machine, saying "This machine" on every toast is noise.
@@ -1748,6 +1780,17 @@ function goToTerminal(m, id) {
   closeDrawerIfNarrow();
 }
 
+/// Work running under a terminal that is not the agent itself.
+///
+/// The daemon watches the process tree for this, which is the only way to tell
+/// "the agent stopped talking" from "the work is over". A background download
+/// writes nothing to the PTY, so the output-timing heuristic below sees silence
+/// and would otherwise call it finished with two hours left to run.
+function backgroundOf(m, id) {
+  const t = m.state.terminals.find((x) => x.id === id);
+  return { working: t?.working === true, jobs: t?.jobs || [] };
+}
+
 /// Is this terminal the thing the user is looking at right now?
 const lookedAt = (m, id) =>
   m === current && id === activeId && document.hasFocus() && !document.hidden;
@@ -1757,16 +1800,34 @@ const lookedAt = (m, id) =>
 /// carry the id in a data attribute precisely so this never rebuilds anything.
 function paintActivity(m, id, entry) {
   const busy = entry.streaming === true;
+  // Streaming wins: while the agent is talking, that is the more immediate
+  // fact. Background work only claims the mark once the terminal goes quiet.
+  const working = !busy && backgroundOf(m, id).working;
+  const done = !busy && !working && entry.done === true;
   if (m === current) {
     const dot = el.tabs.querySelector(`.tab[data-id="${id}"] .tdot`);
     if (dot) {
       dot.classList.toggle('busy', busy);
-      dot.classList.toggle('done', !busy && entry.done === true);
+      dot.classList.toggle('bgwork', working);
+      dot.classList.toggle('done', done);
     }
     for (const row of el.tree.querySelectorAll(`[data-tid="${id}"]`)) {
       row.classList.toggle('tbusy', busy);
-      row.classList.toggle('tdone', !busy && entry.done === true);
+      row.classList.toggle('tbgwork', working);
+      row.classList.toggle('tdone', done);
     }
+  }
+}
+
+/// Repaint every live terminal's mark.
+///
+/// `paintActivity` needs an entry for the output-timing half; a terminal this
+/// browser never attached to has none, and an empty object is the honest stand
+/// in — not streaming, not done, and the background half comes from the state
+/// message either way.
+function paintAllActivity(m) {
+  for (const t of m.state.terminals) {
+    if (t.alive) paintActivity(m, t.id, m.terms.get(t.id) || {});
   }
 }
 
@@ -1774,6 +1835,14 @@ function paintActivity(m, id, entry) {
 /// arrives (in `onOutput`); this sweep is what notices the silence afterwards.
 setInterval(() => {
   const now = performance.now();
+  // The age on each background job line. Only while something is running, so
+  // the usual case costs one map lookup.
+  if (current?.background?.size) {
+    for (const line of el.tree.querySelectorAll('.zjob[data-since]')) {
+      const age = line.querySelector('.zjage');
+      if (age) age.textContent = elapsedShort(Number(line.dataset.since));
+    }
+  }
   for (const m of machines) {
     for (const [id, entry] of m.terms) {
       if (entry.busySince === undefined) continue;
@@ -1793,6 +1862,14 @@ setInterval(() => {
       entry.busySince = undefined;
       entry.runBytes = 0;
       entry.streaming = false;
+      // The agent has stopped, but what it started has not. Announcing it now
+      // would be the one thing worse than saying nothing: it is exactly the
+      // moment you would walk away. The announcement waits for the tree to go
+      // quiet, in `onState` below.
+      if (backgroundOf(m, id).working) {
+        paintActivity(m, id, entry);
+        continue;
+      }
       if (ranLong && ranReal && !lookedAt(m, id)) {
         entry.done = true;
         if (soundOn) ding();
@@ -2506,6 +2583,7 @@ conn.on.onState = (msg, m) => {
   // Before anything is drawn, and for background machines too — a machine whose
   // daemon restarted while it sat in another tab must not come back holding
   // stale tabs.
+  noteBackground(m, msg.terminals || []);
   noteDaemonRun(m, st.terminals);
   if (m !== current) return;
   if (pendingReattach) {
@@ -2514,6 +2592,7 @@ conn.on.onState = (msg, m) => {
   }
   renderTree();
   renderTabs();
+  paintAllActivity(m);
   revealNewProject();
   sidePanel.syncRoots();
   offerSessionPicker();

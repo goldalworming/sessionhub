@@ -48,6 +48,9 @@ pub enum Cmd {
     Registry(Vec<ProjectInfo>),
     /// The latest reading from the machine sampler.
     Load { cpu_percent: f32, ram_used: u64, ram_total: u64 },
+    /// What each live terminal's process tree and transcript say about work
+    /// running under it. Sampled off the actor, on the load tick.
+    Background(Vec<(u32, u32, Vec<crate::proto::BgJob>)>),
     /// Answer with (live terminals, total terminals) for `sessionhubd status`.
     Stats { reply: Sender<(usize, usize)> },
     /// Answer with the remote entry of this name. The actor holds the live
@@ -70,6 +73,18 @@ struct Client {
     /// A copy of the receiving end, used only to drop the oldest chunk when the
     /// queue is full. Never used to read ordinary messages.
     rx: Receiver<Out>,
+}
+
+impl Terminal {
+    /// Is something running under this terminal besides the agent?
+    ///
+    /// `resting` is the fewest processes ever counted in its tree, so anything
+    /// above that is work the agent started. Zero means nothing has been
+    /// sampled yet — before the first tick the honest answer is "no", not a
+    /// guess.
+    fn working(&self) -> bool {
+        self.resting > 0 && self.procs > self.resting
+    }
 }
 
 struct Terminal {
@@ -100,6 +115,17 @@ struct Terminal {
     name: Option<String>,
     /// The colour its tab is tagged with, one of `config::TAB_COLORS`.
     color: Option<String>,
+    /// Processes in this terminal's tree at the last sample, and the fewest ever
+    /// counted. The smallest is what this terminal looks like with nothing
+    /// running under it — which cannot be hardcoded, because `claude` rests at
+    /// one process and `opencode` at three. Taking the minimum calibrates it
+    /// per harness within seconds of the first idle moment, and a minimum never
+    /// overstates, so `procs > resting` is never a false alarm once seen.
+    procs: u32,
+    resting: u32,
+    /// The named jobs from the transcript, kept so the state message can be
+    /// rebuilt without touching the disk.
+    jobs: Vec<crate::proto::BgJob>,
     /// What is being typed at the prompt, so naming this terminal can offer the
     /// command it is running.
     typed: TypedLine,
@@ -2179,7 +2205,36 @@ pub fn run(cfg: Config, rx: Receiver<Cmd>, tx: Sender<Cmd>, registry_cfg: Sender
                 }
             },
 
+            Cmd::Background(rows) => {
+                let mut changed = false;
+                for (id, procs, jobs) in rows {
+                    let Some(t) = terminals.get_mut(&id) else { continue };
+                    // A tree of zero is a terminal that has just gone; it must
+                    // not drag the resting size down with it.
+                    if procs >= 1 && (t.resting == 0 || procs < t.resting) {
+                        t.resting = procs;
+                    }
+                    let was = t.working();
+                    t.procs = procs;
+                    // The transcript only names the work; the tree decides
+                    // whether it is still going. A job left open by a
+                    // notification that never arrived disappears here.
+                    let fresh = if t.working() { jobs } else { Vec::new() };
+                    // Compared, not assumed: while a download runs this tick
+                    // fires every couple of seconds, and a state message per
+                    // tick would redraw the sidebar for nothing.
+                    if t.working() != was || t.jobs != fresh {
+                        t.jobs = fresh;
+                        changed = true;
+                    }
+                }
+                if changed {
+                    send_state(&cfg, &projects, &agent_names, scanned, &clients, &terminals, None);
+                }
+            }
+
             Cmd::Load { cpu_percent, ram_used, ram_total } => {
+                start_background_sample(&terminals, &tx);
                 let msg = ServerMsg::Load { cpu_percent, ram_used, ram_total };
                 // Kept as well as sent: a client that connects between readings
                 // would otherwise show nothing for its first couple of seconds.
@@ -2338,6 +2393,67 @@ fn spawn_terminal(
     build_terminal(cfg, id, run, project, agent, args, resume, cols, rows, tx)
 }
 
+/// Look at what is running under each live terminal, and what it is called.
+///
+/// Runs on a short-lived thread for the same reason the memory sample does: it
+/// loads the process table and reads files, and the actor must never wait on
+/// either. One sample at a time — the tick is every couple of seconds and a
+/// slow disk must not pile threads up behind it.
+fn start_background_sample(terminals: &HashMap<u32, Terminal>, tx: &Sender<Cmd>) {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Mutex, OnceLock};
+
+    static BUSY: AtomicBool = AtomicBool::new(false);
+    static WATCHER: OnceLock<Mutex<crate::tasks::Watcher>> = OnceLock::new();
+
+    let live: Vec<(u32, u32, Option<String>, u32)> = terminals
+        .values()
+        .filter(|t| t.alive)
+        .filter_map(|t| Some((t.id, t.pty.as_ref()?.pid()?, t.session_id.clone(), t.resting)))
+        .collect();
+    if live.is_empty() || BUSY.swap(true, Ordering::SeqCst) {
+        return;
+    }
+
+    let tx = tx.clone();
+    std::thread::spawn(move || {
+        let roots: Vec<(u32, u32)> = live.iter().map(|(id, pid, ..)| (*id, *pid)).collect();
+        let counts = crate::memory::sample(&roots);
+
+        let mut rows = Vec::with_capacity(live.len());
+        let watcher = WATCHER.get_or_init(|| Mutex::new(crate::tasks::Watcher::default()));
+        if let Ok(mut w) = watcher.lock() {
+            let sessions: Vec<String> =
+                live.iter().filter_map(|(_, _, s, ..)| s.clone()).collect();
+            w.retain(&sessions);
+            for (id, _, session, resting) in &live {
+                let procs =
+                    counts.iter().find(|m| m.id == *id).map(|m| m.processes as u32).unwrap_or(0);
+                // The tree is the authority on whether the work is over. When it
+                // is back to resting, the transcript's open jobs are retired
+                // here — otherwise a notification that never arrived would leave
+                // them to reappear the next time anything ran.
+                let running = *resting > 0 && procs > *resting;
+                let jobs = match session {
+                    Some(sid) => w
+                        .poll(sid, running)
+                        .into_iter()
+                        .map(|j| crate::proto::BgJob {
+                            label: j.label,
+                            kind: j.kind.to_string(),
+                            since_ms: j.since_ms,
+                        })
+                        .collect(),
+                    None => Vec::new(),
+                };
+                rows.push((*id, procs, jobs));
+            }
+        }
+        BUSY.store(false, Ordering::SeqCst);
+        let _ = tx.send(Cmd::Background(rows));
+    });
+}
+
 /// The part shared by spawn and fork: only the arguments differ.
 #[allow(clippy::too_many_arguments)]
 fn build_terminal(
@@ -2401,6 +2517,9 @@ fn build_terminal(
         color: None,
         typed: TypedLine::default(),
         pending_run: None,
+        procs: 0,
+        resting: 0,
+        jobs: Vec::new(),
     })
 }
 
@@ -2855,6 +2974,8 @@ fn send_state(
             session_id: t.session_id.clone(),
             name: t.name.clone(),
             color: t.color.clone(),
+            working: t.working(),
+            jobs: t.jobs.clone(),
         })
         .collect();
     list.sort_by_key(|t| t.id);
@@ -2986,6 +3107,9 @@ mod tests {
             color: None,
             typed: TypedLine::default(),
             pending_run: None,
+            procs: 0,
+            resting: 0,
+            jobs: Vec::new(),
         }
     }
 

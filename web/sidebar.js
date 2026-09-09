@@ -9,7 +9,7 @@
 // 31 identically titled sessions pushed seven other projects off screen, and
 // `24d ago` distinguished nothing because the number shifts every day.
 
-import { absoluteDate, dayBucket, BUCKETS } from './format.js';
+import { absoluteDate, dayBucket, elapsedShort, BUCKETS } from './format.js';
 
 const LS_BUCKETS = 'sh.buckets';
 const LS_ALIAS = 'sh.alias';
@@ -331,6 +331,7 @@ function recentRows(ctx, liveSession) {
           live: true,
           color: t.color,
           tid: t.id,
+          jobs: t.jobs,
           selected: t.id === ctx.activeId,
           open: () => ctx.attach(t.id),
         }),
@@ -348,6 +349,7 @@ function recentRows(ctx, liveSession) {
           live: true,
           color: t.color,
           tid: t.id,
+          jobs: t.jobs,
           selected: t.id === ctx.activeId,
           open: () => (ctx.terms.has(t.id) ? ctx.show(t.id) : ctx.attach(t.id)),
         }),
@@ -474,6 +476,27 @@ function zoneRow(ctx, o) {
   meta.appendChild(el('span', null, '·'));
   meta.appendChild(el('span', null, o.agent));
   col.appendChild(meta);
+
+  // Work still running under this terminal after the agent stopped talking.
+  //
+  // The row above says the conversation is idle, and until now that was the
+  // only thing shown — so a download with two hours left looked exactly like a
+  // finished one. Each job gets its own line because that is what you came to
+  // read: which one, and how long it has been going.
+  for (const j of o.jobs || []) {
+    const line = el('div', 'zjob');
+    // The clock is kept here rather than recomputed from the message: state
+    // arrives only when something changes, and a job that runs for an hour
+    // would otherwise show the minute it started at until it ended.
+    if (j.since_ms) line.dataset.since = String(j.since_ms);
+    line.appendChild(el('span', 'zjkind', j.kind === 'agent' ? '⌁' : '▸'));
+    line.appendChild(el('span', 'zjname', j.label));
+    const age = elapsedShort(j.since_ms);
+    if (age) line.appendChild(el('span', 'zjage', age));
+    line.title =
+      j.kind === 'agent' ? `subagent · running ${age}` : `background command · running ${age}`;
+    col.appendChild(line);
+  }
   r.appendChild(col);
 
   if (o.session) r.dataset.sid = o.session.s.session_id;

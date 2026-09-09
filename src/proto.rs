@@ -726,6 +726,28 @@ pub struct TerminalInfo {
     /// when untagged.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub color: Option<String>,
+    /// Something is running under this terminal that is not the agent itself: a
+    /// background command, a build, a dev server. Read from the process tree,
+    /// so it holds for every harness — and it is the only thing that separates
+    /// "the agent finished" from "the work finished".
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub working: bool,
+    /// What that work is called, when the harness wrote it down. Claude Code
+    /// does; the rest leave this empty and the panel says how many rather than
+    /// which.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub jobs: Vec<BgJob>,
+}
+
+/// One background job an agent started and has not reported finished.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct BgJob {
+    /// What the agent called it — a line written for a person to read.
+    pub label: String,
+    /// `agent` for a subagent, `shell` for a background command.
+    pub kind: String,
+    /// When it started, in milliseconds since the epoch. 0 when unknown.
+    pub since_ms: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]

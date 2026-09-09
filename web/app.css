@@ -693,6 +693,47 @@ html, body {
 @media (prefers-reduced-motion: reduce) {
   #tree [data-tid].tbusy .dot { animation: none; }
 }
+/* Work still running after the agent went quiet.
+   A colour of its own, not amber and not green: amber means "it is talking to
+   you", green means "you can stop waiting", and this is neither. It breathes
+   more slowly than the busy mark for the same reason — nothing here needs
+   watching, it just is not finished. */
+.tdot.bgwork {
+  display: inline-block;
+  background: var(--t-bright-blue);
+  animation: actpulse 3.2s ease-in-out infinite;
+}
+#tree [data-tid].tbgwork .dot {
+  background: var(--t-bright-blue);
+  border-color: var(--t-bright-blue);
+  animation: actpulse 3.2s ease-in-out infinite;
+}
+@media (prefers-reduced-motion: reduce) {
+  .tdot.bgwork,
+  #tree [data-tid].tbgwork .dot { animation: none; }
+}
+
+/* One line per background job, under the row that started it. Indented to the
+   title above rather than the row edge: it belongs to that conversation, and a
+   flat list of five would read as five sessions. */
+.zjob {
+  display: flex;
+  align-items: baseline;
+  gap: 5px;
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--muted);
+  min-width: 0;
+}
+.zjkind { flex: 0 0 auto; color: var(--t-bright-blue); font-size: 10px; }
+.zjname {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.zjage { flex: 0 0 auto; font-variant-numeric: tabular-nums; }
 
 /* The bell is drawn, and the icon must never be what the click lands on. */
 #sound-btn svg { pointer-events: none; display: block; }
