@@ -1739,6 +1739,7 @@ function noteBackground(m, fresh) {
     if (entry?.streaming) continue;
     if (lookedAt(m, id)) continue;
     if (entry) entry.done = true;
+    else (m.finished ||= new Set()).add(id);
     if (soundOn) ding();
     announceDone(m, id, jobs[0]?.label || '');
   }
@@ -1803,7 +1804,7 @@ function paintActivity(m, id, entry) {
   // Streaming wins: while the agent is talking, that is the more immediate
   // fact. Background work only claims the mark once the terminal goes quiet.
   const working = !busy && backgroundOf(m, id).working;
-  const done = !busy && !working && entry.done === true;
+  const done = !busy && !working && (entry.done === true || m.finished?.has(id) === true);
   if (m === current) {
     const dot = el.tabs.querySelector(`.tab[data-id="${id}"] .tdot`);
     if (dot) {
@@ -1886,9 +1887,10 @@ setInterval(() => {
 /// Seeing it is acknowledging it.
 function clearDone(id) {
   const entry = terms.get(id);
-  if (entry?.done) {
-    entry.done = false;
-    paintActivity(current, id, entry);
+  const kept = current?.finished?.delete(id);
+  if (entry?.done || kept) {
+    if (entry) entry.done = false;
+    paintActivity(current, id, entry || {});
   }
 }
 
