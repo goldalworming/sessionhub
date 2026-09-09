@@ -1396,6 +1396,9 @@ html, body {
   border-radius: var(--radius);
   padding: 4px 0;
   min-width: 168px;
+  /* Never wider than the screen it has to fit on. Without this the clamp in
+     `openMenu` could only choose which end got cut off. */
+  max-width: calc(100vw - 16px);
   box-shadow: var(--shadow);
 }
 #menu[hidden] { display: none; }
@@ -1429,8 +1432,19 @@ html, body {
   white-space: nowrap;
 }
 #menu .magent:hover { background: none; }
-.magent .maname { font-weight: 600; }
-.magent .macount { margin-right: auto; font-size: 10.5px; color: var(--muted); }
+.magent .maname { flex: 0 1 auto; min-width: 0; overflow: hidden;
+                  text-overflow: ellipsis; font-weight: 600; }
+/* The first thing to give way when the row is too wide for the screen: the two
+   buttons are the point of this row, and "no history here" is a courtesy. */
+.magent .macount {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  margin-right: auto;
+  font-size: 10.5px;
+  color: var(--muted);
+}
 /* Nothing to resume reads differently from "three sessions", and the eye should
    catch that before it reaches the greyed-out button. */
 .magent .macount.none { font-style: italic; opacity: 0.75; }
@@ -2337,6 +2351,14 @@ html, body {
    where the pointer is coarse, so nothing moves on a desktop. */
 @media (pointer: coarse) {
   #splitter::after, #fsplit::after, .psplit::after { inset: 0 -10px; }
+
+  /* The same rule applied to the menus. A 20px-tall Resume button is a mouse
+     target; on a phone it is a thing you miss twice before you hit it. The rows
+     grow with the buttons so the menu stays a list of even bands. */
+  #menu div { padding: 10px 12px; }
+  #menu .magent { padding: 8px 12px; gap: 10px; }
+  #menu .magent .secbtn { min-height: 34px; padding: 6px 14px; font-size: 12px; }
+  #menu .mhint { margin-left: 10px; }
 }
 .pmain {
   flex: 1 1 auto;

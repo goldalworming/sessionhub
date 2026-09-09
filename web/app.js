@@ -1610,9 +1610,29 @@ function openMenu(x, y, items) {
     };
     el.menu.appendChild(d);
   }
-  el.menu.style.left = `${x}px`;
-  el.menu.style.top = `${y}px`;
+  // Placed where the finger is, then pulled back inside the screen.
+  //
+  // A menu opened from the ＋ at the right edge of a sidebar row used to run
+  // 170px past the edge of a phone, and the half that went missing was the
+  // half that mattered: `elementFromPoint` on the Resume button answered null,
+  // because there was nothing there to touch.
+  //
+  // Measured after it is shown — the width depends on the longest agent name,
+  // which is only known once the rows exist. `clientWidth` rather than
+  // `innerWidth`: the latter grows with the very overflow this prevents.
+  el.menu.style.left = '0px';
+  el.menu.style.top = '0px';
   el.menu.hidden = false;
+  const pad = 8;
+  const vw = document.documentElement.clientWidth;
+  const vh = document.documentElement.clientHeight;
+  const box = el.menu.getBoundingClientRect();
+  const left = Math.max(pad, Math.min(x, vw - box.width - pad));
+  // Below the finger when there is room, above it when there is not. Half a
+  // menu hanging off the bottom is the same problem turned ninety degrees.
+  const top = y + box.height > vh - pad ? Math.max(pad, y - box.height) : y;
+  el.menu.style.left = `${left}px`;
+  el.menu.style.top = `${top}px`;
 }
 function closeMenu() {
   el.menu.hidden = true;
