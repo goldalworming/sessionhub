@@ -2134,37 +2134,25 @@ const settings = new Settings(
 // whose panel is open.
 settings.onLanAddr = (addr) => conn.send({ t: 'set_lan_addr', addr });
 
-/// Put text on the clipboard, wherever the panel happens to be open.
+/// Can this page put something on the clipboard by itself?
 ///
-/// `navigator.clipboard` needs a secure context, and the address this is used
-/// from most is exactly the one that is not: the panel opened at a LAN address
-/// over plain HTTP, from a phone. The old `execCommand` still works there, so
-/// it stands behind the modern one rather than leaving the click silent.
+/// Only in a secure context: `https://`, or loopback, which browsers count as
+/// secure. Over plain HTTP at a LAN address — the way this panel is most often
+/// opened from a phone — `navigator.clipboard` is simply not there.
+///
+/// The deprecated `document.execCommand('copy')` is deliberately not used as a
+/// fallback. It works in some browsers and not others, and worse, several
+/// mobile ones answer `true` having copied nothing — a claim that something is
+/// on the clipboard when it is not is worse than saying plainly that it cannot
+/// be done.
+const canCopy = () => window.isSecureContext && !!navigator.clipboard?.writeText;
+
 async function copyText(text) {
   try {
-    if (navigator.clipboard?.writeText) {
-      await navigator.clipboard.writeText(text);
-      return true;
-    }
+    await navigator.clipboard.writeText(text);
+    return true;
   } catch {
-    // Refused — a permissions policy, or no secure context. Fall through.
-  }
-  try {
-    const box = document.createElement('textarea');
-    box.value = text;
-    box.setAttribute('readonly', '');
-    // Off-screen rather than hidden: a field that is not laid out cannot be
-    // selected, and without a selection there is nothing to copy.
-    box.style.position = 'fixed';
-    box.style.top = '-1000px';
-    box.style.opacity = '0';
-    document.body.appendChild(box);
-    box.select();
-    box.setSelectionRange(0, text.length);
-    const ok = document.execCommand('copy');
-    box.remove();
-    return ok;
-  } catch {
+    // Present but refused — a permissions policy, or a page that lost focus.
     return false;
   }
 }
@@ -2318,19 +2306,21 @@ sidePanel = new SidePanel(el.side, {
   // terminal without a path with spaces in it falling apart.
   copy: async (path) => {
     const text = quotePath(path);
-    if (await copyText(text)) {
+    if (canCopy() && (await copyText(text))) {
       toasts.show({ key: 'copy-path', title: 'Path copied', note: text });
       return;
     }
-    // A browser can refuse the clipboard outright, and the address this panel is
-    // most often opened at is exactly where it does: a page served over plain
-    // HTTP is not a secure context. Telling someone to copy it by hand is only
-    // useful if the path is somewhere they can reach — so it is put in a field,
-    // which opens with the text already selected.
+    // Over plain HTTP no browser will hand the page a clipboard, so there is
+    // nothing to try and nothing to wait for: the path goes straight into a
+    // field, already selected, and one long-press copies it. Telling someone to
+    // copy it by hand is only advice if the thing to copy is somewhere they can
+    // reach.
     await ask.show({
       title: 'Copy path',
       value: text,
-      note: 'This browser would not let the page reach the clipboard. The path is selected — copy it from here.',
+      note: window.isSecureContext
+        ? 'This browser would not let the page reach the clipboard. The path is selected — copy it from here.'
+        : 'Copying straight to the clipboard needs https, and this page is on plain http. The path is selected — copy it from here.',
       ok: 'Done',
     });
   },
