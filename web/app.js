@@ -292,13 +292,33 @@ let picker = null;
 /// picker in the Explorer. The last action wins: choosing a project beats the
 /// active terminal, and switching terminals takes it back.
 let pinnedProject = null;
+/// A folder walked to with the `..` row, which need not be a project at all.
+///
+/// This one IS stored, unlike every other root here, and that is the point of
+/// it: `explorerRoot` is recomputed from `state.projects` on every state
+/// message the daemon sends, so a folder that is not a project has nowhere to
+/// survive. Walking up would be undone within a second or two of arriving.
+///
+/// Kept per machine beside `pinnedProject`, and deliberately not written to
+/// storage: a reload is a fresh start, back at the project.
+let browseRoot = null;
 
 /// Move the file panel to a project. Running terminals are untouched — this is
 /// about what the panel shows, not about what is being worked on.
 function focusProject(path) {
   pinnedProject = path;
+  browseRoot = null;
   if (sidePanel) sidePanel.syncRoots();
   renderTree();
+}
+
+/// Move the file panel to any folder, project or not.
+///
+/// `path` and `name` come from the listing that named them — the daemon that
+/// owns the disk. Nothing here takes a path apart.
+function browseTo(path, name) {
+  browseRoot = { path, name };
+  if (sidePanel) sidePanel.syncRoots();
 }
 
 /// Which set of open files belongs on screen: one per (machine, project).
@@ -327,6 +347,17 @@ function explorerRoot() {
     || state.projects.find((p) => p.path.toLowerCase() === (want || '').toLowerCase())
     || state.projects.find((p) => p.exists);
   return hit ? { path: hit.path, name: hit.name } : null;
+}
+
+/// What the Explorer draws at the top of its tree.
+///
+/// Split from `explorerRoot` on purpose, and only the tree reads this one. The
+/// open files and the editor's breadcrumb stay with the project: walking up a
+/// level should not close what you have open, and `fileScope` keys stored tab
+/// sets on the root — one entry per machine and project is a bounded set, one
+/// per folder on the disk is not.
+function treeRoot() {
+  return browseRoot || explorerRoot();
 }
 
 /// Every machine that is open; `current` is the one showing.
@@ -389,6 +420,7 @@ function useMachine(m) {
     current.memById = memById;
     current.dismissed = dismissed;
     current.pinnedProject = pinnedProject;
+    current.browseRoot = browseRoot;
     current.host.hidden = true;
   }
   current = m;
@@ -398,6 +430,7 @@ function useMachine(m) {
   activeId = m.activeId;
   memById = m.memById;
   pinnedProject = m.pinnedProject;
+  browseRoot = m.browseRoot || null;
   m.host.hidden = false;
   // After the swap, not before: the scope is read from the machine now showing.
   syncScope();
@@ -2239,12 +2272,17 @@ sidePanel = new SidePanel(el.side, {
   list: (path) => conn.send({ t: 'tree', path }),
   open: (path) => conn.send({ t: 'open_file', path }),
   save: (path, text) => conn.send({ t: 'save_file', path, text }),
-  // The Explorer shows **one** project: the one being worked on. The contents of
-  // other projects only lengthen the list without ever being opened.
-  root: () => explorerRoot(),
+  // The Explorer shows one folder at a time: the project being worked on, or
+  // wherever the `..` row has been walked to since.
+  root: () => treeRoot(),
+  // Where `..` goes. The path was named by the listing it came from, so this
+  // side never has to work out what the folder above is called.
+  up: (path, name) => browseTo(path, name),
   projects: () => state.projects.filter((p) => p.exists).map((p) => ({ path: p.path, name: p.name })),
+  // Picking a project is the way back from wherever `..` led.
   pick: (path) => {
     pinnedProject = path;
+    browseRoot = null;
     sidePanel.syncRoots();
     syncScope();
   },

@@ -145,6 +145,19 @@ The answer is `{"t":"dropped",…}`, or `error` with the code `drop_failed`.
   alike, `Wi-Fi` and `VMware Network Adapter VMnet8` do not. `can_pick_lan` says
   this daemon understands `set_lan_addr`; absent means no, and no chooser is
   drawn.
+- A `tree` answer carries `name`, the folder's own name for the row at the head
+  of the panel, and `parent`, the folder above it. `parent` is **absent at a
+  drive root** — there is nowhere left to climb, and the panel draws no `..` row
+  there.
+- Both are computed by the daemon that owns the disk, and a client must use them
+  as they arrive rather than taking the path apart itself. Two reasons, and both
+  have bitten: a browser splits on its own separator while the daemon answering
+  may be on another operating system, and this side normalises `C:\data`'s
+  parent to `C:\` — a client that sent `C:` would be waiting on a folder that
+  never answers. An empty path is worse than an error: `normalize("")` means
+  *home*, so climbing past the top would silently land somewhere else.
+- A daemon too old to send `parent` simply has no `..` row drawn, the same way
+  `can_make` works.
 - `make_entry` creates one empty file or one folder for the file panel and answers
   `made` with the new path and its parent; the panel then asks for that parent
   again, so the daemon's own listing — which is also the one that sorts — stays
@@ -245,7 +258,8 @@ The answer is `{"t":"dropped",…}`, or `error` with the code `drop_failed`.
  "shells":[{"label":"Windows PowerShell","command":"powershell.exe"}],
  "lan_access":true,"lan_url":"http://192.0.2.10:7717/?token=…"}
 
-{"t":"tree","path":"C:\\data\\code\\notex","truncated":false,
+{"t":"tree","path":"C:\\data\\code\\notex","name":"notex",
+ "parent":"C:\\data\\code","truncated":false,
  "entries":[{"name":"src","path":"C:\\data\\code\\notex\\src","is_dir":true,"size":0},
             {"name":"main.rs","path":"C:\\data\\code\\notex\\main.rs","is_dir":false,"size":412}]}
 

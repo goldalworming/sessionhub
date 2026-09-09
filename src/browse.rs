@@ -163,7 +163,7 @@ pub fn normalize(input: &str) -> PathBuf {
 
 /// A readable name for a folder. A drive root has no `file_name`, so its own
 /// path is used instead.
-fn display_name(p: &Path) -> String {
+pub(crate) fn display_name(p: &Path) -> String {
     p.file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_else(|| p.to_string_lossy().into_owned())

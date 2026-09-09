@@ -58,6 +58,13 @@ pub fn list(path: &str) -> Result<TreeList, String> {
     });
 
     Ok(TreeList {
+        name: crate::browse::display_name(&dir),
+        // `parent` of a drive root is `Some("")` on Windows, not `None` — the
+        // empty string would be read back as "home", so it is dropped here.
+        parent: dir
+            .parent()
+            .map(|p| p.to_string_lossy().into_owned())
+            .filter(|p| !p.is_empty()),
         path: dir.to_string_lossy().into_owned(),
         entries,
         truncated,
@@ -186,6 +193,39 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    /// What the `..` row is built from. The panel never works a parent out for
+    /// itself: it would be splitting a path with the browser's idea of a
+    /// separator against whichever machine actually owns the disk.
+    #[test]
+    fn a_listing_names_itself_and_the_folder_above_it() {
+        let dir = sandbox("parent");
+        let inner = dir.join("nested");
+        fs::create_dir_all(&inner).unwrap();
+
+        let out = list(&inner.to_string_lossy()).unwrap();
+        assert_eq!(out.name, "nested");
+        assert_eq!(out.parent.as_deref(), Some(dir.to_string_lossy().as_ref()));
+
+        // The parent is a string this side produced, so asking for it needs no
+        // arithmetic on the other side — it lists.
+        let up = list(out.parent.as_ref().unwrap()).unwrap();
+        assert_eq!(up.path, dir.to_string_lossy());
+        assert!(up.entries.iter().any(|e| e.name == "nested" && e.is_dir));
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// The top of the disk has nowhere to go, and must say `None` rather than an
+    /// empty string — `normalize("")` means home, so an empty parent would send
+    /// the panel somewhere else entirely instead of ending the climb.
+    #[test]
+    fn the_top_of_the_disk_has_no_parent() {
+        let top = if cfg!(windows) { "C:\\" } else { "/" };
+        let out = list(top).unwrap();
+        assert!(out.parent.is_none(), "{top} answered parent={:?}", out.parent);
+        assert!(!out.name.is_empty(), "a drive root still needs something to show");
     }
 
     #[test]

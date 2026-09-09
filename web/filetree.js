@@ -25,7 +25,7 @@ export class FileTree {
   /// and the folder picker use, so one theme covers all three. `make(parent,
   /// name, dir)` creates something, and `shell(path)` opens a terminal in a
   /// folder. Both are optional: without them the panel is exactly what it was.
-  constructor(host, { list, open, root, projects, pick, menu, make, shell }) {
+  constructor(host, { list, open, root, projects, pick, menu, make, shell, up }) {
     this.onList = list;
     this.onOpen = open;
     this.getRoot = root;
@@ -34,6 +34,9 @@ export class FileTree {
     this.onMenu = menu;
     this.onMake = make;
     this.onShell = shell;
+    /// `up(path, name)` moves the whole tree to the folder above. Optional: a
+    /// daemon too old to say what that folder is gets no `..` row at all.
+    this.onUp = up;
     /// Whether the daemon that answered the last listing understands
     /// `make_entry`. An older one does not, and then nothing is offered rather
     /// than a menu entry that would go unanswered. Absent means no.
@@ -182,6 +185,11 @@ export class FileTree {
       entries: msg.entries || [],
       loading: false,
       truncated: !!msg.truncated,
+      // Both come from the machine that owns the disk, and are used exactly as
+      // they arrive. A path this side assembled would be built with the
+      // browser's idea of a separator, against a daemon that may not share it.
+      parent: msg.parent || null,
+      name: msg.name || '',
     });
     this.rebuild();
   }
@@ -301,7 +309,17 @@ export class FileTree {
         this.expanded.add(root.path);
         this.request(root.path);
       }
-      rows.push({ path: root.path, name: root.name, isDir: true, depth: 0, root: true });
+      // `..` stands above the root, and only when the folder above is known.
+      // The listing is what knows it, so the row appears a moment after the
+      // tree does — which is also when there is anywhere to go.
+      const here = this.dirs.get(root.path);
+      if (this.onUp && here && here.parent) {
+        rows.push({ path: here.parent, name: '..', isDir: true, depth: 0, up: true });
+      }
+      // A folder walked to is named by its listing; a project carries the name
+      // the sidebar gives it, which is the one you recognise.
+      const name = root.name || here?.name || root.path;
+      rows.push({ path: root.path, name, isDir: true, depth: 0, root: true });
       if (this.expanded.has(root.path)) this.walk(root.path, 1, rows);
     }
     this.rows = rows;
@@ -392,6 +410,20 @@ function fillRow(el, r, tree) {
     // reached through the row's own path, which is `<folder> loading`.
     el.oncontextmenu = (e) => tree.showMenu(e, null);
     el.title = '';
+    return;
+  }
+
+  if (r.up) {
+    el.className = 'frow up';
+    twist.textContent = '';
+    svg.style.display = '';
+    const icon = iconFor('', true, false);
+    if (use.getAttribute('href') !== `#${icon}`) use.setAttribute('href', `#${icon}`);
+    el.title = r.path;
+    el.onclick = () => tree.onUp(r.path, '');
+    // The folder this row leads to is the one its menu belongs to — "New file"
+    // on `..` can only sensibly mean up there.
+    el.oncontextmenu = (e) => tree.showMenu(e, { path: r.path, isDir: true });
     return;
   }
 

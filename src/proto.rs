@@ -557,6 +557,22 @@ pub struct RemoteInfo {
 #[derive(Debug, Clone, Serialize)]
 pub struct TreeList {
     pub path: String,
+    /// This folder's own name, for the row that stands at the head of the tree.
+    /// A drive root has no file name, so it answers with its path.
+    pub name: String,
+    /// The folder above this one. `None` at a drive root — there is nowhere
+    /// left to go up to, and the panel draws no `..` row there.
+    ///
+    /// Computed here rather than in the browser for the same reason the listing
+    /// is: this is the machine that owns the disk. A browser splitting the path
+    /// itself would be using its own idea of a separator against a daemon that
+    /// may be on another operating system — and `C:\data` would come back as
+    /// `C:`, which this side normalises to `C:\`, leaving the panel waiting on
+    /// a folder it never asked for. An empty string is worse still: it means
+    /// "home" here, so climbing past the top would silently land somewhere else
+    /// entirely.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parent: Option<String>,
     pub entries: Vec<FileEntry>,
     /// `true` when the folder was too full and the list was cut.
     pub truncated: bool,

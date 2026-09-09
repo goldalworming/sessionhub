@@ -2566,6 +2566,12 @@ html, body {
 }
 .frow.note { color: var(--muted); font-style: italic; cursor: default; }
 .frow.note:hover { background: none; }
+/* The way out of this folder, above the folder itself. Muted because it is not
+   one of the things in here — it is the wall. The name column is nudged over to
+   where a folder's name would sit, so `..` lines up with what it leads to
+   rather than floating in the twist column. */
+.frow.up { color: var(--muted); }
+.frow.up .fname { letter-spacing: 0.12em; }
 
 .ftwist { flex: 0 0 auto; width: 9px; font-size: 8px; color: var(--muted); }
 .fico { flex: 0 0 auto; width: 14px; height: 14px; }
