@@ -6,6 +6,8 @@
 // it useful from a phone.
 
 import { agentMenuRows } from './sidebar.js';
+import { match } from './fuzzy.js';
+import { mark } from './mark.js';
 
 export class Picker {
   /// `on.browse(path)` asks for a folder's contents, `on.mkdir(parent, name)`
@@ -49,6 +51,12 @@ export class Picker {
       '<button class="go">Go</button>' +
       '</div>' +
       '<div class="proots"></div>' +
+      '<div class="pfind">' +
+      '<input class="pfilter" type="text" spellcheck="false"'
+      + ' placeholder="Filter these folders…" aria-label="Filter the folders listed" />' +
+      '<button class="pfclear" hidden title="Clear the filter"'
+      + ' aria-label="Clear the filter">✕</button>' +
+      '</div>' +
       '<div class="plist"></div>' +
       '<div class="pmk"><button class="mk">New folder</button>' +
       '<input class="mkname" type="text" spellcheck="false" placeholder="Folder name" hidden />' +
@@ -61,7 +69,33 @@ export class Picker {
     root.appendChild(this.el);
 
     this.pathInput = this.el.querySelector('.ppath');
+    this.el.querySelector('.pfilter').oninput = () => this.setFilter(this.filterInput.value);
+    this.el.querySelector('.pfilter').onkeydown = (e) => {
+      if (e.key === 'Escape') {
+        e.stopPropagation(); // clearing the filter is not closing the panel
+        this.setFilter('');
+        return;
+      }
+      // Type a few letters, press Enter, and you are in the folder. The list is
+      // sorted best-first, so the first row is the one meant often enough that
+      // reaching for the mouse to confirm it would be the slower path.
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        const first = this.list.querySelector('.pentry');
+        if (first) first.click();
+      }
+    };
+    this.el.querySelector('.pfclear').onclick = () => {
+      this.setFilter('');
+      this.filterInput.focus();
+    };
     this.list = this.el.querySelector('.plist');
+    this.filterInput = this.el.querySelector('.pfilter');
+    this.filterClear = this.el.querySelector('.pfclear');
+    /// What is typed in the filter box. Folder lists here are one directory
+    /// deep and already capped, so this never leaves the browser — the entries
+    /// to search are the ones already on screen.
+    this.filter = '';
     this.roots = this.el.querySelector('.proots');
     this.note = this.el.querySelector('.pnote');
     this.upBtn = this.el.querySelector('.up');
@@ -114,6 +148,7 @@ export class Picker {
 
   show() {
     this.el.hidden = false;
+    this.setFilter('');
     this.note.textContent = 'Loading…';
     this.retried = false;
     this.disarmMkdir();
@@ -134,7 +169,16 @@ export class Picker {
 
   /// Called when the daemon answers with a folder's contents.
   update(dir) {
+    // A filter belongs to the folder it was typed in. Carrying it into the next
+    // one is how you step into a folder and find it apparently empty — the
+    // entries are there, the old query simply matches none of them.
+    const moved = dir.path !== this.dir?.path;
     this.dir = dir;
+    if (moved) {
+      this.filter = '';
+      this.filterInput.value = '';
+      this.filterClear.hidden = true;
+    }
     this.on.remember(dir.path);
     this.pathInput.value = dir.path;
     // What is useful is the tail of the path, not the `C:\Users\...` that is the
@@ -154,6 +198,20 @@ export class Picker {
     this.dropBtn.hidden = !dir.is_project;
     this.paintRoots();
     this.paintList();
+    this.paintNote();
+  }
+
+  paintNote() {
+    const dir = this.dir;
+    if (!dir) return;
+    const q = this.filter.trim();
+    if (q) {
+      const n = this.shown().length;
+      this.note.textContent = n
+        ? `${n} of ${dir.entries.length} folder${dir.entries.length === 1 ? '' : 's'} match “${q}”`
+        : `Nothing here matches “${q}”`;
+      return;
+    }
     this.note.textContent = dir.truncated
       ? `Showing the first ${dir.entries.length} folders — type a path above to jump straight there.`
       : dir.is_project
@@ -187,8 +245,42 @@ export class Picker {
     }
   }
 
+  /// The one way the filter changes, so the ✕ and the list can never disagree
+  /// with the box.
+  setFilter(value) {
+    this.filter = value;
+    this.filterInput.value = value;
+    this.filterClear.hidden = value === '';
+    if (this.dir) this.paintList();
+    this.paintNote();
+  }
+
+  /// The folders to show, best match first.
+  ///
+  /// The same matcher the sidebar search uses, so a query behaves the same
+  /// wherever it is typed. Ordering by score matters more here than there: the
+  /// list is what you are aiming at, and the folder you meant should be the one
+  /// under the cursor when you press Enter.
+  shown() {
+    const all = this.dir?.entries || [];
+    if (!this.filter.trim()) return all.map((e) => ({ e, pos: [] }));
+    return all
+      .map((e) => ({ e, m: match(this.filter, e.name) }))
+      .filter((r) => r.m)
+      .sort((a, b) => b.m.score - a.m.score)
+      .map((r) => ({ e: r.e, pos: r.m.positions }));
+  }
+
   paintList() {
     this.list.textContent = '';
+    const rows = this.shown();
+    if (this.filter.trim() && !rows.length) {
+      const none = document.createElement('div');
+      none.className = 'pempty';
+      none.textContent = `Nothing here matches “${this.filter.trim()}”.`;
+      this.list.appendChild(none);
+      return;
+    }
     if (!this.dir.entries.length) {
       const none = document.createElement('div');
       none.className = 'pempty';
@@ -196,7 +288,7 @@ export class Picker {
       this.list.appendChild(none);
       return;
     }
-    for (const e of this.dir.entries) {
+    for (const { e, pos } of rows) {
       const row = document.createElement('div');
       row.className = 'pentry' + (e.is_project ? ' taken' : '');
       row.tabIndex = 0;
@@ -209,7 +301,10 @@ export class Picker {
 
       const label = document.createElement('span');
       label.className = 'pname';
-      label.textContent = e.name;
+      // The letters that matched are marked, so a fuzzy hit can be read as one
+      // rather than looking like a folder that has no business in the list.
+      if (pos.length) label.appendChild(mark(e.name, pos));
+      else label.textContent = e.name;
       row.appendChild(label);
 
       if (e.is_project) {

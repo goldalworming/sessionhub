@@ -186,6 +186,43 @@ html, body {
   padding: 0 8px;
 }
 #filter::placeholder { color: var(--muted); }
+/* The picker's own filter, over the folders it is showing. Its own row rather
+   than another button on the path line above: that line is for jumping to a
+   path you already know, and this is for when you do not.
+   Inset by the same 12px as the rows above it, so the panel keeps one edge. */
+.pfind {
+  display: flex;
+  align-items: stretch;
+  margin: 8px 12px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+.pfind:focus-within { outline: 1px solid var(--accent); }
+.pfind .pfilter {
+  flex: 1 1 auto;
+  min-width: 0;
+  font: inherit;
+  font-size: 12px;
+  color: var(--text);
+  background: none;
+  border: none;
+  outline: none;
+  padding: 4px 6px;
+}
+.pfind .pfilter::placeholder { color: var(--muted); }
+.pfind .pfclear {
+  flex: 0 0 auto;
+  width: 24px;
+  font: inherit;
+  font-size: 11px;
+  line-height: 1;
+  color: var(--muted);
+  background: none;
+  border: none;
+  cursor: pointer;
+}
+.pfind .pfclear:hover { color: var(--text); }
 /* Part of the box, not a tool beside it: no divider, and it sits tight against
    the text it clears. The buttons after it keep theirs. */
 #sbar #filter-clear {
