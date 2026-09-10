@@ -54,6 +54,7 @@ const el = {
   empty: document.getElementById('empty'),
   menu: document.getElementById('menu'),
   filter: document.getElementById('filter'),
+  filterClear: document.getElementById('filter-clear'),
   collapseAll: document.getElementById('collapse-all'),
   expandAll: document.getElementById('expand-all'),
   backdrop: document.getElementById('backdrop'),
@@ -2352,15 +2353,33 @@ window.matchMedia('(max-width: 720px)').addEventListener('change', () => {
 
 // --- the search box and collapse/expand all --------------------------------
 
-el.filter.addEventListener('input', () => renderTree());
+/// The one way the search box changes.
+///
+/// Everything goes through here — typing, Escape, the ✕, and adding a project —
+/// so the ✕ can never be left showing over an empty box, or missing over a full
+/// one. It was set from four places before; a fifth would have been the one
+/// that forgot.
+function setFilter(value, { focus = false } = {}) {
+  el.filter.value = value;
+  el.filterClear.hidden = value === '';
+  renderTree();
+  if (focus) el.filter.focus();
+}
+
+el.filter.addEventListener('input', () => setFilter(el.filter.value));
 el.filter.addEventListener('keydown', (e) => {
   if (e.key === 'Escape') {
-    el.filter.value = '';
-    renderTree();
+    setFilter('');
     el.filter.blur();
   }
   e.stopPropagation(); // ordinary typing belongs to this box, not to a shortcut
 });
+el.filterClear.onclick = () => {
+  // The cursor goes back in the box on a desktop, where clearing usually means
+  // "let me type something else". On a phone it does not: the keyboard would
+  // come straight back up over the list that was the reason for clearing.
+  setFilter('', { focus: !window.matchMedia('(pointer: coarse)').matches });
+};
 
 // --------------------------------------------------------------- file panel
 
@@ -2813,8 +2832,7 @@ function revealNewProject() {
   collapsed.delete(found.path);
   filterCollapsed.delete(found.path);
   saveCollapsed();
-  el.filter.value = '';
-  renderTree();
+  setFilter('');
   const row = el.tree.querySelector(`[data-path="${cssEscape(found.path)}"]`);
   if (row) row.scrollIntoView({ block: 'center' });
   banner(`${basename(found.path)} added — use + on its row to start an agent.`, true);

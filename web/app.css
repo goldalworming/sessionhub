@@ -186,6 +186,13 @@ html, body {
   padding: 0 8px;
 }
 #filter::placeholder { color: var(--muted); }
+/* Part of the box, not a tool beside it: no divider, and it sits tight against
+   the text it clears. The buttons after it keep theirs. */
+#sbar #filter-clear {
+  border-left: none;
+  width: 22px;
+  font-size: 11px;
+}
 
 #sbar button {
   flex: 0 0 auto;
