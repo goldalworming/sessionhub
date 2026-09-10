@@ -510,6 +510,7 @@ function makeTerminal(id) {
   const fit = new FitAddon.FitAddon();
   term.loadAddon(fit);
   term.loadAddon(new WebLinksAddon.WebLinksAddon());
+  acceptClipboardWrites(term);
   term.open(view);
   // A phone has no wheel, and a full-screen agent leaves xterm's own touch
   // scrolling switched off. Without this there is no way back to what has
@@ -2133,6 +2134,80 @@ const settings = new Settings(
 // belongs beside: the addresses being chosen between are those of the machine
 // whose panel is open.
 settings.onLanAddr = (addr) => conn.send({ t: 'set_lan_addr', addr });
+
+/// OSC 52 — how a program inside the terminal says "put this on the clipboard".
+///
+/// It is the only way out for anything drawing its own selection. Claude Code
+/// turns on mouse reporting and selects for itself, so a drag never reaches the
+/// browser; when it says "copied", this sequence is what it sent. xterm.js
+/// dispatches OSC only to handlers that are registered, and it registers none
+/// for 52 — so without this the sequence is dropped, the clipboard keeps what
+/// it had, and the paste that follows produces the *previous* thing. The
+/// message is not wrong; there was simply nothing on this end listening.
+///
+/// Writes only. `52;c;?` asks the terminal to send the clipboard **back** to
+/// the program: whatever you last copied anywhere, handed to whatever is
+/// running here, and over the wire if that is another machine. Nothing needs
+/// that, and it is refused.
+/// A selection can be long, but not unbounded: this arrives from a program, and
+/// a runaway one must not be able to hand the browser a hundred megabytes to
+/// hold.
+const MAX_OSC_CLIP = 1 << 20;
+
+function acceptClipboardWrites(term) {
+  term.parser.registerOscHandler(52, (data) => {
+    // `<targets>;<payload>` — which selection (clipboard, primary, cut buffer).
+    // There is one clipboard in a browser, so the targets are read only far
+    // enough to find the payload.
+    const cut = data.indexOf(';');
+    if (cut < 0) return true;
+    const payload = data.slice(cut + 1);
+    if (payload === '?') return true;
+    // Base64 of UTF-8 bytes, so decoding is two steps: `atob` gives bytes as
+    // code units, and only then is it text. Doing it in one loses every
+    // character above ASCII.
+    let text;
+    try {
+      const raw = atob(payload);
+      const bytes = Uint8Array.from(raw, (ch) => ch.charCodeAt(0));
+      text = new TextDecoder().decode(bytes);
+    } catch {
+      return true; // Not base64. Nothing to do, and nothing worth saying.
+    }
+    if (!text || text.length > MAX_OSC_CLIP) return true;
+    clipboardFromTerminal(text);
+    return true;
+  });
+}
+
+/// Said once per session. The program copies on every selection, and a notice
+/// on every one of those would be its own kind of broken.
+let clipboardNoteShown = false;
+
+function clipboardFromTerminal(text) {
+  if (canCopy()) {
+    // Quiet on success: whatever asked for this already said so in its own
+    // words, and two notifications for one act is one too many. A failure is
+    // different — silence there would let a copy that did not happen look
+    // exactly like one that did.
+    copyText(text).then((ok) => {
+      if (ok) return;
+      toasts.show({
+        key: 'osc-clip',
+        title: 'The copy did not go through',
+        note: 'The browser refused the clipboard. Click the page and try again.',
+      });
+    });
+    return;
+  }
+  if (clipboardNoteShown) return;
+  clipboardNoteShown = true;
+  toasts.show({
+    key: 'osc-clip',
+    title: 'Copying needs https',
+    note: 'A program here copied something, but a page on plain http is not allowed to touch the clipboard. Open sessionhub over https and it will work.',
+  });
+}
 
 /// Can this page put something on the clipboard by itself?
 ///
