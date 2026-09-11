@@ -692,6 +692,9 @@ pub struct AgentBrief {
     /// `false` for agents that can fork but take no session name from the CLI —
     /// the dialog has to say so rather than promise a name that ends up ignored.
     pub fork_takes_name: bool,
+    /// Whether sessionhub can read this agent's own session list at all. When it
+    /// cannot, an empty history says nothing about the agent.
+    pub tracked: bool,
     /// Whether its command can actually be found on this machine.
     ///
     /// Every new `config.toml` enables claude, opencode and pi, so a machine
@@ -986,7 +989,12 @@ mod contract {
 
     /// The variant names of `ClientMsg`, read from this file.
     fn client_msg_variants() -> Vec<String> {
-        let src = include_str!("proto.rs");
+        // Carriage returns stripped first: git hands a Windows checkout CRLF,
+        // and every line-shaped search below — starting with the closing brace
+        // at column 0 — would otherwise find nothing in a file that is
+        // perfectly well formed.
+        let src = include_str!("proto.rs").replace('\r', "");
+        let src = src.as_str();
         let start = src.find("pub enum ClientMsg {").expect("ClientMsg is in this file");
         let body = &src[start..];
         let end = body.find("\n}\n").expect("its closing brace is at column 0");

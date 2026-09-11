@@ -221,6 +221,20 @@ fn opencode_cached(command: &str, cache: &mut Cache) -> Vec<SessionRow> {
     rows
 }
 
+/// Agents whose stored sessions this daemon can actually read.
+///
+/// claude and pi keep JSONL that is scanned; opencode answers a CLI. Every
+/// other agent — codex, omp, anything added by hand — keeps its sessions
+/// somewhere this side has no way in to, and a project will always look as
+/// though it has none.
+///
+/// The sidebar needs the difference. "No history here" is a fact about the
+/// project when the agent is on this list, and a fact about sessionhub's own
+/// blindness when it is not, and the second must not be worded as the first.
+pub fn reads_sessions_of(agent: &str) -> bool {
+    matches!(agent, "claude" | "pi" | "opencode")
+}
+
 /// Every `*.jsonl` under `root`, deduped by session id.
 fn scan_jsonl_tree(root: &Path, agent: &str, cache: &mut Cache) -> Vec<SessionRow> {
     let mut out = Vec::new();

@@ -1775,6 +1775,21 @@ export class Settings {
         body.appendChild(forks);
       }
 
+      // A resume that names no session builds the same command for every one of
+      // them. The agent then opens whatever it likes, and clicking a particular
+      // session in the sidebar quietly stops meaning anything.
+      const ra = a.resume_args || [];
+      if (!a.is_terminal && ra.length && !ra.some((x) => x.includes('{session_id}'))) {
+        const hint = Settings.stat(
+          'warn',
+          'These resume the same thing whichever session is asked for. Put {session_id} ' +
+            'where the agent expects the session, or leave the field empty and let its own ' +
+            'picker handle it.',
+        );
+        hint.classList.add('span2');
+        body.appendChild(hint);
+      }
+
       if (a.enabled && !a.resolved) {
         const bad = Settings.stat(
           'bad',

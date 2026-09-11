@@ -2776,6 +2776,7 @@ fn enabled_agents(cfg: &Config) -> Vec<AgentBrief> {
             can_fork: a.can_fork(),
             can_pick: a.can_pick(),
             fork_takes_name: a.fork_takes_name(),
+            tracked: crate::registry::reads_sessions_of(name),
             // Looked up here rather than on every broadcast: this list is built
             // once at start and again when settings change, which is exactly
             // when the answer can differ.

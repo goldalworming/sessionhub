@@ -482,12 +482,74 @@ impl Agent {
 /// showed `-c, --continue`, and an empty list is never refilled by the rule
 /// above, so every config already written would have kept a dead Resume button
 /// for ever.
-const MIGRATIONS: &[(&str, &str, &[&str])] = &[("opencode-continue", "opencode", &["--continue"])];
+/// One-time corrections, by agent: `(id, agent, picker_args, resume_args)`.
+///
+/// An empty `resume_args` here means "leave it alone". A non-empty one is only
+/// written over a field that cannot resume anything — see `resumes_a_session`.
+const MIGRATIONS: &[(&str, &str, &[&str], &[&str])] = &[
+    ("opencode-continue", "opencode", &["--continue"], &[]),
+    // Both read off the CLI's own `--help` on this machine:
+    //   codex resume [SESSION_ID]  "picker by default; use --last to continue
+    //                               the most recent"
+    //   omp -r, --resume=<value>   "by ID prefix, path, or picker if omitted"
+    // Neither had a picker recorded, and that is why their Resume button was
+    // dead however many sessions they had: sessionhub cannot read their session
+    // lists, so it knew of none, and without a picker it had nothing else to
+    // offer.
+    ("codex-resume", "codex", &["resume"], &["resume", "{session_id}"]),
+    ("omp-resume", "omp", &["--resume"], &["--resume", "{session_id}"]),
+];
+
+/// Can these arguments resume one particular session?
+///
+/// Only if the session is named in them. `resume_args` without `{session_id}`
+/// builds the same command for every session there is — which is not a resume.
+/// It is the agent's picker sitting in the wrong field, and it makes clicking
+/// one session in the sidebar open whichever the agent feels like.
+fn resumes_a_session(args: &[String]) -> bool {
+    args.iter().any(|a| a.contains("{session_id}"))
+}
+
+/// Run each correction that has not been run yet, and say whether it wrote
+/// anything.
+///
+/// Its own function because the test for it used to be a second copy of the
+/// same loop, which is a test of the copy.
+fn apply_migrations(cfg: &mut Config) -> bool {
+    let mut changed = false;
+    for (id, agent, picker, resume) in MIGRATIONS {
+        if cfg.applied.iter().any(|a| a == id) {
+            continue;
+        }
+        if let Some(a) = cfg.agents.get_mut(*agent) {
+            // Only an empty one is corrected. Anything already filled in is a
+            // decision, whoever made it.
+            if a.picker_args.as_ref().is_some_and(|p| p.is_empty()) {
+                a.picker_args = Some(picker.iter().map(|s| (*s).to_string()).collect());
+            }
+            // Resume is different: a field that names no session cannot resume
+            // one, so there is no decision there to respect — only a setting
+            // that never did anything.
+            if !resume.is_empty() && !resumes_a_session(&a.resume_args) {
+                a.resume_args = resume.iter().map(|s| (*s).to_string()).collect();
+            }
+        }
+        // Recorded even when the agent is not configured here, so it is never
+        // reconsidered — the point is that it happens exactly once.
+        cfg.applied.push((*id).to_string());
+        changed = true;
+    }
+    changed
+}
 
 fn known_picker_args(name: &str) -> Vec<String> {
     match name {
         "claude" => vec!["--resume".into()],
         "opencode" => vec!["--continue".into()],
+        // `codex resume` with no id opens its own picker, and `omp --resume`
+        // with no value does the same.
+        "codex" => vec!["resume".into()],
+        "omp" => vec!["--resume".into()],
         _ => Vec::new(),
     }
 }
@@ -516,6 +578,9 @@ fn known_fork_args(name: &str) -> Vec<String> {
             "{name}".into(),
         ],
         "opencode" => vec!["-s".into(), "{session_id}".into(), "--fork".into()],
+        // `codex fork [SESSION_ID]` — no flag for naming the new session, so
+        // `{name}` is absent and the panel will not promise a name.
+        "codex" => vec!["fork".into(), "{session_id}".into()],
         _ => Vec::new(),
     }
 }
@@ -878,20 +943,7 @@ pub fn load_or_create() -> io::Result<Config> {
     }
 
     // Then the corrections, once each. See `Config::applied`.
-    for (id, agent, args) in MIGRATIONS {
-        if cfg.applied.iter().any(|a| a == id) {
-            continue;
-        }
-        if let Some(a) = cfg.agents.get_mut(*agent) {
-            // Only an empty one is corrected. Anything already filled in is a
-            // decision, whoever made it.
-            if a.picker_args.as_ref().is_some_and(|p| p.is_empty()) {
-                a.picker_args = Some(args.iter().map(|s| (*s).to_string()).collect());
-            }
-        }
-        // Recorded even when the agent is not configured here, so it is never
-        // reconsidered — the point is that it happens exactly once.
-        cfg.applied.push((*id).to_string());
+    if apply_migrations(&mut cfg) {
         filled_fork = true;
     }
 
@@ -1456,17 +1508,7 @@ mod migration_tests {
     /// The whole point: an empty list written by an older version is corrected.
     fn apply(text: &str) -> Config {
         let mut cfg: Config = toml::from_str(text).expect("config parses");
-        for (id, agent, args) in MIGRATIONS {
-            if cfg.applied.iter().any(|a| a == id) {
-                continue;
-            }
-            if let Some(a) = cfg.agents.get_mut(*agent) {
-                if a.picker_args.as_ref().is_some_and(|p| p.is_empty()) {
-                    a.picker_args = Some(args.iter().map(|s| (*s).to_string()).collect());
-                }
-            }
-            cfg.applied.push((*id).to_string());
-        }
+        apply_migrations(&mut cfg);
         cfg
     }
 
@@ -1475,6 +1517,73 @@ mod migration_tests {
         let cfg = apply(&old_config());
         assert_eq!(picker_of(&cfg), vec!["--continue".to_string()]);
         assert!(cfg.applied.iter().any(|a| a == "opencode-continue"));
+    }
+
+    /// An agent added by hand, with what the Settings panel writes for one: a
+    /// picker nobody filled in, and a resume that names no session. Both are
+    /// why its Resume button did nothing.
+    fn hand_added_codex() -> String {
+        [
+            "port = 7717",
+            "token = \"x\"",
+            "",
+            "[agents.codex]",
+            "command = \"codex\"",
+            "resume_args = [\"resume\"]",
+            "enabled = true",
+            "fork_args = []",
+            "update_args = []",
+            "picker_args = []",
+            "",
+        ]
+        .join("\n")
+    }
+
+    #[test]
+    fn an_agent_with_no_picker_and_a_resume_that_names_nothing_is_corrected() {
+        let cfg = apply(&hand_added_codex());
+        let a = cfg.agents.get("codex").expect("codex is still there");
+        // The picker is what makes Resume clickable at all: sessionhub cannot
+        // read codex's session list, so without this there is nothing to offer.
+        assert_eq!(a.picker_args.clone().unwrap_or_default(), vec!["resume".to_string()]);
+        // And `["resume"]` alone opened the picker whichever session was asked
+        // for, which is not what clicking a session in the sidebar means.
+        assert_eq!(a.resume_args, vec!["resume".to_string(), "{session_id}".to_string()]);
+    }
+
+    #[test]
+    fn a_resume_that_does_name_a_session_is_left_alone() {
+        // Somebody's own spelling of the same idea. It works, so it stays.
+        let text = hand_added_codex()
+            .replace("resume_args = [\"resume\"]", "resume_args = [\"resume\", \"{session_id}\"]");
+        let cfg = apply(&text);
+        assert_eq!(
+            cfg.agents["codex"].resume_args,
+            vec!["resume".to_string(), "{session_id}".to_string()],
+            "a working resume was rewritten"
+        );
+    }
+
+    #[test]
+    fn resuming_needs_the_session_named_in_the_arguments() {
+        let words = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert!(resumes_a_session(&words(&["--resume", "{session_id}"])));
+        assert!(resumes_a_session(&words(&["--resume={session_id}"])));
+        // These build the same command for every session there is.
+        assert!(!resumes_a_session(&words(&["resume"])));
+        assert!(!resumes_a_session(&words(&["--continue"])));
+        assert!(!resumes_a_session(&[]));
+    }
+
+    #[test]
+    fn the_pickers_match_what_each_agent_actually_accepts() {
+        // Read off each CLI's own `--help` on this machine.
+        assert_eq!(known_picker_args("codex"), vec!["resume"]);
+        assert_eq!(known_picker_args("omp"), vec!["--resume"]);
+        assert_eq!(known_fork_args("codex"), vec!["fork", "{session_id}"]);
+        // omp's help lists no fork and no updater, so neither is guessed at.
+        assert!(known_fork_args("omp").is_empty());
+        assert!(known_update_args("omp").is_empty());
     }
 
     #[test]

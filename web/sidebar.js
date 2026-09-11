@@ -844,10 +844,23 @@ function agentRow(a, slot, o) {
 
   row.appendChild(el('span', 'maname', a.name));
 
+  // "No history here" is only true of an agent whose sessions sessionhub can
+  // actually read — claude and pi keep JSONL it scans, opencode answers a CLI.
+  // For codex, omp, or anything added by hand it keeps no list at all, and
+  // saying there is no history would be reporting its own blindness as a fact
+  // about the agent. Those say who to ask instead.
+  //
+  // `tracked` comes from the daemon, which is the side that knows. A daemon too
+  // old to send it leaves it undefined, and then this reads as before.
+  const unread = !here && a.can_pick && a.tracked === false;
   const count = el(
     'span',
     'macount' + (here ? '' : ' none'),
-    here ? `${here} session${here === 1 ? '' : 's'}` : 'no history here',
+    here
+      ? `${here} session${here === 1 ? '' : 's'}`
+      : unread
+        ? `ask ${a.name}`
+        : 'no history here',
   );
   row.appendChild(count);
 
@@ -883,19 +896,27 @@ function agentRow(a, slot, o) {
         null,
       )
     : null;
-  // Off whenever this folder has no history, whatever the agent can do.
-  // Offering Resume beside the words "no history here" contradicts the row
-  // itself, and an agent handed its own resume flag with nothing to resume
-  // gets to explain that in its own words, which is worse than not asking.
-  resume.disabled = !here;
-  resume.title = !here
+  // Off only when there is genuinely nothing to do: no session sessionhub knows
+  // of, and no picker of the agent's own to fall back on.
+  //
+  // It used to be off whenever sessionhub knew of no session, which left the
+  // button permanently dead for every agent whose sessions it cannot read —
+  // codex and omp both have a picker that finds their own sessions perfectly
+  // well, and neither could ever be clicked. An agent with a picker is asked;
+  // if it has nothing either, it is the one that knows, and it says so.
+  resume.disabled = !here && !a.can_pick;
+  resume.title = resume.disabled
     ? `${a.name} has nothing to carry on in ${o.where}`
-    : a.can_pick
-      ? // Deliberately not "show its sessions": claude opens a list, opencode
-        // takes the last one with `--continue`. Both are "carry on", and the
-        // flag itself is the agent's business, not this row's.
-        `Let ${a.name} pick up where it left off here`
-      : `Carry on the newest ${a.name} session here — it cannot resume on its own`;
+    : here
+      ? a.can_pick
+        ? // Deliberately not "show its sessions": claude opens a list, opencode
+          // takes the last one with `--continue`. Both are "carry on", and the
+          // flag itself is the agent's business, not this row's.
+          `Let ${a.name} pick up where it left off here`
+        : `Carry on the newest ${a.name} session here — it cannot resume on its own`
+      : unread
+        ? `sessionhub keeps no session list for ${a.name} — this opens the agent's own`
+        : `Ask ${a.name} for its own sessions here`;
   resume.onclick = (e) => {
     e.stopPropagation();
     o.closeMenu();
