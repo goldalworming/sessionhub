@@ -2,50 +2,39 @@
 
 <img src="icon.png" alt="" width="96" />
 
-One place to open a terminal into a coding agent (Claude Code, opencode, pi) for
-each project. The session stays alive even when the UI is closed. You can pick
-it up from another computer — or a phone — through a browser, and several
-computers share one window, each in its own tab.
+sessionhub keeps coding-agent terminals alive in a daemon and makes them
+available in a browser. Close the browser, switch computers, or check from a
+phone; the agent keeps running.
 
-No chat UI, no diff viewer, no worktree manager. Only a project/session sidebar
-on the left and a terminal in the middle.
-
-There is one principle: **the UI and the engine are two different processes.**
-The agent process is never a child of a window or a tab. Closing the browser
-does not touch the agent process at all.
+It supports Claude Code, opencode, and pi. There is no chat layer or task
+manager: the main interface is the agent's own terminal.
 
 ![The three panes: projects and sessions on the left, an agent running in the middle, the file explorer and an image open on the right](screenshot.png)
 
 ## Why
 
-Two things kept hurting: an agent that worked for an hour died because a laptop
-lid closed, and half the time I check on an agent from a phone — no Esc, no
-arrows, no clipboard. sessionhub is the smallest thing that fixes both: a
-daemon that owns the PTYs, and a plain browser page that only *looks at* them.
+I wanted agent sessions to survive a closed laptop and remain usable from a
+phone. sessionhub does that with a daemon that owns the PTYs and a browser page
+that connects to them. It passes terminal bytes through unchanged and uses each
+CLI's existing session registry, so old sessions remain available to resume.
 
-Similar tools, and where the line runs: [T3 Code](https://betterstack.com/community/guides/ai/t3-code/)
-is a task/chat UI first, with the terminal as a drawer — the fuller product if
-you want your agent work organised as tasks. [herdr](https://herdr.dev/) keeps
-sessions alive behind a terminal TUI you SSH into — the better fit if you live
-in tmux. sessionhub only makes sense if the agent's own raw terminal is the
-thing you want to reach, from any screen: it passes PTY bytes through
-unchanged, injects nothing into your prompts, and its sidebar is the CLI's own
-on-disk session registry (`~/.claude`, `~/.pi`, opencode), so every session
-your agents ever made is one click from `--resume`.
+[T3 Code](https://betterstack.com/community/guides/ai/t3-code/) is a better fit
+for a task/chat workflow. [herdr](https://herdr.dev/) is a better fit for a
+terminal TUI over SSH. sessionhub is for using the agent's raw terminal from a
+browser.
 
 ## Features
 
-- Sessions survive the UI closing — the daemon owns the PTY
-- Raw passthrough: what the agent reads is exactly what you typed
-- Resumes and forks the CLI's own sessions, whether or not they were born here
-- Saved terminals: name a shell and the line it runs, and it starts with the daemon
-- Several machines in one window; remote tokens never reach the browser
-- Phone: key bar (Esc, ⏎, ⇧Tab, Ctrl, arrows), Paste, image upload, touch scrollback
-- Busy/finished colours, a finish chime, tab colours stored on the daemon
-- File panel with Monaco; drag or paste a file and it lands on the agent's machine
-- CPU and RAM on the tab bar, RAM per terminal behind a button
-- Self-update from Settings, and a way in from outside through Cloudflare
-- One binary — no npm, no build step
+- Sessions survive the browser closing
+- Raw PTY passthrough with no prompt injection
+- Resume and fork sessions created inside or outside sessionhub
+- Saved terminals that start with the daemon
+- Several machines in one window; remote tokens stay on the daemon
+- Phone controls for Esc, Enter, Shift+Tab, Ctrl, arrows, paste, and uploads
+- Busy/finished status, finish chime, tab colours, CPU, and RAM usage
+- Monaco file panel with drag-and-drop and paste uploads
+- Self-update and Cloudflare access from Settings
+- One binary with no frontend build step
 
 | Shortcut | Action |
 |---|---|
@@ -59,145 +48,76 @@ Every other key goes to the agent untouched.
 
 ## Install and run
 
-Download the binary for your machine from
+Download the binary from
 [Releases](https://github.com/goldalworming/sessionhub/releases/latest) and run
-it. One file — the interface is inside it. On macOS there is a `.app` for
-Applications; it is unsigned, so open it the first time with right-click → Open.
-The Linux build is statically linked against musl, so it runs on any x86_64
-distribution whatever its glibc — tested on Ubuntu 18.04, whose glibc is from
-2018. To build it yourself: stable Rust, `cargo build --release`, nothing else.
+it. The macOS release includes an unsigned `.app`; open it the first time with
+right-click → Open. The Linux x86_64 build is statically linked with musl.
 
-```
-sessionhubd start          # detaches from this terminal, then exits
-sessionhubd status         # port, uptime, number of live terminals
+To build from source, install stable Rust and run `cargo build --release`.
+
+```text
+sessionhubd start          # start the daemon and open the browser
+sessionhubd status         # show address, uptime, and live terminals
 sessionhubd stop
-sessionhubd restart        # stop and start again, to load a new build
+sessionhubd restart        # stop and start again
 ```
 
-`start` prints the address with the token and opens it. A cookie carries the
-token after the first open, once per device. Running `start` again when it is
-already up just prints the address again — the shortest way back to a link you
-lost. There is an icon in the tray, or the menu bar on macOS, with the address,
-the log, and a way to stop it.
+`start` prints a tokenized address. After the first open, a cookie keeps that
+device signed in. Run `start` again to print the address again. The tray or menu
+bar icon also provides the address, log, and stop action.
 
-`restart` **ends every live terminal** — they are children of the daemon — so
-it refuses while any are running unless told `--force`.
+`restart` ends every live terminal, so it refuses to run while terminals are
+active unless you pass `--force`.
 
 ## Access from outside
 
-Use Cloudflare: **⚙ Settings → Cloudflare** gives an address a way in — a dev
-server here, or something on your network — and it comes back as a hostname you
-can open from anywhere, still behind the sessionhub token.
+Use **Settings → Cloudflare** to expose sessionhub or another local service
+through a Cloudflare tunnel. For LAN access, use **Settings → Network access**.
+See [CONFIG.md](CONFIG.md#access-from-outside) for setup and pairing.
 
-> **This exposes a shell.** Anyone with the address and the token can run any
-> command on that computer, as you. Put **Cloudflare Access** in front of it if
-> it is more than a moment. If a URL ever leaked — a screenshot, a chat, a shared
-> log — replace the token: **⚙ Settings → Network access → New token**, or
-> `sessionhubd token rotate`.
+> **This exposes a shell.** Anyone with the address and token can run commands
+> as you. Use Cloudflare Access or another authentication layer for internet
+> access. If a URL leaks, rotate the token in **Settings → Network access → New
+> token** or run `sessionhubd token rotate`.
 
-### On a server with a public address
+On a public server, leave Network access off so sessionhub stays on
+`127.0.0.1:7717`. Put a Cloudflare tunnel or TLS reverse proxy in front of it.
+Serve sessionhub at the root of a hostname, not a subpath. Reverse proxies must
+support WebSocket upgrades and long-lived connections.
 
-A machine on the internet — a VPS, say — is the one place where the warning
-above stops being theoretical: the port is found by scanners within minutes, and
-sessionhub speaks plain HTTP, so the token would cross the network in the clear.
-Leave **Network access off** so the daemon stays on `127.0.0.1:7717`, and put
-something in front of it.
+## Using another machine
 
-**A Cloudflare tunnel is the better answer**, and it is the one to reach for
-first. Nothing inbound needs to be open at all — the server's firewall can drop
-every incoming port, `cloudflared` dials out, and Cloudflare Access can sit in
-front as a real second factor rather than a single token in a URL. A hostname
-arranged that way is also what `sessionhubd run --on <machine>` reaches, so the
-same setup makes the server usable from another computer.
+A paired machine can run commands and transfer files:
 
-If you would rather terminate TLS yourself, sessionhub works behind a reverse
-proxy. **Caddy** needs no more than this, and arranges the certificate itself:
-
-```
-sh.example.com {
-    reverse_proxy 127.0.0.1:7717
-}
-```
-
-**nginx** needs three things spelled out, and two of them are easy to miss:
-
-```nginx
-location / {
-    proxy_pass http://127.0.0.1:7717;
-    proxy_http_version 1.1;
-    proxy_set_header Upgrade $http_upgrade;   # without this /ws never upgrades
-    proxy_set_header Connection "upgrade";
-    proxy_set_header Host $host;
-    proxy_read_timeout 86400;                 # a terminal idles for hours
-    proxy_buffering off;                      # let output stream, not pool
-}
-```
-
-`proxy_read_timeout` is the one that bites: a terminal waiting for a build to
-finish sends nothing, and nginx's default cuts it off after 60 seconds.
-
-Two things to know either way:
-
-- It must be the **root of a hostname**, not a subpath. Every asset is referenced
-  absolutely (`/app.css`, `/vendor/xterm.js`, `/ws`), so `example.com/sessionhub/`
-  will not work.
-- TLS protects the wire; it does not add a second factor. What is behind it is
-  still a shell reachable with one token in a URL, so put Cloudflare Access,
-  basic auth, mTLS, or an IP allowlist in front of it.
-
-## Putting another machine to work
-
-Four commands make a paired machine usable the way ssh makes a Unix box usable —
-and they reach Windows, which ssh mostly does not:
-
-```
-sessionhubd machines                                   # what is paired here
+```text
+sessionhubd machines
 sessionhubd run  --on NAME [--cwd DIR] [--timeout S] -- COMMAND…
-sessionhubd push --on NAME <local file> <path there>
-sessionhubd pull --on NAME <path there> <local file>
+sessionhubd push --on NAME <local-file> <remote-path>
+sessionhubd pull --on NAME <remote-path> <local-file>
 ```
 
-`run` prints stdout on stdout, stderr on stderr, and **exits with the far side's
-exit code**, so `&&` and `||` keep their meaning. Quoting follows the ssh rule:
-the far side re-parses, so wrap the whole command in quotes when it matters.
+`run` forwards stdout and stderr and exits with the remote command's exit code.
+`push` and `pull` transfer one file at a time. Use an archive for a directory.
 
-They exist for an agent as much as for you. This is what "build it on the other
-computer" turns into — the laptop has no Android Studio, the other machine does:
-
-```
-tar -czf /tmp/src.tgz --exclude=build .
-sessionhubd push --on buildbox /tmp/src.tgz C:/b/src.tgz
-sessionhubd run  --on buildbox --cwd C:/b -- tar -xzf src.tgz
-sessionhubd run  --on buildbox --cwd C:/b --timeout 600 -- ./gradlew assembleDebug
-sessionhubd pull --on buildbox C:/b/app/build/outputs/apk/debug/app-debug.apk ./app.apk
-```
-
-`push` and `pull` carry one file each; a folder goes as a tar, which also leaves
-the choice of what to exclude where it belongs. `tar` is already on Windows 10
-1803+ and on macOS.
-
-Your agent will not guess these exist. Paste this into the project's `CLAUDE.md`
-once:
+To tell an agent about these commands, add this to the project's `CLAUDE.md`:
 
 > This machine can reach other computers through sessionhub. `sessionhubd
-> machines` lists them; `sessionhubd run --on NAME -- COMMAND` runs something
-> there and returns its exit code; `sessionhubd push` / `pull` move one file.
+> machines` lists them; `sessionhubd run --on NAME -- COMMAND` runs a command
+> there and returns its exit code; `sessionhubd push` and `pull` move one file.
 
-The token has always meant a full shell, so this grants nothing new — but it
-makes that power scriptable and unattended, so the machine being asked has a
-switch of its own: **⚙ Settings → Network access → Remote commands**, on by
-default, and every command it runs is written to that machine's log. Reading a
-file is deliberately not covered by the switch, because the file panel has
-always read from a paired machine.
+Remote commands are controlled by **Settings → Network access → Remote
+commands** and are logged on the machine that runs them. See
+[CONFIG.md](CONFIG.md#running-commands-there) for pairing, security, and tunnel
+setup.
 
 ## Known limits
 
-- The history kept is the last 2 MB per terminal. It is lost when the daemon stops. It is a ring buffer, not terminal grid state.
-- A client that is too slow will lose chunks of output in the middle. Re-attaching restores its screen. The PTY reader is never held up with it. That is a deliberate trade-off.
-- pi sessions have not been tested against real data. Their parser is generic.
+- Each terminal keeps the last 2 MB of output. History is lost when the daemon stops.
+- A slow client can lose output chunks. Reattaching restores its current screen.
+- pi session parsing has not been tested against real session data.
 
 ## Other documents
 
-- [CONFIG.md](CONFIG.md) — config.toml, agents, network access, pairing.
-- [PROTOCOL.md](PROTOCOL.md) — the WebSocket protocol, enough to write your own client.
-- [TESTING.md](TESTING.md) — the acceptance criteria results, along with what is not tested.
+- [CONFIG.md](CONFIG.md) — configuration, agents, network access, and pairing
+- [PROTOCOL.md](PROTOCOL.md) — WebSocket protocol for writing a client
+- [TESTING.md](TESTING.md) — acceptance results and untested areas
