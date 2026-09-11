@@ -6,8 +6,9 @@ sessionhub keeps coding-agent terminals alive in a daemon and makes them
 available in a browser. Close the browser, switch computers, or check from a
 phone; the agent keeps running.
 
-It supports Claude Code, opencode, and pi. There is no chat layer or task
-manager: the main interface is the agent's own terminal.
+It has been tested with Claude Code, Codex CLI, opencode, and Oh My Pi. There
+is no chat layer or task manager: the main interface is the agent's own
+terminal.
 
 ![The three panes: projects and sessions on the left, an agent running in the middle, the file explorer and an image open on the right](screenshot.png)
 
