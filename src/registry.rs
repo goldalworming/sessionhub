@@ -29,9 +29,31 @@ const HEAD_BYTES: usize = 64 * 1024;
 /// 50 MB of wasted I/O.
 const HEAD_FIRST_TRY: usize = 8 * 1024;
 
-/// The opencode CLI takes ~1.5 s per call, and that dominates the cost of a
-/// rescan. Its result is reused for this window.
-const OPENCODE_TTL: Duration = Duration::from_secs(5);
+/// How often the opencode CLI is asked, at the most.
+///
+/// `opencode session list` boots a whole Bun runtime and opens its database:
+/// measured at ~3 s of CPU per call, for a few hundred bytes of JSON. It used
+/// to be asked on the same trigger as everything else, held back only by a 5 s
+/// window — and the trigger is Claude writing its session file, which it does
+/// most of all while starting up. So every launch of claude had the daemon
+/// spawning Bun every few seconds alongside it, and a terminal that was drawn
+/// but would not take a keystroke yet was the result. The log showed it: of
+/// nineteen thousand rescans, one in four took over a second.
+///
+/// Now the CLI runs on its own clock, never on a file event. Nothing claude or
+/// pi writes can bring it forward.
+const OPENCODE_MIN: Duration = Duration::from_secs(30);
+
+/// The window grows while the answer keeps coming back the same — an idle
+/// opencode does not need asking twice a minute — and drops back to the floor
+/// the moment something differs. A session being worked on changes its
+/// `updated` stamp on every turn, so an active opencode is seen at the floor.
+const OPENCODE_MAX: Duration = Duration::from_secs(120);
+
+/// The CLI is killed after this. One rescan in the log took 149 s: a hung
+/// child held the whole registry thread with it, and there was nothing to
+/// stop it. Past this the previous answer is kept and the window doubles.
+const OPENCODE_KILL: Duration = Duration::from_secs(10);
 
 /// Debounce after a file event. An agent writes to its JSONL on every message;
 /// without this, one active conversation triggers rescans many times a second.
@@ -85,6 +107,16 @@ pub fn spawn(cfg: Config, tx: Sender<Cmd>) -> Sender<Config> {
                 last = None;
             }
 
+            // The CLI first, and only when its own clock says so. A file event
+            // that arrives early finds the previous answer in the cache and
+            // uses that.
+            if let Some(agent) = cfg.agents.get("opencode").filter(|a| a.enabled) {
+                let due = cache.opencode.as_ref().is_none_or(|o| Instant::now() >= o.due);
+                if due {
+                    refresh_opencode(&agent.command, &mut cache);
+                }
+            }
+
             let started = Instant::now();
             let projects = scan_all(&cfg, &mut cache);
             let ms = started.elapsed().as_millis() as u64;
@@ -104,7 +136,16 @@ pub fn spawn(cfg: Config, tx: Sender<Cmd>) -> Sender<Config> {
 
             // Wait for the next trigger. A config change wakes us too: adding a
             // project has to show up now, not when the next periodic sweep
-            // happens to arrive.
+            // happens to arrive. The opencode clock is the third alarm: an
+            // active claude keeps resetting the sweep by waking us first, and
+            // without this opencode would not be asked again until it went
+            // quiet.
+            let wait = cache
+                .opencode
+                .as_ref()
+                .filter(|_| cfg.agents.get("opencode").is_some_and(|a| a.enabled))
+                .map(|o| o.due.saturating_duration_since(Instant::now()))
+                .map_or(SWEEP, |left| left.min(SWEEP));
             let mut from_cfg = false;
             crossbeam_channel::select! {
                 recv(trig_rx) -> m => if m.is_err() { return },
@@ -119,7 +160,7 @@ pub fn spawn(cfg: Config, tx: Sender<Cmd>) -> Sender<Config> {
                     }
                     Err(_) => return,
                 },
-                default(SWEEP) => {}
+                default(wait) => {}
             }
             // Debounce file changes only: filesystem events arrive in crowds,
             // while settings arrive once, from a user waiting for the answer.
@@ -180,7 +221,41 @@ fn start_watcher(trig: Sender<()>) {
 pub struct Cache {
     /// path -> (mtime_ms, size, parse result)
     files: HashMap<PathBuf, (u64, u64, Option<SessionRow>)>,
-    opencode: Option<(Instant, Vec<SessionRow>)>,
+    opencode: Option<Opencode>,
+}
+
+/// The last answer from the opencode CLI, and when to ask again.
+struct Opencode {
+    rows: Vec<SessionRow>,
+    /// The current window: `OPENCODE_MIN` while answers change, doubling
+    /// towards `OPENCODE_MAX` while they do not.
+    window: Duration,
+    due: Instant,
+}
+
+/// Ask the opencode CLI, and set the clock for the next time.
+///
+/// A call that fails or is killed keeps the rows it had: a sidebar that
+/// briefly shows yesterday's list is better than one that empties out
+/// whenever the machine is busy — and busy is exactly when this fails.
+fn refresh_opencode(command: &str, cache: &mut Cache) {
+    let had = cache.opencode.take();
+    let (rows, window) = match scan_opencode(command) {
+        Some(rows) => {
+            let same = had.as_ref().is_some_and(|o| o.rows == rows);
+            let window = match had {
+                Some(o) if same => (o.window * 2).min(OPENCODE_MAX),
+                _ => OPENCODE_MIN,
+            };
+            (rows, window)
+        }
+        None => match had {
+            Some(o) => (o.rows, (o.window * 2).min(OPENCODE_MAX)),
+            None => (Vec::new(), OPENCODE_MIN),
+        },
+    };
+    debug!(rows = rows.len(), window_s = window.as_secs(), "opencode asked");
+    cache.opencode = Some(Opencode { rows, window, due: Instant::now() + window });
 }
 
 /// Whether the part of the config that decides `opencode session list` changed.
@@ -204,21 +279,14 @@ fn scan_all(cfg: &Config, cache: &mut Cache) -> Vec<ProjectInfo> {
     if on("pi") {
         rows.extend(scan_pi(&home, cache));
     }
-    if let Some(agent) = cfg.agents.get("opencode").filter(|a| a.enabled) {
-        rows.extend(opencode_cached(&agent.command, cache));
-    }
-    build_projects(&cfg.projects, rows)
-}
-
-fn opencode_cached(command: &str, cache: &mut Cache) -> Vec<SessionRow> {
-    if let Some((at, rows)) = &cache.opencode {
-        if at.elapsed() < OPENCODE_TTL {
-            return rows.clone();
+    // Whatever the CLI last said; asking it is the loop's business, on its own
+    // clock — see `refresh_opencode`. A scan never spawns anything.
+    if cfg.agents.get("opencode").is_some_and(|a| a.enabled) {
+        if let Some(o) = &cache.opencode {
+            rows.extend(o.rows.iter().cloned());
         }
     }
-    let rows = scan_opencode(command);
-    cache.opencode = Some((Instant::now(), rows.clone()));
-    rows
+    build_projects(&cfg.projects, rows)
 }
 
 /// Agents whose stored sessions this daemon can actually read.
@@ -341,38 +409,83 @@ fn read_head(path: &Path, max: usize) -> Option<String> {
 
 /// opencode keeps its sessions in a database, and its CLI already hands over a
 /// finished `directory` and `title` — no reason to take the DB apart ourselves.
-fn scan_opencode(command: &str) -> Vec<SessionRow> {
+///
+/// `None` is "no answer" — the CLI failed, hung, or is not installed — as
+/// opposed to `Some(empty)`, which is an opencode with no sessions yet.
+fn scan_opencode(command: &str) -> Option<Vec<SessionRow>> {
     let Some(exe) = crate::pty::resolve_command(command) else {
         debug!(%command, "opencode not on PATH; skipped");
-        return Vec::new();
+        return None;
     };
     // Without the "no window" flag, a rescan flashes a console window on the
     // user's screen every time a session changes.
-    let out = match crate::pty::quiet_command(&exe)
+    let child = crate::pty::quiet_command(&exe)
         .args(["session", "list", "--format", "json"])
-        .output()
-    {
-        Ok(o) if o.status.success() => o.stdout,
-        Ok(o) => {
-            warn!(status = ?o.status, "opencode session list failed");
-            return Vec::new();
-        }
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn();
+    let mut child = match child {
+        Ok(c) => c,
         Err(e) => {
             warn!(error = %e, "could not run opencode");
-            return Vec::new();
+            return None;
         }
     };
+    // stdout is drained on its own thread: `wait` would sit forever on a child
+    // that filled the pipe and is waiting for someone to read it, and this
+    // thread has to keep the clock.
+    let mut stdout = child.stdout.take()?;
+    let reader = std::thread::spawn(move || {
+        let mut out = Vec::new();
+        let _ = stdout.read_to_end(&mut out);
+        out
+    });
+    let started = Instant::now();
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break Some(status),
+            Ok(None) if started.elapsed() < OPENCODE_KILL => {
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            Ok(None) => {
+                warn!(after_s = OPENCODE_KILL.as_secs(), "opencode session list hung; killed");
+                // The whole tree, not just the child: on Windows the command is
+                // an `opencode.cmd`, and `Child::kill` would take out that
+                // cmd.exe and leave the Bun runtime under it running on.
+                crate::daemon::force_kill(child.id());
+                let _ = child.wait();
+                break None;
+            }
+            Err(e) => {
+                warn!(error = %e, "could not wait for opencode");
+                let _ = child.kill();
+                let _ = child.wait();
+                break None;
+            }
+        }
+    };
+    // Killing closed the pipe's other end, so this returns either way.
+    let out = reader.join().unwrap_or_default();
+    match status {
+        Some(st) if st.success() => {}
+        Some(st) => {
+            warn!(status = ?st, "opencode session list failed");
+            return None;
+        }
+        None => return None,
+    }
 
     let text = String::from_utf8_lossy(&out);
     if text.trim().is_empty() {
         // Having no sessions at all is a valid state, not a failure.
-        return Vec::new();
+        return Some(Vec::new());
     }
     let Ok(items) = serde_json::from_str::<Vec<serde_json::Value>>(&text) else {
         warn!(bytes = text.len(), "opencode session list output is not a JSON array");
-        return Vec::new();
+        return None;
     };
-    items.iter().filter_map(parse_opencode_item).collect()
+    Some(items.iter().filter_map(parse_opencode_item).collect())
 }
 
 fn parse_opencode_item(v: &serde_json::Value) -> Option<SessionRow> {

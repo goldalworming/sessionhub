@@ -818,10 +818,6 @@ pub fn dial_ws(r: &Remote) -> Result<TcpStream, String> {
         ));
     }
     let mut sock = dial(&t.authority())?;
-    // After the handshake this connection idles for hours waiting on output —
-    // the read deadline that was useful while connecting would now cut it off.
-    let _ = sock.set_read_timeout(None);
-    let _ = sock.set_write_timeout(None);
 
     let key = handshake_key()?;
     let req = format!(
@@ -861,7 +857,17 @@ pub fn dial_ws(r: &Remote) -> Result<TcpStream, String> {
         .and_then(|c| c.parse::<u16>().ok())
         .unwrap_or(0);
     match status {
-        101 => Ok(sock),
+        101 => {
+            // Only now that the far side has answered. After the handshake this
+            // connection idles for hours waiting on output — the read deadline
+            // that was useful while connecting would cut it off. Clearing it
+            // any earlier left a machine that accepts TCP but never replies
+            // (a bad link, a half-open socket) hanging here for good, and the
+            // browser tab with it: no error, no reconnect, nothing to retry.
+            let _ = sock.set_read_timeout(None);
+            let _ = sock.set_write_timeout(None);
+            Ok(sock)
+        }
         401 => Err(format!("{} refused the token — re-pair that machine.", r.addr)),
         other => Err(format!("{} answered {other} instead of upgrading.", r.addr)),
     }

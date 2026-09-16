@@ -1112,6 +1112,20 @@ html, body {
   color: var(--bg);
   background: var(--muted);
 }
+/* The one thing to press about what the strip says: drawn in the strip's own
+   colours, so it reads as part of the message rather than a control. */
+#banner .bact {
+  margin-left: 10px;
+  padding: 0 7px;
+  font: inherit;
+  font-weight: 600;
+  color: inherit;
+  background: none;
+  border: 1px solid currentColor;
+  border-radius: 3px;
+  cursor: pointer;
+}
+#banner .bact:hover { background: color-mix(in srgb, var(--bg) 15%, transparent); }
 
 /* A column, so the touch key bar can sit below the terminal without covering
    it. `#terms` is still the positioning anchor for the machine hosts inside. */

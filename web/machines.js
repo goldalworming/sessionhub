@@ -6,8 +6,8 @@
 
 const STATUS = {
   open: { dot: 'ok', text: 'connected' },
-  connecting: { dot: 'wait', text: 'connecting…' },
-  lost: { dot: 'bad', text: 'reconnecting…' },
+  connecting: { dot: 'wait', text: 'connecting… click to retry' },
+  lost: { dot: 'bad', text: 'reconnecting… click to retry' },
 };
 
 /// Complete enough to ask the daemon about? This only decides **when** to ask;

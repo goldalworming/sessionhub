@@ -2693,6 +2693,7 @@ window.addEventListener('resize', () => {
 // --------------------------------------------------------------- connection
 
 conn.on.onStatus = (kind, m) => {
+  const was = m ? m.status : null;
   if (m) {
     m.status = kind;
     machineBar.paint(current);
@@ -2700,8 +2701,22 @@ conn.on.onStatus = (kind, m) => {
   // A background machine going down must not hijack the banner: it is not what
   // the user is looking at, and the dot on its tab already says so.
   if (m && m !== current) return;
+  const retry = { label: 'Retry now', run: () => m && m.conn.retry() };
+  if (kind === 'connecting') {
+    // Every reconnect passes through here too; the "lost" strip already on
+    // show says all there is to say, and swapping its text on each attempt
+    // would only make it flicker.
+    if (was === 'lost') return;
+    // Not at once: most handshakes finish in well under a second, and a strip
+    // that flashes on every page load says nothing. One that is still there
+    // after a moment is the one that matters — a bad link can hold a handshake
+    // for a long time, and until now there was nothing to press but reload.
+    const who = m && m.via ? `Connecting to ${m.label}…` : 'Connecting…';
+    bannerSoon(who, retry);
+    return;
+  }
   if (kind === 'lost') {
-    banner('Connection lost, reconnecting…');
+    banner('Connection lost, reconnecting…', false, retry);
     // A WebSocket hides the status code of a refused handshake, so the reason is
     // asked for separately. Without this, a rotated token would only ever say
     // "reconnecting…" without saying what is wrong.
@@ -2976,15 +2991,32 @@ conn.on.onMem = (msg) => {
 };
 
 let bannerTimer = null;
-function banner(text, transient = false) {
+let bannerSoonTimer = null;
+/// `action` is `{ label, run }`: a button at the end of the strip, for the
+/// one thing the user can do about what it says.
+function banner(text, transient = false, action = null) {
   clearTimeout(bannerTimer);
+  clearTimeout(bannerSoonTimer);
   if (!text) {
     el.banner.hidden = true;
     return;
   }
   el.banner.textContent = text;
+  if (action) {
+    const b = document.createElement('button');
+    b.className = 'bact';
+    b.textContent = action.label;
+    b.onclick = action.run;
+    el.banner.appendChild(b);
+  }
   el.banner.hidden = false;
   if (transient) bannerTimer = setTimeout(() => (el.banner.hidden = true), 6000);
+}
+
+/// Show a banner only if nothing has replaced or cleared it within a moment.
+function bannerSoon(text, action = null, after = 1000) {
+  clearTimeout(bannerSoonTimer);
+  bannerSoonTimer = setTimeout(() => banner(text, false, action), after);
 }
 
 // On a touch screen there is no visible "left" and no Ctrl+K — a message that
@@ -3011,7 +3043,9 @@ if (isNarrow()) {
 
 const machineBar = new MachineBar(document.getElementById('main'), {
   machines: () => machines,
-  pick: (m) => switchMachine(m),
+  // The tab already on show has nowhere to switch to, so a press on it means
+  // "try again" — the one thing worth doing to a machine that is not answering.
+  pick: (m) => (m === current ? m.status !== 'open' && m.conn.retry() : switchMachine(m)),
   // Machine management always goes to the LOCAL daemon, never through the relay:
   // the machine list is its own, and remotes are not chained.
   pair: (link) => local.conn.send({ t: 'pair', link, name: '' }),

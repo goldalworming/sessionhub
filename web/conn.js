@@ -24,6 +24,14 @@ const PING_MS = 15000;
 /// there frozen.
 const SILENT_MS = 50000;
 
+/// Give up on a handshake that has not completed after this long.
+///
+/// A browser lets a WebSocket sit in `CONNECTING` for minutes when the network
+/// is bad — the SYN goes unanswered, or the daemon is relaying to a machine
+/// that is slow to reply — and nothing fires in the meantime. Closing it here
+/// makes `onclose` run, and with it the same reconnect as for any other loss.
+const DIAL_MS = 15000;
+
 export class Conn {
   /// `via` is the name of another paired machine; empty means this machine.
   /// `owner` is carried into every handler, so one set of handlers can serve
@@ -39,6 +47,11 @@ export class Conn {
     /// terminal keeps the link proven without a single ping being sent.
     this.lastSeen = 0;
     this.beat = null;
+    /// The pending reconnect, so a retry by hand can cancel it rather than
+    /// end up with two sockets racing.
+    this.timer = null;
+    /// The handshake deadline for the socket now connecting.
+    this.dial = null;
     /// Has the other end ever answered a ping?
     ///
     /// Silence only means a dead link if the peer would have spoken. A daemon
@@ -55,6 +68,8 @@ export class Conn {
   }
 
   connect() {
+    clearTimeout(this.timer);
+    this.timer = null;
     const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
     const via = this.via ? `&via=${encodeURIComponent(this.via)}` : '';
     const ws = new WebSocket(
@@ -62,8 +77,20 @@ export class Conn {
     );
     ws.binaryType = 'arraybuffer';
     this.ws = ws;
+    this.emit('onStatus', 'connecting');
+
+    clearTimeout(this.dial);
+    this.dial = setTimeout(() => {
+      if (ws.readyState !== WebSocket.CONNECTING) return;
+      try {
+        ws.close();
+      } catch {
+        // onclose still runs
+      }
+    }, DIAL_MS);
 
     ws.onopen = () => {
+      clearTimeout(this.dial);
       this.delay = RECONNECT_MIN;
       this.lastSeen = Date.now();
       // Re-proved per connection: the machine on the other end may have changed
@@ -119,11 +146,12 @@ export class Conn {
     };
 
     ws.onclose = () => {
+      clearTimeout(this.dial);
       this.stopBeat();
       if (this.closedByUs) return;
       this.emit('onStatus', 'lost');
       // Backoff from 0.5 s to 8 s. The user has to do nothing.
-      setTimeout(() => this.connect(), this.delay);
+      this.timer = setTimeout(() => this.connect(), this.delay);
       this.delay = Math.min(this.delay * 2, RECONNECT_MAX);
     };
 
@@ -158,9 +186,37 @@ export class Conn {
     this.beat = null;
   }
 
+  /// Connect again right now, by hand.
+  ///
+  /// The backoff waits up to 8 s between attempts, and a handshake can sit
+  /// for `DIAL_MS` before it is given up on. Someone watching a tab that says
+  /// "reconnecting…" while their Wi-Fi has just come back should not have to
+  /// wait out either. The old socket is let go without a word — its `onclose`
+  /// would otherwise start a second reconnect of its own.
+  retry() {
+    if (this.closedByUs) return;
+    clearTimeout(this.timer);
+    this.timer = null;
+    clearTimeout(this.dial);
+    this.stopBeat();
+    const old = this.ws;
+    if (old) {
+      old.onopen = old.onmessage = old.onclose = old.onerror = null;
+      try {
+        old.close();
+      } catch {
+        // already gone
+      }
+    }
+    this.delay = RECONNECT_MIN;
+    this.connect();
+  }
+
   /// Close for good — no reconnect. Used when the machine is forgotten.
   close() {
     this.closedByUs = true;
+    clearTimeout(this.timer);
+    clearTimeout(this.dial);
     this.stopBeat();
     try {
       this.ws?.close();
