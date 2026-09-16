@@ -14,8 +14,9 @@ There is no CI. Nothing here needs a runner.
   `push_to_mac.py`, `fetch_from_mac.py`, `put_to_mac.py`, `mac.py`,
   `create_release.py`, `upload_asset.py`.
 - **The Mac** is reached by password over SSH; paramiko drives it, so no key is
-  needed. Its address is the `HOST` line in `push_to_mac.py` and `mac.py` —
-  **update both when the lease moves**. The build checkout is
+  needed. Its address is the `HOST` line in `push_to_mac.py`, `mac.py`,
+  `put_to_mac.py` and `fetch_from_mac.py` — **update all four when the lease
+  moves**. The build checkout is
   `~/data/code/sessionhub-build`; the build cache is
   `~/data/code/sessionhubd/target`, reused through `CARGO_TARGET_DIR` so a
   rebuild is seconds. That folder is an old copy of the source, not a checkout —
@@ -45,7 +46,13 @@ There is no CI. Nothing here needs a runner.
        LLD="$(rustc --print sysroot)/lib/rustlib/x86_64-pc-windows-msvc/bin/rust-lld.exe"
        CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER="$LLD" \
        CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_RUSTFLAGS="-C linker-flavor=ld.lld -C link-self-contained=yes" \
-       CARGO_TARGET_DIR=<somewhere else> cargo build --release --target x86_64-unknown-linux-musl
+       CARGO_TARGET_DIR=<somewhere else> cargo build --release --target x86_64-unknown-linux-musl --no-default-features
+
+   `--no-default-features` leaves out the `sqlite` feature: bundled SQLite is
+   C, and there is no C compiler for musl here. That build reads opencode's
+   sessions by asking its CLI instead of its database — slower, and only for
+   the folder the daemon runs in — but it works. A Linux build made *on*
+   Linux can keep the default features.
 
    The result is a **static-pie** ELF with no `PT_INTERP`, so it runs on any
    x86_64 distribution regardless of its glibc — verified on Ubuntu 18.04

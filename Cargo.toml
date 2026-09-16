@@ -1,6 +1,6 @@
 [package]
 name = "sessionhubd"
-version = "0.0.38"
+version = "0.0.39"
 edition = "2021"
 
 [dependencies]
@@ -8,6 +8,7 @@ crossbeam-channel = "0.5.16"
 getrandom = "0.4.3"
 notify = "8.2.0"
 portable-pty = "0.9.0"
+rusqlite = { version = "0.40.2", features = ["bundled"], optional = true }
 rust-embed = "8.12.0"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
@@ -35,3 +36,10 @@ windows-sys = { version = "0.61.2", features = [
 
 [target."cfg(unix)".dependencies]
 libc = "0.2.189"
+
+[features]
+default = ["sqlite"]
+# Read opencode's session database directly instead of asking its CLI. Bundles
+# SQLite, which is C: the Linux build made on Windows has no C compiler for
+# musl, so it is made with `--no-default-features` and asks the CLI instead.
+sqlite = ["dep:rusqlite"]

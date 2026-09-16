@@ -3,7 +3,7 @@
 //! The rule that must never be broken: **never reconstruct a cwd from an
 //! encoded directory name.** The encoding differs per agent and has changed
 //! before. For JSONL, `cwd` is read from the file's contents; for opencode, its
-//! CLI is asked.
+//! database is read — or, without SQLite built in, its CLI is asked.
 //!
 //! Scanning runs on its own thread, never on the state actor: it reads hundreds
 //! of files and calls external CLIs.
@@ -11,6 +11,7 @@
 use std::collections::{HashMap, HashSet};
 use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crossbeam_channel::{bounded, Sender};
@@ -29,7 +30,16 @@ const HEAD_BYTES: usize = 64 * 1024;
 /// 50 MB of wasted I/O.
 const HEAD_FIRST_TRY: usize = 8 * 1024;
 
-/// How often the opencode CLI is asked, at the most.
+/// How long the opencode database is trusted without looking at it again.
+///
+/// Its file stamps are checked on every wake, and the folder is watched, so a
+/// change is normally seen at once. This is the safety net for a write that
+/// reached the WAL without touching a stamp the watcher or `stat` can see —
+/// a memory-mapped page, say — and a read costs a few milliseconds.
+const OPENCODE_DB_SWEEP: Duration = Duration::from_secs(60);
+
+/// How often the opencode CLI is asked, at the most — the fallback for a
+/// build without SQLite, or a database whose shape is not the one known here.
 ///
 /// `opencode session list` boots a whole Bun runtime and opens its database:
 /// measured at ~3 s of CPU per call, for a few hundred bytes of JSON. It used
@@ -82,12 +92,15 @@ pub fn spawn(cfg: Config, tx: Sender<Cmd>) -> Sender<Config> {
     let (trig_tx, trig_rx) = bounded::<()>(64);
     let (cfg_tx, cfg_rx) = bounded::<Config>(4);
 
-    start_watcher(trig_tx.clone());
+    let pending = Arc::new(Mutex::new(Pending::default()));
+    start_watcher(trig_tx.clone(), pending.clone());
 
     std::thread::spawn(move || {
         let mut cfg = cfg;
         let mut cache = Cache::default();
         let mut last: Option<Vec<ProjectInfo>> = None;
+        // The first round looks at everything; after that only what changed.
+        let mut scan = Scan::Full;
         loop {
             // Settings can change while the daemon is alive; a disabled agent
             // stops being scanned from the next round.
@@ -105,20 +118,21 @@ pub fn spawn(cfg: Config, tx: Sender<Cmd>) -> Sender<Config> {
             }
             if changed {
                 last = None;
+                scan = Scan::Full;
             }
 
-            // The CLI first, and only when its own clock says so. A file event
-            // that arrives early finds the previous answer in the cache and
+            // opencode first, on its own terms: the database whenever its
+            // files moved, the CLI only when its own clock says so. A file
+            // event from claude finds the previous answer in the cache and
             // uses that.
             if let Some(agent) = cfg.agents.get("opencode").filter(|a| a.enabled) {
-                let due = cache.opencode.as_ref().is_none_or(|o| Instant::now() >= o.due);
-                if due {
+                if opencode_due(&cache) {
                     refresh_opencode(&agent.command, &mut cache);
                 }
             }
 
             let started = Instant::now();
-            let projects = scan_all(&cfg, &mut cache);
+            let projects = scan_all(&cfg, &mut cache, &scan);
             let ms = started.elapsed().as_millis() as u64;
 
             // Send only when the contents changed; a periodic scan that finds
@@ -147,8 +161,9 @@ pub fn spawn(cfg: Config, tx: Sender<Cmd>) -> Sender<Config> {
                 .map(|o| o.due.saturating_duration_since(Instant::now()))
                 .map_or(SWEEP, |left| left.min(SWEEP));
             let mut from_cfg = false;
+            let mut from_file = false;
             crossbeam_channel::select! {
-                recv(trig_rx) -> m => if m.is_err() { return },
+                recv(trig_rx) -> m => if m.is_err() { return } else { from_file = true },
                 recv(cfg_rx) -> m => match m {
                     Ok(fresh) => {
                         if opencode_changed(&cfg, &fresh) {
@@ -168,34 +183,86 @@ pub fn spawn(cfg: Config, tx: Sender<Cmd>) -> Sender<Config> {
                 std::thread::sleep(DEBOUNCE);
             }
             while trig_rx.try_recv().is_ok() {}
+
+            // What to look at next time round. A file event names its files,
+            // and those are all that is re-read; anything else — the sweep, a
+            // settings change, a watcher that lost track — walks the lot.
+            scan = if from_cfg {
+                Scan::Full
+            } else if from_file {
+                let mut p = pending.lock().unwrap_or_else(|e| e.into_inner());
+                let taken = std::mem::take(&mut *p);
+                if taken.full { Scan::Full } else { Scan::Only(taken.paths) }
+            } else {
+                Scan::Full
+            };
         }
     });
 
     cfg_tx
 }
 
-fn start_watcher(trig: Sender<()>) {
+/// What the watcher has seen since the last scan.
+#[derive(Default)]
+struct Pending {
+    paths: HashSet<PathBuf>,
+    /// Look at everything: an event without paths, an overflow, or more
+    /// files than are worth listing one by one.
+    full: bool,
+}
+
+/// Enough paths that walking the tree is cheaper than stat-ing them one at a
+/// time — and a bound on what an event storm can make this set hold.
+const PENDING_MAX: usize = 256;
+
+/// Which files a scan looks at.
+enum Scan {
+    Full,
+    Only(HashSet<PathBuf>),
+}
+
+fn start_watcher(trig: Sender<()>, pending: Arc<Mutex<Pending>>) {
     use notify::{RecursiveMode, Watcher};
 
     let home = config::home();
-    let roots = [home.join(".claude").join("projects"), home.join(".pi").join("agent")];
+    let roots = [
+        (home.join(".claude").join("projects"), RecursiveMode::Recursive),
+        (home.join(".pi").join("agent"), RecursiveMode::Recursive),
+        // Only the folder itself: the database and its WAL live there, and
+        // `log/` next to them is not worth waking up for.
+        (opencode_dir(), RecursiveMode::NonRecursive),
+    ];
 
     std::thread::spawn(move || {
         let mut watchers = Vec::new();
-        for root in roots {
+        for (root, mode) in roots {
             if !root.is_dir() {
                 continue;
             }
             let trig = trig.clone();
+            let pending = pending.clone();
             let handler = move |res: notify::Result<notify::Event>| {
-                if res.is_ok() {
-                    // Bounded channel: if a trigger is already waiting, this event
-                    // adds nothing. Dropped, not queued.
-                    let _ = trig.try_send(());
+                let Ok(ev) = res else { return };
+                {
+                    let mut p = pending.lock().unwrap_or_else(|e| e.into_inner());
+                    // A rescan request, or an event that names nothing, means
+                    // the watcher cannot say what moved.
+                    if ev.need_rescan() || ev.paths.is_empty() {
+                        p.full = true;
+                    } else if !p.full {
+                        p.paths.extend(ev.paths.iter().cloned());
+                        if p.paths.len() > PENDING_MAX {
+                            p.paths.clear();
+                            p.full = true;
+                        }
+                    }
                 }
+                // Bounded channel: if a trigger is already waiting, this event
+                // adds nothing. Dropped, not queued.
+                let _ = trig.try_send(());
             };
             match notify::recommended_watcher(handler) {
-                Ok(mut w) => match w.watch(&root, RecursiveMode::Recursive) {
+                Ok(mut w) => match w.watch(&root, mode) {
                     Ok(()) => {
                         info!(path = %root.display(), "watching session directory");
                         watchers.push(w);
@@ -224,38 +291,192 @@ pub struct Cache {
     opencode: Option<Opencode>,
 }
 
-/// The last answer from the opencode CLI, and when to ask again.
+/// The last answer about opencode's sessions, and when to ask again.
 struct Opencode {
     rows: Vec<SessionRow>,
-    /// The current window: `OPENCODE_MIN` while answers change, doubling
-    /// towards `OPENCODE_MAX` while they do not.
-    window: Duration,
+    from: OpencodeSource,
     due: Instant,
 }
 
-/// Ask the opencode CLI, and set the clock for the next time.
+enum OpencodeSource {
+    /// Read from the database. `stamp` is what the files looked like then;
+    /// a difference means there is something new to read.
+    Db { stamp: DbStamp },
+    /// Asked of the CLI. `window` is `OPENCODE_MIN` while answers change,
+    /// doubling towards `OPENCODE_MAX` while they do not.
+    Cli { window: Duration },
+}
+
+/// (mtime, size) of the database and of its write-ahead log. In WAL mode a
+/// fresh session sits in the `-wal` file, possibly for hours, before it is
+/// folded into the database proper — so the database alone would say
+/// "nothing new" while the sidebar was missing today's work.
+type DbStamp = [(u64, u64); 2];
+
+fn db_stamp(db: &Path) -> DbStamp {
+    let one = |p: &Path| {
+        std::fs::metadata(p)
+            .ok()
+            .map(|m| (m.modified().ok().and_then(to_epoch_ms).unwrap_or(0), m.len()))
+            .unwrap_or((0, 0))
+    };
+    let mut wal = db.as_os_str().to_owned();
+    wal.push("-wal");
+    [one(db), one(Path::new(&wal))]
+}
+
+/// Where opencode keeps its data. It follows XDG on every platform, Windows
+/// included: `~/.local/share/opencode`, not `%APPDATA%`.
+fn opencode_dir() -> PathBuf {
+    std::env::var_os("XDG_DATA_HOME")
+        .map(PathBuf::from)
+        .filter(|p| p.is_absolute())
+        .unwrap_or_else(|| config::home().join(".local").join("share"))
+        .join("opencode")
+}
+
+fn opencode_db() -> PathBuf {
+    opencode_dir().join("opencode.db")
+}
+
+/// Is it time to look at opencode again?
+fn opencode_due(cache: &Cache) -> bool {
+    let Some(o) = &cache.opencode else { return true };
+    if Instant::now() >= o.due {
+        return true;
+    }
+    match &o.from {
+        OpencodeSource::Db { stamp } => db_stamp(&opencode_db()) != *stamp,
+        OpencodeSource::Cli { .. } => false,
+    }
+}
+
+/// Look at opencode's sessions again, and set the clock for the next time.
 ///
-/// A call that fails or is killed keeps the rows it had: a sidebar that
-/// briefly shows yesterday's list is better than one that empties out
-/// whenever the machine is busy — and busy is exactly when this fails.
+/// The database is read when it can be; that costs milliseconds and is
+/// exact. The CLI is the fallback, and a call that fails or is killed keeps
+/// the rows it had: a sidebar that briefly shows yesterday's list is better
+/// than one that empties out whenever the machine is busy — and busy is
+/// exactly when this fails.
 fn refresh_opencode(command: &str, cache: &mut Cache) {
     let had = cache.opencode.take();
+
+    let db = opencode_db();
+    // The stamp is taken before the read, not after: a write that lands
+    // during the read then shows as a difference next time, rather than
+    // being missed for good.
+    let stamp = db_stamp(&db);
+    if let Some(rows) = read_opencode_db(&db) {
+        debug!(rows = rows.len(), "opencode database read");
+        cache.opencode = Some(Opencode {
+            rows,
+            from: OpencodeSource::Db { stamp },
+            due: Instant::now() + OPENCODE_DB_SWEEP,
+        });
+        return;
+    }
+
+    let window_of = |o: &Opencode| match o.from {
+        OpencodeSource::Cli { window } => window,
+        OpencodeSource::Db { .. } => OPENCODE_MIN,
+    };
     let (rows, window) = match scan_opencode(command) {
         Some(rows) => {
             let same = had.as_ref().is_some_and(|o| o.rows == rows);
-            let window = match had {
-                Some(o) if same => (o.window * 2).min(OPENCODE_MAX),
+            let window = match &had {
+                Some(o) if same => (window_of(o) * 2).min(OPENCODE_MAX),
                 _ => OPENCODE_MIN,
             };
             (rows, window)
         }
         None => match had {
-            Some(o) => (o.rows, (o.window * 2).min(OPENCODE_MAX)),
+            Some(o) => {
+                let w = (window_of(&o) * 2).min(OPENCODE_MAX);
+                (o.rows, w)
+            }
             None => (Vec::new(), OPENCODE_MIN),
         },
     };
     debug!(rows = rows.len(), window_s = window.as_secs(), "opencode asked");
-    cache.opencode = Some(Opencode { rows, window, due: Instant::now() + window });
+    cache.opencode = Some(Opencode {
+        rows,
+        from: OpencodeSource::Cli { window },
+        due: Instant::now() + window,
+    });
+}
+
+/// opencode's sessions straight from its database.
+///
+/// `None` means "cannot": no database, no SQLite in this build, or a table
+/// that is not shaped the way this expects — the CLI is asked instead, and
+/// keeps working across an opencode update that moves a column. Read-only,
+/// and a WAL reader never blocks the writer, so opencode itself is not slowed
+/// by this, however often it runs.
+///
+/// Child sessions (`parent_id` set) are opencode's sub-agents: not something
+/// to resume, and there can be many more of them than real sessions.
+/// Archived ones were put away by the user, and stay away.
+#[cfg(feature = "sqlite")]
+fn read_opencode_db(db: &Path) -> Option<Vec<SessionRow>> {
+    use rusqlite::{Connection, OpenFlags};
+    if !db.is_file() {
+        return None;
+    }
+    let flags = OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX;
+    let conn = match Connection::open_with_flags(db, flags) {
+        Ok(c) => c,
+        Err(e) => {
+            debug!(error = %e, "opencode database could not be opened");
+            return None;
+        }
+    };
+    let _ = conn.busy_timeout(Duration::from_millis(200));
+    let mut stmt = match conn.prepare(
+        "SELECT id, directory, title, time_updated FROM session \
+         WHERE parent_id IS NULL AND time_archived IS NULL",
+    ) {
+        Ok(s) => s,
+        Err(e) => {
+            warn!(error = %e, "opencode database is not the shape expected; asking its CLI");
+            return None;
+        }
+    };
+    let rows = stmt.query_map([], |r| {
+        Ok((
+            r.get::<_, String>(0)?,
+            r.get::<_, String>(1)?,
+            r.get::<_, String>(2)?,
+            r.get::<_, i64>(3)?,
+        ))
+    });
+    let rows = match rows {
+        Ok(r) => r,
+        Err(e) => {
+            warn!(error = %e, "opencode database query failed; asking its CLI");
+            return None;
+        }
+    };
+    let mut out = Vec::new();
+    for row in rows {
+        let Ok((id, cwd, title, updated)) = row else { continue };
+        if cwd.is_empty() {
+            continue;
+        }
+        let updated_ms = u64::try_from(updated).unwrap_or(0);
+        out.push(SessionRow {
+            agent: "opencode".into(),
+            title: title_or_fallback(Some(&title), "opencode", updated_ms),
+            session_id: id,
+            cwd,
+            updated_ms,
+        });
+    }
+    Some(out)
+}
+
+#[cfg(not(feature = "sqlite"))]
+fn read_opencode_db(_db: &Path) -> Option<Vec<SessionRow>> {
+    None
 }
 
 /// Whether the part of the config that decides `opencode session list` changed.
@@ -266,22 +487,67 @@ fn opencode_changed(old: &Config, new: &Config) -> bool {
     pick(old) != pick(new)
 }
 
-fn scan_all(cfg: &Config, cache: &mut Cache) -> Vec<ProjectInfo> {
+fn scan_all(cfg: &Config, cache: &mut Cache, scan: &Scan) -> Vec<ProjectInfo> {
     // Disabled agents are not scanned: their sessions cannot be opened, so
     // showing them only fills the sidebar.
     let on = |name: &str| cfg.agents.get(name).map(|a| a.enabled).unwrap_or(false);
 
     let home = config::home();
-    let mut rows = Vec::new();
-    if on("claude") {
-        rows.extend(scan_jsonl_tree(&home.join(".claude").join("projects"), "claude", cache));
+    // pi has a history of writing and reading sessions from different
+    // directories, so all of `~/.pi/agent` is swept, not just `sessions/`.
+    let trees: Vec<(PathBuf, &str)> = [
+        (home.join(".claude").join("projects"), "claude"),
+        (home.join(".pi").join("agent"), "pi"),
+    ]
+    .into_iter()
+    .filter(|(_, agent)| on(agent))
+    .collect();
+
+    match scan {
+        Scan::Full => {
+            // Walk every tree, and let go of files the walk no longer finds.
+            let mut seen = HashSet::new();
+            for (root, agent) in &trees {
+                for path in walk_jsonl(root, 0) {
+                    parse_file(&path, agent, cache);
+                    seen.insert(path);
+                }
+            }
+            cache.files.retain(|p, _| seen.contains(p));
+        }
+        Scan::Only(paths) => {
+            // Only what the watcher named. An agent writes to one file per
+            // message, and re-reading one head beats stat-ing two hundred.
+            for path in paths {
+                if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
+                    continue;
+                }
+                let Some((_, agent)) = trees.iter().find(|(root, _)| path.starts_with(root)) else {
+                    continue;
+                };
+                if path.is_file() {
+                    parse_file(path, agent, cache);
+                } else {
+                    cache.files.remove(path);
+                }
+            }
+        }
     }
-    if on("pi") {
-        rows.extend(scan_pi(&home, cache));
-    }
-    // Whatever the CLI last said; asking it is the loop's business, on its own
-    // clock — see `refresh_opencode`. A scan never spawns anything.
-    if cfg.agents.get("opencode").is_some_and(|a| a.enabled) {
+
+    // Deduped by session id, as the walk always was: pi has been known to
+    // keep the same session in two places.
+    let mut seen = HashSet::new();
+    let mut rows: Vec<SessionRow> = cache
+        .files
+        .values()
+        .filter_map(|(_, _, row)| row.as_ref())
+        .filter(|r| on(&r.agent))
+        .filter(|r| seen.insert((r.agent.clone(), r.session_id.clone())))
+        .cloned()
+        .collect();
+    // Whatever was last read of opencode; reading it is the loop's business —
+    // see `refresh_opencode`. A scan never spawns anything.
+    if on("opencode") {
         if let Some(o) = &cache.opencode {
             rows.extend(o.rows.iter().cloned());
         }
@@ -301,27 +567,6 @@ fn scan_all(cfg: &Config, cache: &mut Cache) -> Vec<ProjectInfo> {
 /// blindness when it is not, and the second must not be worded as the first.
 pub fn reads_sessions_of(agent: &str) -> bool {
     matches!(agent, "claude" | "pi" | "opencode")
-}
-
-/// Every `*.jsonl` under `root`, deduped by session id.
-fn scan_jsonl_tree(root: &Path, agent: &str, cache: &mut Cache) -> Vec<SessionRow> {
-    let mut out = Vec::new();
-    let mut seen = HashSet::new();
-    for path in walk_jsonl(root, 0) {
-        if let Some(row) = parse_file(&path, agent, cache) {
-            if seen.insert(row.session_id.clone()) {
-                out.push(row);
-            }
-        }
-    }
-    out
-}
-
-/// pi has a history of writing and reading sessions from different directories,
-/// so all of `~/.pi/agent` is swept, not just `sessions/`. Deduping by session
-/// id handles a file showing up in two places.
-fn scan_pi(home: &Path, cache: &mut Cache) -> Vec<SessionRow> {
-    scan_jsonl_tree(&home.join(".pi").join("agent"), "pi", cache)
 }
 
 fn walk_jsonl(dir: &Path, depth: usize) -> Vec<PathBuf> {
