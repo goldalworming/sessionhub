@@ -675,7 +675,7 @@ dependencies = [
 
 [[package]]
 name = "sessionhubd"
-version = "0.0.39"
+version = "0.0.40"
 dependencies = [
  "crossbeam-channel",
  "getrandom",

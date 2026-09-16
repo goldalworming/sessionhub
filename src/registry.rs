@@ -137,6 +137,11 @@ pub fn spawn(cfg: Config, tx: Sender<Cmd>) -> Sender<Config> {
 
             // Send only when the contents changed; a periodic scan that finds
             // nothing need not wake the actor or fill the log.
+            // Only the slow ones: a scan is normally a few milliseconds, and
+            // that is not worth a line each — the outliers are.
+            if ms >= 250 {
+                crate::telemetry::track("slow_scan", serde_json::json!({ "ms": ms }));
+            }
             if last.as_ref() != Some(&projects) {
                 let sessions: usize = projects.iter().map(|p| p.sessions.len()).sum();
                 info!(projects = projects.len(), sessions, ms, "registry changed");
@@ -368,6 +373,9 @@ fn refresh_opencode(command: &str, cache: &mut Cache) {
     let stamp = db_stamp(&db);
     if let Some(rows) = read_opencode_db(&db) {
         debug!(rows = rows.len(), "opencode database read");
+        if !matches!(had.as_ref().map(|o| &o.from), Some(OpencodeSource::Db { .. })) {
+            crate::telemetry::track("opencode_source", serde_json::json!({ "source": "db", "rows": rows.len() }));
+        }
         cache.opencode = Some(Opencode {
             rows,
             from: OpencodeSource::Db { stamp },
@@ -380,6 +388,7 @@ fn refresh_opencode(command: &str, cache: &mut Cache) {
         OpencodeSource::Cli { window } => window,
         OpencodeSource::Db { .. } => OPENCODE_MIN,
     };
+    let was_cli = matches!(had.as_ref().map(|o| &o.from), Some(OpencodeSource::Cli { .. }));
     let (rows, window) = match scan_opencode(command) {
         Some(rows) => {
             let same = had.as_ref().is_some_and(|o| o.rows == rows);
@@ -398,6 +407,9 @@ fn refresh_opencode(command: &str, cache: &mut Cache) {
         },
     };
     debug!(rows = rows.len(), window_s = window.as_secs(), "opencode asked");
+    if !was_cli {
+        crate::telemetry::track("opencode_source", serde_json::json!({ "source": "cli", "rows": rows.len() }));
+    }
     cache.opencode = Some(Opencode {
         rows,
         from: OpencodeSource::Cli { window },

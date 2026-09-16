@@ -19,6 +19,7 @@ import { attachTouchScroll, hasFinePointer } from './touchscroll.js';
 import { attachScrollPad } from './scrollpad.js';
 import { unlock as unlockAudio, ding } from './chime.js';
 import { Toasts } from './toasts.js';
+import { Telemetry } from './telemetry.js';
 
 const LS = {
   token: 'sh.token',
@@ -363,6 +364,19 @@ function treeRoot() {
 
 /// Every machine that is open; `current` is the one showing.
 const machines = [];
+
+/// The behaviour log — see telemetry.js. Batches go to the daemon serving this
+/// page, which is always the first machine made; events about a paired
+/// machine are still about what was done from here.
+const tele = new Telemetry((events) => {
+  const home = machines[0];
+  if (!home || !home.conn.ready) return false;
+  home.conn.send({ t: 'track', events });
+  return true;
+});
+/// By what means the next `show` was asked for — set by the caller that
+/// knows, read and cleared by `show`. Only a change of terminal counts.
+let showHow = 'other';
 let current = null;
 
 /// A thin facade over the active machine's connection.
@@ -566,6 +580,19 @@ function makeTerminal(id) {
     clearDone(id);
     conn.sendInput(id, keybar.wrap(data));
   });
+  // `onKey`, not `onData`: the latter also carries xterm's own answers to the
+  // shell's queries — cursor position, device attributes — which arrive within
+  // milliseconds of opening and would pass for a keystroke.
+  term.onKey(() => {
+    const e = terms.get(id);
+    if (!e || !e.openedAt || e.firstIn) return;
+    // The number behind "it is drawn but does not take a keystroke yet": how
+    // long after opening the first key was pressed. Not whether the agent
+    // took it — that this side cannot see — but a person who has to wait
+    // presses later, and that shows.
+    e.firstIn = true;
+    tele.track('first_input', { ms: Math.round(performance.now() - e.openedAt) });
+  });
 
   const entry = { term, fit, host, view, capName, awaitingReplay: false, lastSize: null };
   terms.set(id, entry);
@@ -603,6 +630,8 @@ function attach(id) {
 }
 
 function show(id) {
+  if (id !== activeId && activeId !== null) tele.track('switch', { how: showHow });
+  showHow = 'other';
   activeId = id;
   clearDone(id);
   const grid = layout === 'grid';
@@ -709,6 +738,7 @@ function closeView(id) {
   // sidebar still shows it running.
   dismissed.add(id);
   saveClosed();
+  tele.track('close_tab');
   const entry = terms.get(id);
   if (!entry) {
     renderTabs();
@@ -782,12 +812,18 @@ async function forkSession(project, session) {
 /// conversation — `claude --resume` with nothing after it. Which session it then
 /// opens is not known here; the daemon recognises it once the agent writes to
 /// it, the same way it does for a session started fresh.
+/// When the last terminal was asked for, so its arrival — and the first
+/// output and keystroke after it — can be timed from the click.
+let spawnAskedAt = 0;
+
 function spawn(project, agent, resume, pick = false) {
   // The starting size is taken from the terminal on show, or from the stage size
   // when there is not one yet.
   const active = terms.get(activeId);
   const size = (active && proposed(active)) || { cols: 100, rows: 30 };
   showNextAttach = current;
+  spawnAskedAt = performance.now();
+  tele.track('spawn_ask', { agent, resume: !!resume, pick });
   conn.send({
     t: 'spawn',
     project,
@@ -1120,7 +1156,11 @@ function renderTabs() {
       else delete entry.host.dataset.color;
     }
 
-    tab.onclick = () => (terms.has(t.id) ? show(t.id) : attach(t.id));
+    tab.onclick = () => {
+      showHow = 'tab';
+      if (terms.has(t.id)) show(t.id);
+      else attach(t.id);
+    };
     bindMenu(tab, () => terminalMenu(t, { ordering: true }));
 
     // Dragging to reorder, wherever there is something that can point. On a
@@ -1214,7 +1254,10 @@ function renderTabs() {
       layout === 'grid'
         ? 'All terminals at once. Click for one at a time.'
         : 'One terminal at a time. Click to see them all at once.';
-    layoutBtn.onclick = () => setLayout(layout === 'grid' ? 'tabs' : 'grid');
+    layoutBtn.onclick = () => {
+      tele.track('layout', { grid: layout !== 'grid' });
+      setLayout(layout === 'grid' ? 'tabs' : 'grid');
+    };
     tools.appendChild(layoutBtn);
   }
 
@@ -1240,6 +1283,7 @@ function renderTabs() {
     kbBtn.title = keybar.on ? 'Hide the key bar' : 'Show Esc, Enter, and arrow keys';
     kbBtn.onclick = () => {
       keybar.toggle();
+      tele.track('keybar', { on: keybar.on });
       renderTabs();
     };
     tools.appendChild(kbBtn);
@@ -1831,6 +1875,7 @@ function goToTerminal(m, id) {
   if (m !== current) switchMachine(m);
   const t = state.terminals.find((x) => x.id === id);
   if (t) focusProject(t.project);
+  showHow = 'sidebar';
   if (terms.has(id)) show(id);
   else attach(id);
   closeDrawerIfNarrow();
@@ -2000,6 +2045,7 @@ const palette = new Palette(document.body, (item) => {
     return;
   }
   const live = item.session.live_terminal_id;
+  showHow = 'palette';
   if (live !== null && live !== undefined) attach(live);
   else spawn(item.project.path, item.session.agent, item.session.session_id);
 });
@@ -2239,6 +2285,7 @@ async function copyText(text) {
 /// the place a problem is fixed — the ＋ menu points at Agents when an agent's
 /// command cannot be found.
 function openSettings(section) {
+  tele.track('settings', { section: section || '' });
   // What an update would cost, counted fresh each time the panel opens.
   settings.liveTerminals = state.terminals.filter((t) => t.alive).length;
   settings.setMachine(current);
@@ -2280,6 +2327,7 @@ function switchToIndex(n) {
   const ids = state.terminals.filter((t) => t.alive).map((t) => t.id);
   const id = ids[n - 1];
   if (id === undefined) return;
+  showHow = 'key';
   if (terms.has(id)) show(id);
   else attach(id);
 }
@@ -2300,6 +2348,7 @@ function matchShortcut(ev) {
 
 function runShortcut(action) {
   if (action === 'palette') {
+    tele.track('palette');
     palette.show(paletteItems());
   } else if (action === 'sidebar') {
     toggleSidebar();
@@ -2598,6 +2647,7 @@ picker = new Picker(document.body, {
   // Adding the project is bookkeeping that comes along — through the same
   // `add_project` path as the add-only button, so the reveal-in-sidebar and
   // the error handling that path already has keep working.
+  track: (e, fields) => tele.track(e, fields),
   openWith: (path, agent, isProject, o) => {
     if (!isProject) {
       awaitingProject = path;
@@ -2701,7 +2751,22 @@ conn.on.onStatus = (kind, m) => {
   // A background machine going down must not hijack the banner: it is not what
   // the user is looking at, and the dot on its tab already says so.
   if (m && m !== current) return;
-  const retry = { label: 'Retry now', run: () => m && m.conn.retry() };
+  const retry = {
+    label: 'Retry now',
+    run: () => {
+      if (!m) return;
+      tele.track('retry', { remote: !!m.via });
+      m.conn.retry();
+    },
+  };
+  if (m && kind === 'lost' && was !== 'lost') {
+    m.lostAt = performance.now();
+    tele.track('conn_lost', { remote: !!m.via });
+  }
+  if (m && kind === 'open' && m.lostAt) {
+    tele.track('conn_back', { remote: !!m.via, ms: Math.round(performance.now() - m.lostAt) });
+    m.lostAt = 0;
+  }
   if (kind === 'connecting') {
     // Every reconnect passes through here too; the "lost" strip already on
     // show says all there is to say, and swapping its text on each attempt
@@ -2859,6 +2924,11 @@ conn.on.onAttached = (msg, m) => {
   if (asked) showNextAttach = null;
   const entry = terms.get(msg.id) || makeTerminal(msg.id);
   entry.awaitingReplay = false;
+  if (asked) {
+    // The clock the first output and the first keystroke are read against.
+    entry.openedAt = performance.now();
+    tele.track('opened', { ms: Math.round(entry.openedAt - spawnAskedAt) });
+  }
   entry.term.resize(msg.cols, msg.rows);
   if (asked || activeId === null || activeId === msg.id) show(msg.id);
   else renderTabs();
@@ -2877,6 +2947,10 @@ conn.on.onOutput = (id, data, m) => {
   const entry = m.terms.get(id);
   if (entry) {
     entry.term.write(data);
+    if (entry.openedAt && !entry.firstOut) {
+      entry.firstOut = true;
+      tele.track('first_output', { ms: Math.round(performance.now() - entry.openedAt) });
+    }
     // Activity bookkeeping — but never for the attach replay: the whole ring
     // buffer arrives as one burst, and old output must not read as a job that
     // is running right now. No painting here either: whether this is a stream
@@ -2901,6 +2975,7 @@ conn.on.onExit = (msg, m) => {
 };
 
 conn.on.onError = (msg, m) => {
+  tele.track('error', { code: msg.code || '', remote: !!(m && m.via) });
   // Whatever was going to open did not. Leaving the claim standing would give it
   // to the next terminal opened for any reason at all.
   showNextAttach = null;
@@ -3056,6 +3131,7 @@ const machineBar = new MachineBar(document.getElementById('main'), {
 /// data. Nothing is torn down — its xterm and file panel stay alive.
 function switchMachine(m) {
   if (m === current) return;
+  tele.track('machine', { remote: !!m.via });
   useMachine(m);
   // Settings follows the active machine; otherwise an open panel would quietly
   // be editing the wrong machine's config.

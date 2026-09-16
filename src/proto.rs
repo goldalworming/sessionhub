@@ -278,6 +278,12 @@ pub enum ClientMsg {
     /// until it is reloaded by hand. The client cannot send a WebSocket-level
     /// ping (the browser API does not expose one), so it asks here instead.
     Ping,
+    /// What the page has seen done, batched: `[{"e":"switch","how":"tab","ts":…}, …]`.
+    /// Written to the local behaviour log and nowhere else; see `telemetry.rs`
+    /// for what is kept of each. Never answered.
+    Track {
+        events: Vec<serde_json::Value>,
+    },
     /// Tag this terminal's tab with a colour, so it can be picked out of a strip
     /// of tabs that otherwise read alike. Empty clears the tag. On a saved
     /// terminal the colour is stored with it and comes back on the next open.

@@ -75,6 +75,26 @@ pub struct Config {
     /// switch, and every command that runs is written to the log.
     #[serde(default = "yes")]
     pub remote_commands: bool,
+    /// A local record of what is done with sessionhub — see `telemetry.rs`.
+    #[serde(default)]
+    pub telemetry: Telemetry,
+}
+
+/// The behaviour log: one line per thing done, in `~/.sessionhub/telemetry.jsonl`.
+///
+/// On by default because it leaves the machine as surely as the config does —
+/// never — and because it is what turns "claude is slow to take a keystroke"
+/// from a feeling into a number. Read at start-up.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Telemetry {
+    #[serde(default = "yes")]
+    pub enabled: bool,
+}
+
+impl Default for Telemetry {
+    fn default() -> Self {
+        Telemetry { enabled: true }
+    }
 }
 
 /// Reaching a dev server from outside, at a hostname of its own.
@@ -804,6 +824,7 @@ impl Default for Config {
             cloudflare: Cloudflare::default(),
             applied: Vec::new(),
             remote_commands: true,
+            telemetry: Telemetry::default(),
         }
     }
 }

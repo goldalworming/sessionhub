@@ -172,6 +172,26 @@ All three can be changed from **⚙ Settings → Dropped files**. The panel also
 
 Files larger than `max_file_mb` are rejected up front with a message that names the number — not stored and then quietly discarded.
 
+### Behaviour log
+
+```toml
+[telemetry]
+enabled = true
+```
+
+What is done with sessionhub, one JSON line per event, in
+`~/.sessionhub/telemetry.jsonl`. **It leaves the machine as surely as this
+config does — never.** Nothing in it is content: no paths, no titles, nothing
+typed into a terminal. What it holds is the shape of use — a terminal was
+started for `claude` by resuming, the tab was switched to by keyboard, the
+first keystroke came 4.2 s after it opened, the link to a paired machine was
+lost for 30 s and retried by hand. That is what makes "claude is slow to take
+a keystroke" a number, and what decides what gets fixed next.
+
+Cheap: events are batched and written by a thread of their own, every few
+seconds; the file is rotated at 2 MB and the one before it kept, so it never
+takes more than 4 MB. `enabled = false` turns it off; read at start-up.
+
 ### New project
 
 `projects` is filled in by the **＋** folder picker in the sidebar, and can still

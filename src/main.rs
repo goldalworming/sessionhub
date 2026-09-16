@@ -27,6 +27,7 @@ mod tunnel;
 mod typed;
 mod webpack;
 mod update;
+mod telemetry;
 
 use std::fs::{File, OpenOptions};
 use std::io::Write;
@@ -984,6 +985,10 @@ pub fn run_daemon(home: Option<PathBuf>) {
 
     // Scanning and the file watcher live on their own thread: both read
     // hundreds of files and call external CLIs, which must not stall the actor.
+    // What is done with the daemon, written to a file beside the config and
+    // nowhere else. Before the actor, so its first events are not lost.
+    telemetry::start(cfg.telemetry.enabled);
+
     let registry_cfg = registry::spawn(cfg.clone(), tx.clone());
 
     // How busy the machine is, on its own thread and its own clock. A few

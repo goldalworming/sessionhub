@@ -98,6 +98,7 @@ The answer is `{"t":"dropped",…}`, or `error` with the code `drop_failed`.
 {"t":"open_file","path":"C:\\data\\code\\notex\\src\\main.rs"}
 {"t":"save_file","path":"C:\\data\\code\\notex\\src\\main.rs","text":"fn main() {}\n"}
 {"t":"set_lan_access","enabled":true}
+{"t":"track","events":[{"e":"switch","how":"tab","ts":1789000000000}]}
 {"t":"set_lan_addr","addr":"192.168.0.108"}
 {"t":"set_drops","max_age_hours":24,"max_total_mb":100,"max_file_mb":20}
 {"t":"sweep_drops"}
@@ -224,6 +225,11 @@ The answer is `{"t":"dropped",…}`, or `error` with the code `drop_failed`.
 - `forget` is the only thing that removes that machine's token from the config.
 - All three are answered with `remotes`, which **never contains tokens** — only the
   name, the address, and the version that machine reported when it was paired.
+- `track` hands over what the page has seen done, batched. It is written to
+  `~/.sessionhub/telemetry.jsonl` and nowhere else, and is never answered. Each
+  event needs an `e` of `[a-z0-9_]`, at most 32 characters; up to 12 other
+  scalar fields are kept, strings cut at 64 characters, anything nested dropped.
+  At most 100 events per message. See `telemetry` in CONFIG.md.
 
 ## Server → client
 

@@ -201,6 +201,7 @@ pub fn run(cfg: Config, rx: Receiver<Cmd>, tx: Sender<Cmd>, registry_cfg: Sender
             Cmd::ClientUp { id, tx, rx } => {
                 clients.insert(id, Client { tx, rx });
                 info!(client = id, "client connected");
+                crate::telemetry::track("client_open", serde_json::json!({ "client": id, "clients": clients.len() }));
                 send_state(&cfg, &projects, &agent_names, scanned, &clients, &terminals, Some(id));
                 if let Some(load) = &last_load {
                     send_to(&clients, id, json(load));
@@ -215,6 +216,7 @@ pub fn run(cfg: Config, rx: Receiver<Cmd>, tx: Sender<Cmd>, registry_cfg: Sender
                     }
                 }
                 info!(client = id, "client disconnected");
+                crate::telemetry::track("client_close", serde_json::json!({ "client": id, "clients": clients.len() }));
             }
 
             Cmd::ClientMsg { id, msg } => match msg {
@@ -222,6 +224,7 @@ pub fn run(cfg: Config, rx: Receiver<Cmd>, tx: Sender<Cmd>, registry_cfg: Sender
 
                 ClientMsg::Spawn { project, agent, resume, pick, cols, rows } => {
                     let (cols, rows) = sane_size(cols, rows);
+                    let resumed = resume.is_some();
                     match spawn_terminal(
                         &cfg, next_term, next_run, &project, &agent, resume, pick, cols, rows, &tx,
                     ) {
@@ -232,6 +235,13 @@ pub fn run(cfg: Config, rx: Receiver<Cmd>, tx: Sender<Cmd>, registry_cfg: Sender
                             next_term += 1;
                             next_run += 1;
                             info!(terminal = tid, %project, %agent, "terminal created");
+                            crate::telemetry::track(
+                                "spawn",
+                                serde_json::json!({
+                                    "terminal": tid, "agent": agent, "resume": resumed, "pick": pick,
+                                    "live": terminals.values().filter(|t| t.alive).count(),
+                                }),
+                            );
                             send_state(&cfg, &projects, &agent_names, scanned, &clients, &terminals, None);
                             send_to(&clients, id, json(&ServerMsg::Attached { id: tid, cols, rows }));
                         }
@@ -1844,6 +1854,7 @@ pub fn run(cfg: Config, rx: Receiver<Cmd>, tx: Sender<Cmd>, registry_cfg: Sender
                 ClientMsg::Kill { id: tid } => {
                     if let Some(t) = terminals.get_mut(&tid) {
                         info!(terminal = tid, "kill requested by client");
+                        crate::telemetry::track("kill", serde_json::json!({ "terminal": tid, "agent": t.agent }));
                         if let Some(p) = t.pty.as_mut() {
                             p.kill();
                         }
@@ -1854,6 +1865,7 @@ pub fn run(cfg: Config, rx: Receiver<Cmd>, tx: Sender<Cmd>, registry_cfg: Sender
                 // connection going to another machine is proved all the way to
                 // that machine, not just to the relay in front of it.
                 ClientMsg::Ping => send_to(&clients, id, json(&ServerMsg::Pong)),
+                ClientMsg::Track { events } => crate::telemetry::track_web(id, events),
 
                 ClientMsg::LastCommand { id: tid } => {
                     let command =
@@ -2196,6 +2208,17 @@ pub fn run(cfg: Config, rx: Receiver<Cmd>, tx: Sender<Cmd>, registry_cfg: Sender
                         // forever in read() even though its child is dead.
                         t.pty = None;
                         info!(terminal = term, code, "terminal ended");
+                        let now = SystemTime::now()
+                            .duration_since(UNIX_EPOCH)
+                            .map(|d| d.as_millis() as u64)
+                            .unwrap_or(0);
+                        crate::telemetry::track(
+                            "exit",
+                            serde_json::json!({
+                                "terminal": term, "agent": t.agent, "code": code,
+                                "alive_s": now.saturating_sub(t.started_ms) / 1000,
+                            }),
+                        );
                         let msg = json(&ServerMsg::Exit { id: term, code });
                         for cid in t.viewers.keys().copied().collect::<Vec<_>>() {
                             send_to(&clients, cid, msg.clone());

@@ -39,6 +39,9 @@ export class Picker {
   /// history and what running terminal the folder already has. `on.menu(x, y, items)` shows
   /// the app's context menu; the picker brings the choices, not the menu.
   ///
+  /// `on.track(event, fields)` notes what was done here for the behaviour
+  /// log — optional, and nothing here waits on it.
+  ///
   /// `on.recall()` returns the folder last opened **on the machine now
   /// showing** and `on.remember` stores it —
   /// so opening this picker tomorrow lands where you left off instead of going
@@ -192,6 +195,7 @@ export class Picker {
   }
 
   show() {
+    this.on.track?.('picker');
     this.el.hidden = false;
     this.setFilter('');
     this.note.textContent = 'Loading…';
@@ -239,6 +243,9 @@ export class Picker {
       action();
       return;
     }
+    // The path was typed and never confirmed — the case that used to start
+    // an agent in the wrong folder. Worth counting.
+    this.on.track?.('picker_typed');
     this.after = action;
     this.typed = false;
     this.commit = true;
@@ -500,6 +507,7 @@ export class Picker {
         openSettings: () => this.on.openSettings('agents'),
         start: (agent, o) => {
           this.note.textContent = `Starting ${agent}…`;
+          this.on.track?.('picker_open', { agent, project: is_project, resume: !!(o && o.resume), pick: !!(o && o.pick) });
           this.on.openWith(path, agent, is_project, o);
         },
       }),
