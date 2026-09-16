@@ -9,6 +9,24 @@ import { agentMenuRows } from './sidebar.js';
 import { match } from './fuzzy.js';
 import { mark } from './mark.js';
 
+/// How long after the last keystroke the typed path is looked up.
+const TYPE_MS = 500;
+
+/// Do two spellings name the same folder? Trailing separators and slash
+/// direction never matter; case only on a drive-letter path, where the
+/// filesystem does not care either. Good enough to decide whether the box
+/// still says what the panel shows — a wrong "different" only costs one
+/// extra lookup, a wrong "same" would start an agent in the wrong place, so
+/// the doubt goes the cheap way.
+export function samePath(a, b) {
+  const norm = (p) => {
+    let s = p.trim().replace(/[\\/]+$/, '');
+    if (/^[a-zA-Z]:/.test(s)) s = s.replace(/\//g, '\\').toLowerCase();
+    return s;
+  };
+  return norm(a) === norm(b);
+}
+
 export class Picker {
   /// `on.browse(path)` asks for a folder's contents, `on.mkdir(parent, name)`
   /// creates one and steps in, `on.add(path)` makes it a project,
@@ -38,6 +56,22 @@ export class Picker {
     /// Whether a failed browse has already fallen back to home, so a home that
     /// fails too cannot loop.
     this.retried = false;
+    /// The lookup that follows typing, so a keystroke resets the wait.
+    this.typeTimer = null;
+    /// Whether the lookup in flight was started by typing rather than by
+    /// Enter, Go or a click. A path half typed does not exist yet, and saying
+    /// so in red on every pause is nagging; it is told quietly instead.
+    this.typed = false;
+    /// Set by Enter and Go: the answer may then replace what was typed with
+    /// the folder's own spelling. While typing, the box is left alone —
+    /// otherwise the answer to `C:\data` lands while `\code` is being added
+    /// to it, and wipes the addition.
+    this.commit = false;
+    /// An action waiting for the typed path to be looked up first. Every
+    /// action reads the folder on screen, and the box used to be able to say
+    /// something else: type a path, skip Go, pick an agent, and it started in
+    /// the folder from before the typing.
+    this.after = null;
 
     this.el = document.createElement('div');
     this.el.id = 'picker';
@@ -107,16 +141,27 @@ export class Picker {
     this.mkOk = this.el.querySelector('.mkok');
 
     this.el.querySelector('.close').onclick = () => this.close();
-    this.el.querySelector('.go').onclick = () => this.go(this.pathInput.value);
+    this.el.querySelector('.go').onclick = () => this.commitPath();
     this.upBtn.onclick = () => this.dir?.parent && this.go(this.dir.parent);
     this.useBtn.onclick = (e) => this.openHere(e);
-    this.addBtn.onclick = () => this.use();
-    this.dropBtn.onclick = () => this.remove();
-    this.mkBtn.onclick = () => this.armMkdir();
+    this.addBtn.onclick = () => this.settle(() => this.use());
+    this.dropBtn.onclick = () => this.settle(() => this.remove());
+    this.mkBtn.onclick = () => this.settle(() => this.armMkdir());
     this.mkOk.onclick = () => this.create();
 
     this.pathInput.onkeydown = (e) => {
-      if (e.key === 'Enter') this.go(this.pathInput.value);
+      if (e.key === 'Enter') this.commitPath();
+    };
+    // The list follows the typing, a moment behind it. Enter and Go still
+    // work, but nothing depends on them any more.
+    this.pathInput.oninput = () => {
+      clearTimeout(this.typeTimer);
+      this.typeTimer = setTimeout(() => {
+        const typed = this.pending();
+        if (typed === null) return;
+        this.typed = true;
+        this.go(typed);
+      }, TYPE_MS);
     };
     this.mkName.onkeydown = (e) => {
       if (e.key === 'Enter') this.create();
@@ -161,10 +206,43 @@ export class Picker {
   }
 
   go(path) {
+    clearTimeout(this.typeTimer);
     this.note.textContent = 'Loading…';
     this.retried = false;
     this.disarmMkdir();
     this.on.browse(path);
+  }
+
+  /// Enter or Go: look the box up now, and let the answer tidy its spelling.
+  commitPath() {
+    this.commit = true;
+    this.typed = false;
+    this.go(this.pathInput.value);
+  }
+
+  /// What the box says, when that is not the folder on screen; `null` when
+  /// the two agree and there is nothing to look up.
+  pending() {
+    const typed = this.pathInput.value.trim();
+    if (!typed) return null;
+    if (this.dir && samePath(typed, this.dir.path)) return null;
+    return typed;
+  }
+
+  /// Run `action` on the folder the box names — looking it up first if the
+  /// panel is still showing another one, and only then, once the answer is
+  /// in. A lookup that fails drops the action: nothing is started in a folder
+  /// that could not be found.
+  settle(action) {
+    const typed = this.pending();
+    if (typed === null) {
+      action();
+      return;
+    }
+    this.after = action;
+    this.typed = false;
+    this.commit = true;
+    this.go(typed);
   }
 
   /// Called when the daemon answers with a folder's contents.
@@ -180,10 +258,17 @@ export class Picker {
       this.filterClear.hidden = true;
     }
     this.on.remember(dir.path);
-    this.pathInput.value = dir.path;
-    // What is useful is the tail of the path, not the `C:\Users\...` that is the
-    // same everywhere — so the box is scrolled to its right end.
-    this.pathInput.scrollLeft = this.pathInput.scrollWidth;
+    // Not while the path is being typed: the answer to what was typed a
+    // moment ago must not overwrite what has been typed since.
+    const typing = document.activeElement === this.pathInput && !this.commit;
+    if (!typing) {
+      this.pathInput.value = dir.path;
+      // What is useful is the tail of the path, not the `C:\Users\...` that is
+      // the same everywhere — so the box is scrolled to its right end.
+      this.pathInput.scrollLeft = this.pathInput.scrollWidth;
+    }
+    this.commit = false;
+    this.typed = false;
     this.upBtn.disabled = !dir.parent;
     // "Open here…" never goes dead. It used to become a disabled "Already a
     // project" — a dead end that told you what you could not do, in the exact
@@ -199,6 +284,10 @@ export class Picker {
     this.paintRoots();
     this.paintList();
     this.paintNote();
+    // The action that was waiting for this folder, if any.
+    const after = this.after;
+    this.after = null;
+    if (after) after();
   }
 
   paintNote() {
@@ -222,9 +311,18 @@ export class Picker {
   /// An error message from the daemon: keep showing the folder currently open,
   /// do not empty the panel just because one step failed.
   fail(message) {
+    // Whatever was waiting for this folder does not happen. Left standing,
+    // it would run against the next folder that does answer.
+    this.after = null;
+    this.commit = false;
     this.note.textContent = message;
-    this.note.classList.add('bad');
-    setTimeout(() => this.note.classList.remove('bad'), 6000);
+    // A path still being typed is expected not to exist yet; that is not
+    // worth a red flash on every pause.
+    if (!this.typed) {
+      this.note.classList.add('bad');
+      setTimeout(() => this.note.classList.remove('bad'), 6000);
+    }
+    this.typed = false;
     // Nothing on screen and the folder asked for is gone — a remembered one
     // since deleted. An error above an empty panel leaves nowhere to click, so
     // home is tried once; that one always exists.
@@ -364,16 +462,22 @@ export class Picker {
   /// The menu lists exactly what the ＋ on a sidebar project row lists, through
   /// the same app menu — one folder-to-agent vocabulary, not two.
   openHere(e) {
-    if (!this.dir) return;
     // The click that opens the menu must not reach the document listener that
     // closes any open menu — the ＋ on a sidebar row stops it the same way.
     e.stopPropagation();
+    const r = e.currentTarget.getBoundingClientRect();
+    // The box first: the menu is built from the folder on screen, and that
+    // has to be the folder the box names before it is worth building.
+    this.settle(() => this.agentMenu(r));
+  }
+
+  agentMenu(r) {
+    if (!this.dir) return;
     const agents = this.on.agents();
     if (!agents.length) {
       this.fail('No agents are enabled — turn one on in Settings.');
       return;
     }
-    const r = e.currentTarget.getBoundingClientRect();
     const { path, is_project } = this.dir;
     // The very rows the ＋ on a sidebar project opens, built by the same
     // function. This menu answers the same question — which agent, here — and
