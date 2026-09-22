@@ -817,35 +817,30 @@ html, body {
 
 /* --------------------------------------------------- terminal activity mark */
 
-/* Rings the tab's own icon: amber and pulsing while the program is producing
-   output, a solid green ring once a real run finished while nobody was
-   looking. Neither wins, the icon just carries its usual colour — this used
-   to be a second dot beside the name; now the icon is the mark. */
-.aicon.busy {
-  box-shadow: 0 0 0 2px var(--t-bright-yellow);
+/* Rings the tab's own icon: amber, solid, while the program is producing
+   output — nothing to do but wait, so nothing here needs to move. Green and
+   pulsing once a real run finished and it is sitting at a prompt for you;
+   that is the moment worth catching the eye, not the moment it was already
+   busy. Neither wins, the icon just carries its usual colour — this used to
+   be a second dot beside the name; now the icon is the mark. */
+.aicon.busy { box-shadow: 0 0 0 2px var(--t-bright-yellow); }
+.aicon.done {
+  box-shadow: 0 0 0 2px var(--t-bright-green);
   animation: actpulse 1.6s ease-in-out infinite;
 }
-.aicon.done { box-shadow: 0 0 0 2px var(--t-bright-green); }
 @keyframes actpulse {
   50% { opacity: 0.35; }
 }
 @media (prefers-reduced-motion: reduce) {
-  .aicon.busy { animation: none; }
+  .aicon.done { animation: none; }
 }
 /* The same rules apply verbatim on sidebar rows — one icon, everywhere,
    carries identity and activity both. */
-/* Work still running after the agent went quiet.
-   A colour of its own, not amber and not green: amber means "it is talking to
-   you", green means "you can stop waiting", and this is neither. It breathes
-   more slowly than the busy mark for the same reason — nothing here needs
-   watching, it just is not finished. */
-.aicon.bgwork {
-  box-shadow: 0 0 0 2px var(--t-bright-blue);
-  animation: actpulse 3.2s ease-in-out infinite;
-}
-@media (prefers-reduced-motion: reduce) {
-  .aicon.bgwork { animation: none; }
-}
+/* Work still running after the agent went quiet — still running, so it gets
+   the same solid treatment `busy` does, not the pulse `done` gets. A colour
+   of its own, not amber and not green: amber means "it is talking to you",
+   green means "it is waiting on you", and this is neither. */
+.aicon.bgwork { box-shadow: 0 0 0 2px var(--t-bright-blue); }
 
 /* One line per background job, under the row that started it. Indented to the
    title above rather than the row edge: it belongs to that conversation, and a
@@ -2774,15 +2769,8 @@ html, body {
 .ehead button:hover:not(:disabled) { color: var(--text); background: color-mix(in srgb, var(--text) 10%, transparent); }
 .ehead button:disabled { opacity: 0.4; cursor: default; }
 .ehead .esave.on { color: var(--text); border-color: var(--accent); }
-.ehead .etheme,
-.ehead .eview,
-.ehead .ewrap { font-size: 10px; min-width: 40px; }
-.ehead .eview[hidden] { display: none; }
-.ehead .etheme.on,
-.ehead .ewrap.on { border-color: var(--accent); }
-#editor.dark .ehead .esave.on,
-#editor.dark .ehead .ewrap.on,
-#editor.dark .ehead .etheme.on { color: #e8eaed; border-color: var(--accent); }
+.ehead .emore { font-size: 13px; padding: 2px 8px; letter-spacing: 1px; }
+#editor.dark .ehead .esave.on { color: #e8eaed; border-color: var(--accent); }
 
 .ebody { flex: 1 1 auto; min-height: 0; }
 .ebody[hidden] { display: none; }

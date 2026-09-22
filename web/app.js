@@ -2413,6 +2413,7 @@ sidePanel = new SidePanel(el.side, {
   list: (path) => conn.send({ t: 'tree', path }),
   open: (path) => conn.send({ t: 'open_file', path }),
   save: (path, text) => conn.send({ t: 'save_file', path, text }),
+  menu: (x, y, items) => openMenu(x, y, items),
   // The Explorer shows one folder at a time: the project being worked on, or
   // wherever the `..` row has been walked to since.
   root: () => treeRoot(),

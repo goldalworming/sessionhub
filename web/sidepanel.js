@@ -21,9 +21,9 @@ const MIN = 120;
 const CODE_MIN = 420;
 
 export class SidePanel {
-  /// `on.list/open/save/root/projects/pick` are passed on to the tree and the
-  /// editor; `on.layout()` is called whenever the content width changes, so
-  /// xterm and Monaco recompute with it.
+  /// `on.list/open/save/root/projects/pick/menu` are passed on to the tree
+  /// and the editor; `on.layout()` is called whenever the content width
+  /// changes, so xterm and Monaco recompute with it.
   constructor(host, on) {
     this.on = on;
     /// [{ path, name }] — in the order they were opened, within the scope
@@ -92,6 +92,7 @@ export class SidePanel {
       dirty: () => this.paintChrome(),
       projectRoot: on.root,
       via: on.via,
+      menu: on.menu,
     });
     this.tree.show();
 

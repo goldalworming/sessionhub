@@ -43,12 +43,13 @@ export class Editor {
   /// `onSave(path, text)` saves a file. `appTheme()` returns the app theme, used
   /// when the editor mode is "auto". `onDirty()` is called when the saved/dirty
   /// state changes, so the tab bar can mark it.
-  constructor(root, { save, theme, dirty, projectRoot, via }) {
+  constructor(root, { save, theme, dirty, projectRoot, via, menu }) {
     this.onSave = save;
     this.appTheme = theme;
     this.onDirty = dirty;
     this.projectRoot = projectRoot;
     this.machineVia = via || (() => '');
+    this.onMenu = menu;
     this.monaco = null;
     this.editor = null;
     /// Which (machine, project) the open files belong to. Everything below is
@@ -75,9 +76,7 @@ export class Editor {
       '<div class="ehead">' +
       '<span class="ecrumb"></span>' +
       '<span class="enote"></span>' +
-      '<button class="eview" hidden>view</button>' +
-      '<button class="ewrap"></button>' +
-      '<button class="etheme"></button>' +
+      '<button class="emore" title="More">⋯</button>' +
       '<button class="esave" title="Save (Ctrl+S)">Save</button>' +
       '</div>' +
       '<div class="ebody"></div>' +
@@ -88,9 +87,7 @@ export class Editor {
     this.noteEl = this.el.querySelector('.enote');
     this.crumbEl = this.el.querySelector('.ecrumb');
     this.saveBtn = this.el.querySelector('.esave');
-    this.wrapBtn = this.el.querySelector('.ewrap');
-    this.viewBtn = this.el.querySelector('.eview');
-    this.themeBtn = this.el.querySelector('.etheme');
+    this.moreBtn = this.el.querySelector('.emore');
     this.bodyEl = this.el.querySelector('.ebody');
     this.imgWrap = this.el.querySelector('.eimg');
     this.imgEl = this.imgWrap.querySelector('img');
@@ -112,30 +109,57 @@ export class Editor {
     };
 
     this.saveBtn.onclick = () => this.save();
-    this.themeBtn.onclick = () => {
-      this.mode = THEMES[(THEMES.indexOf(this.mode) + 1) % THEMES.length];
-      localStorage.setItem(LS_THEME, this.mode);
-      this.applyTheme();
+    this.moreBtn.onclick = (e) => {
+      e.stopPropagation();
+      const r = this.moreBtn.getBoundingClientRect();
+      this.onMenu(r.right, r.bottom + 4, this.moreItems());
     };
-    this.wrapBtn.onclick = () => {
-      this.wrap = !this.wrap;
-      localStorage.setItem(LS_WRAP, this.wrap ? 'on' : 'off');
-      this.applyWrap();
-    };
-    // The rendered page, in its own tab. The same URL the image viewer uses:
-    // `/api/file` answers `text/html` for these, the cookie authenticates it,
-    // and `via` carries it from a paired machine. A tab rather than an iframe
-    // because on a phone the point is a full screen and a working back button.
-    this.viewBtn.onclick = () => {
-      if (!this.current) return;
-      const via = this.machineVia();
-      const url =
-        `/api/file?path=${encodeURIComponent(this.current)}` +
-        (via ? `&via=${encodeURIComponent(via)}` : '');
-      window.open(url, '_blank', 'noopener');
-    };
-    this.paintTheme();
-    this.paintWrap();
+    this.el.classList.toggle('dark', this.resolvedTheme() === 'vs-dark');
+  }
+
+  /// Everything besides Save, gathered behind the one button that opens them —
+  /// wrap and theme apply to every text file, viewing rendered only to HTML,
+  /// and a binary or an image has neither a wrap nor a theme to speak of.
+  moreItems() {
+    const meta = this.meta.get(this.key(this.current));
+    const items = [];
+    if (!meta?.binary && !meta?.image) {
+      items.push({
+        label: 'Wrap long lines',
+        on: this.wrap,
+        run: () => {
+          this.wrap = !this.wrap;
+          localStorage.setItem(LS_WRAP, this.wrap ? 'on' : 'off');
+          this.applyWrap();
+        },
+      });
+      items.push({
+        // Cycling on click is the button's old behaviour; a menu row states
+        // the next value plainly instead, since there is no second click a
+        // moment later to show what it became.
+        label: `Theme: ${this.mode} → click for ${THEMES[(THEMES.indexOf(this.mode) + 1) % THEMES.length]}`,
+        run: () => {
+          this.mode = THEMES[(THEMES.indexOf(this.mode) + 1) % THEMES.length];
+          localStorage.setItem(LS_THEME, this.mode);
+          this.applyTheme();
+        },
+      });
+    }
+    // Only an HTML file has a rendered form worth a tab of its own.
+    if (/\.html?$/i.test(meta?.name || '')) {
+      items.push({
+        label: 'Open rendered, in a new tab',
+        run: () => {
+          if (!this.current) return;
+          const via = this.machineVia();
+          const url =
+            `/api/file?path=${encodeURIComponent(this.current)}` +
+            (via ? `&via=${encodeURIComponent(via)}` : '');
+          window.open(url, '_blank', 'noopener');
+        },
+      });
+    }
+    return items;
   }
 
   /// Fold long lines, or let them run off to the right.
@@ -143,16 +167,7 @@ export class Editor {
   /// An editor option rather than a model one, so it holds for every file
   /// opened afterwards without being set again on each.
   applyWrap() {
-    this.paintWrap();
     if (this.editor) this.editor.updateOptions({ wordWrap: this.wrap ? 'on' : 'off' });
-  }
-
-  paintWrap() {
-    this.wrapBtn.textContent = 'wrap';
-    this.wrapBtn.className = `ewrap${this.wrap ? ' on' : ''}`;
-    this.wrapBtn.title = this.wrap
-      ? 'Long lines are folded to the width of the panel. Click to let them run on.'
-      : 'Long lines run off to the right. Click to fold them into the panel.';
   }
 
   get open() {
@@ -346,19 +361,9 @@ export class Editor {
   }
 
   applyTheme() {
-    this.paintTheme();
     if (this.monaco) this.monaco.editor.setTheme(this.resolvedTheme());
     this.el.classList.toggle('dark', this.resolvedTheme() === 'vs-dark');
     this.onDirty(); // bar tab ikut menyesuaikan warnanya
-  }
-
-  paintTheme() {
-    this.themeBtn.textContent = this.mode;
-    this.themeBtn.className = `etheme${this.mode === 'auto' ? '' : ' on'}`;
-    this.themeBtn.title =
-      `Editor theme: ${this.mode}. Click to cycle (dark → light → auto). ` +
-      '"auto" follows the app theme.';
-    this.el.classList.toggle('dark', this.resolvedTheme() === 'vs-dark');
   }
 
   /// The app theme changed; only meaningful when the editor mode is "auto".
@@ -401,14 +406,6 @@ export class Editor {
     if (this.dirty.has(this.key(this.current))) bits.push('unsaved');
     this.noteEl.textContent = bits.join(' · ');
     this.saveBtn.disabled = meta.truncated || meta.binary || meta.image;
-    // Nothing to fold in a picture, and the same for a binary that is only
-    // being described rather than shown.
-    this.wrapBtn.disabled = meta.binary || meta.image;
-    // Only an HTML file has a rendered form worth a tab of its own. Hidden
-    // rather than disabled for everything else: a control that is dead for
-    // nearly every file should not sit in the bar explaining itself.
-    this.viewBtn.hidden = !/\.html?$/i.test(meta.name || '');
-    this.viewBtn.title = 'Open this page rendered, in a new tab';
     this.saveBtn.classList.toggle('on', this.dirty.has(this.key(this.current)));
   }
 
