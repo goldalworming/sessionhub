@@ -12,7 +12,7 @@ import { Drops, quotePath } from './drop.js';
 import { Picker } from './picker.js';
 import { MachineBar } from './machines.js';
 import { SidePanel } from './sidepanel.js';
-import { renderTree as renderSidebar } from './sidebar.js';
+import { renderTree as renderSidebar, agentIcon, agentSlot } from './sidebar.js';
 import { KeyBar } from './keybar.js';
 import { LinksSheet, bufferLines, scanLinks } from './links.js';
 import { attachTouchScroll, hasFinePointer } from './touchscroll.js';
@@ -38,8 +38,6 @@ const LS = {
   filesOpen: 'sh.files.open',
   filesWidth: 'sh.files.width',
   tabOrder: 'sh.taborder',
-  /// Per machine, so closing a tab on one does not tidy away a tab on another.
-  closed: 'sh.closed.',
 };
 
 const MAC = /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent);
@@ -208,7 +206,15 @@ if (!token) {
 // These names stay as bare as before, but their contents now belong to the
 // active machine. Switching machines swaps the references rather than copying
 // the contents — that is what keeps the rest of this file unchanged.
-let state = { projects: [], terminals: [], agents: [], saved: [], scanning: true };
+let state = {
+  projects: [],
+  terminals: [],
+  agents: [],
+  saved: [],
+  scanning: true,
+  hidden_sessions: [],
+  dismissed_terminals: [],
+};
 const collapsed = new Set(JSON.parse(localStorage.getItem(LS.collapsed) || '[]'));
 /// Projects marked as focus, lifted to the top of the sidebar.
 const bookmarks = new Set(JSON.parse(localStorage.getItem(LS.bookmarks) || '[]'));
@@ -218,59 +224,12 @@ const filterCollapsed = new Set();
 const saveCollapsed = () => localStorage.setItem(LS.collapsed, JSON.stringify([...collapsed]));
 const saveBookmarks = () => localStorage.setItem(LS.bookmarks, JSON.stringify([...bookmarks]));
 let terms = new Map(); // id -> { term, fit, host, awaitingReplay, lastSize }
-/// Tabs closed by hand on the machine being shown. Stored, because a reload that
-/// undoes your tidying is a reload that makes closing a tab pointless.
-///
-/// Storing an id is only safe alongside `noteDaemonRun`, which throws the whole
-/// set away as soon as the daemon behind this machine turns out to be a
-/// different run.
-let dismissed = new Set();
 
-const closedKey = (machineId) => LS.closed + machineId;
-
-/// The stored form is `{ hwm, closed }` — see `noteDaemonRun` for what the
-/// high-water mark is doing there.
-function loadClosed(machineId) {
-  try {
-    const raw = JSON.parse(localStorage.getItem(closedKey(machineId)) || '{}');
-    const closed = (raw.closed || []).filter((n) => Number.isInteger(n));
-    return { closed: new Set(closed), hwm: Number(raw.hwm) || 0 };
-  } catch {
-    return { closed: new Set(), hwm: 0 };
-  }
-}
-
-const writeClosed = (m) =>
-  localStorage.setItem(closedKey(m.id), JSON.stringify({ hwm: m.hwm, closed: [...m.dismissed] }));
-
-/// Written after every change, and pruned as it goes: an entry for a terminal
-/// the daemon no longer lists can never hide anything again, and keeping it
-/// would let the store grow without end in a browser left open for weeks.
-function saveClosed() {
-  const here = new Set(state.terminals.map((t) => t.id));
-  for (const id of dismissed) if (!here.has(id)) dismissed.delete(id);
-  writeClosed(current);
-}
-
-/// Is this the same daemon run the closed tabs were closed on?
-///
-/// Ids start again at 1 every time a daemon restarts, and within a single run
-/// they only climb: a terminal that ends keeps its place in the list rather than
-/// leaving it. So a highest id that has gone *down* can only mean a different
-/// run, in which every tab put away belongs to a terminal that no longer exists.
-/// Kept on, those entries would hide brand new terminals that merely inherited
-/// the numbers. Nothing carried on the terminal itself can stand in for this:
-/// two plain shells in the same folder look exactly alike.
-function noteDaemonRun(m, terminals) {
-  const top = terminals.reduce((n, t) => Math.max(n, t.id), 0);
-  if (top === m.hwm) return;
-  if (top < m.hwm) m.dismissed.clear();
-  m.hwm = top;
-  writeClosed(m);
-}
-
-/// Was this tab put away by hand?
-const isClosed = (t) => dismissed.has(t.id);
+/// Was this tab put away by hand? The daemon behind the machine being shown
+/// remembers this itself now — every device reads the same list, and a
+/// restart clears it on its own the moment the ids it names stop meaning
+/// anything. See `SetDismissed` in proto.rs.
+const isClosed = (t) => (state.dismissed_terminals || []).includes(t.id);
 let activeId = null;
 /// 'tabs' = one terminal fills the stage; 'grid' = all of them at once.
 let layout = localStorage.getItem(LS.layout) === 'grid' ? 'grid' : 'tabs';
@@ -392,7 +351,6 @@ const conn = {
 };
 
 function makeMachine({ id, label, via }) {
-  const stored = loadClosed(id);
   const host = document.createElement('div');
   host.className = 'mhost';
   host.hidden = true;
@@ -401,15 +359,16 @@ function makeMachine({ id, label, via }) {
     id,
     label,
     via, // '' for this machine itself
-    state: { projects: [], terminals: [], agents: [], saved: [], scanning: true },
+    state: {
+      projects: [],
+      terminals: [],
+      agents: [],
+      saved: [],
+      scanning: true,
+      hidden_sessions: [],
+      dismissed_terminals: [],
+    },
     terms: new Map(),
-    /// Terminals whose tab was closed by hand. They keep running — closing a tab
-    /// has never meant killing anything here — but they stop taking room in the
-    /// strip until you pick them out of the sidebar again. Read back from
-    /// storage, so this survives a reload.
-    dismissed: stored.closed,
-    /// The highest terminal id this machine's daemon has ever shown us.
-    hwm: stored.hwm,
     activeId: null,
     pinnedProject: null,
     memById: new Map(),
@@ -431,7 +390,6 @@ function useMachine(m) {
     current.terms = terms;
     current.activeId = activeId;
     current.memById = memById;
-    current.dismissed = dismissed;
     current.pinnedProject = pinnedProject;
     current.browseRoot = browseRoot;
     current.host.hidden = true;
@@ -439,7 +397,6 @@ function useMachine(m) {
   current = m;
   state = m.state;
   terms = m.terms;
-  dismissed = m.dismissed;
   activeId = m.activeId;
   memById = m.memById;
   pinnedProject = m.pinnedProject;
@@ -609,8 +566,12 @@ function proposed(entry) {
 /// several at once without moving the active terminal over and over.
 function openView(id, focus = true) {
   // Opening it is the undo for closing its tab — picking it out of the sidebar
-  // is how you say you want it back.
-  if (dismissed.delete(id) && current) saveClosed();
+  // is how you say you want it back. Applied locally right away, for the same
+  // reason `closeView` does: the daemon's answer is on its way, not here yet.
+  if (isClosed({ id })) {
+    state.dismissed_terminals = state.dismissed_terminals.filter((x) => x !== id);
+    conn.send({ t: 'set_dismissed', id, dismissed: false });
+  }
   const entry = terms.get(id) || makeTerminal(id);
   if (layout === 'grid') entry.host.hidden = false;
   const size = proposed(entry) || { cols: 80, rows: 24 };
@@ -734,8 +695,13 @@ function closeView(id) {
   // the ✕ did nothing at all on a freshly opened window — the case the fix was
   // reported against. The process is untouched either way; the row in the
   // sidebar still shows it running.
-  dismissed.add(id);
-  saveClosed();
+  // Applied here too, not only sent: the daemon's own answer would say the
+  // same thing, but only after a round trip, and a tab that lingers until
+  // then is a tab that looks like the click missed.
+  if (!state.dismissed_terminals.includes(id)) {
+    state.dismissed_terminals = [...state.dismissed_terminals, id];
+  }
+  conn.send({ t: 'set_dismissed', id, dismissed: true });
   tele.track('close_tab');
   const entry = terms.get(id);
   if (!entry) {
@@ -1013,12 +979,15 @@ function terminalLabel(t) {
   // known about this terminal, and a tab reading `mcp · terminal` beside three
   // others reading `mcp · terminal` is the exact problem naming was meant to
   // solve — the sidebar showed the name while the tab still did not.
+  //
+  // The agent itself is never spelled out here: the tab's icon says which one,
+  // the same trade the sidebar already made.
   if (t.name) return `${basename(t.project)} · ${t.name}`;
   const session = state.projects
     .flatMap((p) => p.sessions)
     .find((s) => s.session_id && s.session_id === t.session_id);
   const title = session ? session.title : '';
-  return `${basename(t.project)} · ${t.agent}${title ? ' · ' + title : ''}`;
+  return `${basename(t.project)}${title ? ' · ' + title : ''}`;
 }
 
 /// Bring a tab into view inside its strip.
@@ -1106,15 +1075,16 @@ function renderTabs() {
     tab.dataset.id = String(t.id);
     tab.title = `${t.project}\n${t.agent} · ${t.cols}×${t.rows}`;
 
-    // The activity mark comes first, before the name — a glance down the strip
-    // answers "which of these is still working" without reading anything. The
-    // strip is rebuilt often, so the classes are re-derived from the entry.
+    // The icon comes first, before the name — a glance down the strip answers
+    // "which agent, and which of these is still working" without reading
+    // anything. The activity mark used to be a separate dot; now it rings the
+    // icon instead, so the icon itself carries both facts. The strip is
+    // rebuilt often, so the classes are re-derived from the entry.
     const act = terms.get(t.id);
-    const tdot = document.createElement('span');
-    tdot.className = 'tdot'
-      + (act?.streaming ? ' busy' : '')
-      + (!act?.streaming && act?.done ? ' done' : '');
-    tab.appendChild(tdot);
+    const icon = agentIcon(t.agent, agentSlot(state.agents, t.agent));
+    icon.classList.toggle('busy', act?.streaming === true);
+    icon.classList.toggle('done', !act?.streaming && act?.done === true);
+    tab.appendChild(icon);
 
     const name = document.createElement('span');
     name.className = 'tname';
@@ -1469,6 +1439,7 @@ function sidebarCtx() {
     openSaved,
     forgetSaved,
     setAutostart,
+    setHiddenSession,
     explorerRoot,
     saveCollapsed,
     saveBookmarks,
@@ -1620,6 +1591,12 @@ function openSaved(project, name) {
 /// this is about the next time the daemon comes up.
 function setAutostart(project, name, on) {
   conn.send({ t: 'set_autostart', project, name, on });
+}
+
+/// Take a session out of "live & today", or put it back. Kept on the daemon,
+/// not in this browser: the same choice reads the same way from a phone.
+function setHiddenSession(sessionId, hidden) {
+  conn.send({ t: 'set_hidden_session', session_id: sessionId, hidden });
 }
 
 /// Forget the note. Anything running under that name keeps running — this
@@ -1904,16 +1881,16 @@ function paintActivity(m, id, entry) {
   const working = !busy && backgroundOf(m, id).working;
   const done = !busy && !working && (entry.done === true || m.finished?.has(id) === true);
   if (m === current) {
-    const dot = el.tabs.querySelector(`.tab[data-id="${id}"] .tdot`);
-    if (dot) {
-      dot.classList.toggle('busy', busy);
-      dot.classList.toggle('bgwork', working);
-      dot.classList.toggle('done', done);
+    const icon = el.tabs.querySelector(`.tab[data-id="${id}"] .aicon`);
+    if (icon) {
+      icon.classList.toggle('busy', busy);
+      icon.classList.toggle('bgwork', working);
+      icon.classList.toggle('done', done);
     }
-    for (const row of el.tree.querySelectorAll(`[data-tid="${id}"]`)) {
-      row.classList.toggle('tbusy', busy);
-      row.classList.toggle('tbgwork', working);
-      row.classList.toggle('tdone', done);
+    for (const row of el.tree.querySelectorAll(`[data-tid="${id}"] .aicon`)) {
+      row.classList.toggle('busy', busy);
+      row.classList.toggle('bgwork', working);
+      row.classList.toggle('done', done);
     }
   }
 }
@@ -2842,11 +2819,12 @@ conn.on.onState = (msg, m) => {
   st.agents = msg.agents || [];
   st.saved = msg.saved || [];
   st.scanning = msg.scanning === true;
+  st.hidden_sessions = msg.hidden_sessions || [];
+  st.dismissed_terminals = msg.dismissed_terminals || [];
   // Before anything is drawn, and for background machines too — a machine whose
   // daemon restarted while it sat in another tab must not come back holding
   // stale tabs.
   noteBackground(m, msg.terminals || []);
-  noteDaemonRun(m, st.terminals);
   if (m !== current) return;
   if (pendingReattach) {
     pendingReattach = false;
@@ -3196,10 +3174,10 @@ conn.on.onRemotes = (msg, m) => {
 function dropMachine(m) {
   if (m === current) switchMachine(local);
   // Its toasts go with it: one left behind would offer to take you to a
-  // terminal on a machine that is no longer here. Its closed tabs go too —
-  // pairing a machine again is a fresh look at what it is running.
+  // terminal on a machine that is no longer here. Its closed tabs stay where
+  // they always were — on that machine's own daemon — so there is nothing
+  // left to clean up here.
   toasts.dismissFor(`${m.id}:`);
-  localStorage.removeItem(closedKey(m.id));
   m.conn.close();
   for (const e of m.terms.values()) e.term.dispose();
   m.terms.clear();

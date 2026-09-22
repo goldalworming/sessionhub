@@ -14,13 +14,6 @@ import { BRAND_ICONS } from './brandicons.js';
 
 const LS_BUCKETS = 'sh.buckets';
 const LS_ALIAS = 'sh.alias';
-/// Sessions taken out of the "live & today" zone by hand.
-///
-/// Only out of that zone — the project's own history keeps them. The zone is a
-/// convenience ("which one was that just now?"), so what belongs in it is a
-/// matter of taste; the history is the record, and sessionhub does not own it.
-/// Nothing is deleted anywhere: this is a list of ids in this browser.
-const LS_HIDDEN = 'sh.zonehidden';
 
 /// The fold state of the services group, kept in the same set as the day groups
 /// so there is one place that remembers what is open.
@@ -41,7 +34,6 @@ const FLAT_MAX = 3;
 // list of open ones. That way a project never touched needs no record at all.
 const toggled = loadSet(LS_BUCKETS);
 const alias = loadMap(LS_ALIAS);
-const hidden = loadSet(LS_HIDDEN);
 
 function loadSet(key) {
   try {
@@ -61,7 +53,6 @@ function loadMap(key) {
 }
 
 const saveToggled = () => localStorage.setItem(LS_BUCKETS, JSON.stringify([...toggled]));
-const saveHidden = () => localStorage.setItem(LS_HIDDEN, JSON.stringify([...hidden]));
 const saveAlias = () =>
   localStorage.setItem(LS_ALIAS, JSON.stringify(Object.fromEntries(alias)));
 
@@ -88,7 +79,7 @@ function el(tag, cls, text) {
 /// same index agentRow already colours its dot by, so one name means one
 /// colour everywhere it appears. Unknown names (custom, or not yet loaded)
 /// fall back to slot 0 rather than throwing off the rest of the palette.
-function agentSlot(agents, name) {
+export function agentSlot(agents, name) {
   const i = (agents || []).findIndex((a) => a.name === name);
   return i < 0 ? 0 : i % 6;
 }
@@ -98,19 +89,28 @@ function agentSlot(agents, name) {
 /// Anything else still gets a colour — just picked by position, in agentSlot.
 const NAMED_COLOR = new Set(['claude', 'opencode', 'codex']);
 
-/// A small colour-coded icon for an agent — its identity, distinct from the
-/// status dot next to it (busy/live/done). A handful of well-known names get
+/// A small colour-coded icon for an agent. A handful of well-known names get
 /// their real mark (BRAND_ICONS); everything else — opencode, pi, omp, or
 /// anything a user's own config.toml names — falls back to a letter, since
 /// there is no art for a name sessionhub has never heard of.
-function agentIcon(name, slot, live) {
+///
+/// `live` rings it — "this agent is running here", the agent picker's own
+/// question. `dim` mutes it to grey instead of its colour when not live —
+/// the question a session/terminal row asks, where most rows are history and
+/// colour should mark the few that are not. The picker never sets `dim`: it
+/// lists what you could start, not what already is, so every row keeps its
+/// identity colour whether running or not.
+export function agentIcon(name, slot, { live = false, dim = false } = {}) {
   const key = name.toLowerCase();
   const brand = BRAND_ICONS[key];
-  const icon = el('span', 'aicon' + (live ? ' live' : ''));
+  const inactive = dim && !live;
+  const icon = el('span', 'aicon' + (live ? ' live' : '') + (inactive ? ' inactive' : ''));
   if (brand) icon.innerHTML = brand;
   else icon.textContent = (name[0] || '?').toUpperCase();
-  if (NAMED_COLOR.has(key)) icon.dataset.agent = key;
-  else icon.dataset.slot = String(slot);
+  if (!inactive) {
+    if (NAMED_COLOR.has(key)) icon.dataset.agent = key;
+    else icon.dataset.slot = String(slot);
+  }
   icon.title = name;
   return icon;
 }
@@ -158,13 +158,11 @@ export function renderTree(ctx) {
       // deleted, so nothing should be unreachable — and a row that vanishes with
       // no way to recall it is the same as one that was lost.
       const back = hiddenToday(ctx);
-      if (back) {
-        const line = el('div', 'zback', `${back} hidden today · show`);
+      if (back.length) {
+        const line = el('div', 'zback', `${back.length} hidden today · show`);
         line.title = 'Put them back in this zone. Their history was never touched.';
         line.onclick = () => {
-          hidden.clear();
-          saveHidden();
-          ctx.rerender();
+          for (const id of back) ctx.setHiddenSession(id, false);
         };
         tree.appendChild(line);
       }
@@ -239,19 +237,21 @@ function projectsLabel(ctx, text, extra) {
   ]);
 }
 
-/// How many of the hidden ones would be in the zone today.
+/// Which of the hidden ones would be in the zone today.
 ///
-/// Counted rather than taken from the set's size: yesterday's hidden sessions
-/// have dropped out of the zone on their own, and offering to bring back six
-/// when only one would appear is a promise the row cannot keep.
+/// Listed rather than just counted: yesterday's hidden sessions have dropped
+/// out of the zone on their own, and offering to bring back six when only one
+/// would appear is a promise the row cannot keep — and "show" needs the ids
+/// anyway, to ask the daemon to unhide exactly these and no others.
 function hiddenToday(ctx) {
-  let n = 0;
+  const hidden = new Set(ctx.state.hidden_sessions || []);
+  const ids = [];
   for (const p of ctx.state.projects) {
     for (const s of p.sessions) {
-      if (hidden.has(s.session_id) && dayBucket(s.updated_at) === 'today') n++;
+      if (hidden.has(s.session_id) && dayBucket(s.updated_at) === 'today') ids.push(s.session_id);
     }
   }
-  return n;
+  return ids;
 }
 
 // --------------------------------------------------------------- top zone
@@ -365,6 +365,7 @@ function serviceRows(ctx, up, down) {
 /// Live terminals, then sessions touched today. Both in one zone because the
 /// question is the same: "which one was that just now?"
 function recentRows(ctx, liveSession) {
+  const hidden = new Set(ctx.state.hidden_sessions || []);
   const seen = new Set();
   const out = [];
 
@@ -509,11 +510,7 @@ function sessionMenu(ctx, { p, s, inZone }) {
   if (inZone) {
     items.push({
       label: 'Hide from live & today',
-      run: () => {
-        hidden.add(s.session_id);
-        saveHidden();
-        ctx.rerender();
-      },
+      run: () => ctx.setHiddenSession(s.session_id, true),
     });
   }
   return items;
@@ -531,8 +528,10 @@ function zoneRow(ctx, o) {
   if (o.tid !== undefined) r.dataset.tid = String(o.tid);
   if (o.color) r.dataset.color = o.color;
 
-  r.appendChild(agentIcon(o.agent, agentSlot(ctx.state.agents, o.agent)));
-  r.appendChild(el('span', 'dot' + (o.live ? ' live' : '')));
+  // The icon alone carries liveness now — full colour when running, grey
+  // when it is just today's history — so the separate dot beside it said
+  // the same thing twice.
+  r.appendChild(agentIcon(o.agent, agentSlot(ctx.state.agents, o.agent), { live: o.live, dim: true }));
 
   const col = el('div', 'zcol');
   // The same marker as in the history: your own name has to look like a name,
@@ -736,11 +735,14 @@ function sessionRow(ctx, p, s, liveSession, positions) {
   const running = live !== null ? ctx.state.terminals.find((x) => x.id === live) : null;
   if (running && running.color) item.dataset.color = running.color;
 
-  // Icon, then status dot, then the title — the same order on every row shape
-  // (session, loose terminal, saved terminal, zone), so which agent a row
-  // belongs to is always read from the same spot.
-  item.appendChild(agentIcon(s.agent, agentSlot(ctx.state.agents, s.agent)));
-  item.appendChild(el('span', 'dot' + (live !== null ? ' live' : '')));
+  // Icon, then the title — the same order on every row shape (session, loose
+  // terminal, saved terminal, zone), so which agent a row belongs to is
+  // always read from the same spot. The icon carries liveness by itself now
+  // (full colour when running, grey otherwise), so it does the status dot's
+  // old job too.
+  item.appendChild(
+    agentIcon(s.agent, agentSlot(ctx.state.agents, s.agent), { live: live !== null, dim: true }),
+  );
 
   const custom = alias.get(s.session_id);
   const title = el('span', 'stitle' + (custom ? ' alias' : ''));
@@ -928,7 +930,7 @@ function agentRow(a, slot, o) {
 
   // Colour by position, so an agent keeps the same one across every project
   // and can be recognised without reading. The palette is in the stylesheet.
-  const icon = agentIcon(a.name, slot % 6, o.live);
+  const icon = agentIcon(a.name, slot % 6, { live: o.live });
   icon.title = o.live ? `${a.name} is running here` : a.name;
   row.appendChild(icon);
 
@@ -1035,8 +1037,7 @@ function looseRow(ctx, t, inGroup) {
   item.dataset.tid = String(t.id);
   // The same tag as on its tab: one terminal, one colour, wherever it appears.
   if (t.color) item.dataset.color = t.color;
-  item.appendChild(agentIcon(t.agent, agentSlot(ctx.state.agents, t.agent)));
-  item.appendChild(el('span', 'dot live'));
+  item.appendChild(agentIcon(t.agent, agentSlot(ctx.state.agents, t.agent), { live: true, dim: true }));
   // A saved terminal wears its name here rather than its number — the number is
   // what it is called when nobody has said what it is for.
   item.appendChild(
@@ -1186,8 +1187,7 @@ function savedRow(ctx, s, inGroup) {
 
   if (s.color) item.dataset.color = s.color;
 
-  item.appendChild(agentIcon(s.agent, agentSlot(ctx.state.agents, s.agent)));
-  item.appendChild(el('span', 'dot'));
+  item.appendChild(agentIcon(s.agent, agentSlot(ctx.state.agents, s.agent), { dim: true }));
   item.appendChild(el('span', 'stitle alias', s.name));
   // The command is shown, not just kept in the tooltip: clicking this row runs
   // it, and a row that runs something must say what.

@@ -52,6 +52,12 @@ pub struct Config {
     /// Terminals given a name, so they outlive the daemon.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub saved: Vec<SavedTerminal>,
+    /// Session ids taken out of "live & today" by hand. Kept here rather than
+    /// in one browser's storage, so the same sessions stay out of the zone on
+    /// every device that opens this machine — the zone itself is only ever a
+    /// convenience, so hiding one never touches its history.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub hidden_sessions: Vec<String>,
     /// Giving a local port a hostname of its own through the Cloudflare tunnel
     /// this machine is already reached by.
     #[serde(default)]
@@ -821,6 +827,7 @@ impl Default for Config {
             drops: Drops::default(),
             remotes: Vec::new(),
             saved: Vec::new(),
+            hidden_sessions: Vec::new(),
             cloudflare: Cloudflare::default(),
             applied: Vec::new(),
             remote_commands: true,

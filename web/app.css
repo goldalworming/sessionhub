@@ -586,7 +586,6 @@ html, body {
 .zrow:hover { background: color-mix(in srgb, var(--text) 6%, transparent); }
 .zrow.selected { background: color-mix(in srgb, var(--accent) 22%, transparent); }
 .zrow > .aicon { margin-top: 2px; }
-.zrow > .dot { margin-top: 5px; }
 .zrow > .when { margin-top: 1px; }
 
 .zcol {
@@ -761,6 +760,9 @@ html, body {
   text-transform: none;
 }
 .aicon.live { box-shadow: 0 0 0 1px var(--accent); }
+/* History, not something running right now: identity without the colour that
+   would claim otherwise. */
+.aicon.inactive { background: var(--muted); color: var(--bg); }
 .aicon svg { width: 9px; height: 9px; display: block; fill: currentColor; }
 
 .empty-hint {
@@ -815,63 +817,34 @@ html, body {
 
 /* --------------------------------------------------- terminal activity mark */
 
-/* One dot per tab: amber while the program is producing output, green once a
-   real run finished while nobody was looking. Invisible otherwise — a mark
-   that is always there is a mark nobody reads. Takes no space when hidden so
-   quiet tabs keep their exact old layout. */
-.tdot {
-  flex: 0 0 auto;
-  width: 7px;
-  height: 7px;
-  border-radius: 50%;
-  display: none;
-}
-.tdot.busy {
-  display: inline-block;
-  /* The terminal token directly: `--warn` is declared inside `#settings`, so out
-     here it resolves to nothing and the mark loses both its fill and its ring. */
-  background: var(--t-bright-yellow);
+/* Rings the tab's own icon: amber and pulsing while the program is producing
+   output, a solid green ring once a real run finished while nobody was
+   looking. Neither wins, the icon just carries its usual colour — this used
+   to be a second dot beside the name; now the icon is the mark. */
+.aicon.busy {
+  box-shadow: 0 0 0 2px var(--t-bright-yellow);
   animation: actpulse 1.6s ease-in-out infinite;
 }
-.tdot.done { display: inline-block; background: var(--t-bright-green); }
+.aicon.done { box-shadow: 0 0 0 2px var(--t-bright-green); }
 @keyframes actpulse {
   50% { opacity: 0.35; }
 }
 @media (prefers-reduced-motion: reduce) {
-  .tdot.busy { animation: none; }
+  .aicon.busy { animation: none; }
 }
-/* The same states on sidebar rows: their existing live dot changes colour
-   rather than a second dot appearing next to it. */
-#tree [data-tid].tbusy .dot {
-  background: var(--t-bright-yellow);
-  border-color: var(--t-bright-yellow);
-  animation: actpulse 1.6s ease-in-out infinite;
-}
-#tree [data-tid].tdone .dot {
-  background: var(--t-bright-green);
-  border-color: var(--t-bright-green);
-}
-@media (prefers-reduced-motion: reduce) {
-  #tree [data-tid].tbusy .dot { animation: none; }
-}
+/* The same rules apply verbatim on sidebar rows — one icon, everywhere,
+   carries identity and activity both. */
 /* Work still running after the agent went quiet.
    A colour of its own, not amber and not green: amber means "it is talking to
    you", green means "you can stop waiting", and this is neither. It breathes
    more slowly than the busy mark for the same reason — nothing here needs
    watching, it just is not finished. */
-.tdot.bgwork {
-  display: inline-block;
-  background: var(--t-bright-blue);
-  animation: actpulse 3.2s ease-in-out infinite;
-}
-#tree [data-tid].tbgwork .dot {
-  background: var(--t-bright-blue);
-  border-color: var(--t-bright-blue);
+.aicon.bgwork {
+  box-shadow: 0 0 0 2px var(--t-bright-blue);
   animation: actpulse 3.2s ease-in-out infinite;
 }
 @media (prefers-reduced-motion: reduce) {
-  .tdot.bgwork,
-  #tree [data-tid].tbgwork .dot { animation: none; }
+  .aicon.bgwork { animation: none; }
 }
 
 /* One line per background job, under the row that started it. Indented to the

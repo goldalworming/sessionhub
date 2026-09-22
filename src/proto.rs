@@ -124,6 +124,21 @@ pub enum ClientMsg {
         name: String,
         on: bool,
     },
+    /// Take a session out of "live & today", or put it back. Kept on the
+    /// daemon rather than in one browser's storage, so hiding it is the same
+    /// choice on every device that opens this machine.
+    SetHiddenSession {
+        session_id: String,
+        hidden: bool,
+    },
+    /// Close (or reopen) a terminal's tab without touching the terminal
+    /// itself — the daemon's record of which tabs are put away, shared by
+    /// every device, and gone on its own the moment the daemon restarts and
+    /// the ids it names stop meaning anything.
+    SetDismissed {
+        id: u32,
+        dismissed: bool,
+    },
     /// Ask GitHub what the newest release is. Answered with `Update`.
     UpdateCheck,
     /// Install that release: download it, then restart into it. Every live
@@ -314,6 +329,14 @@ pub enum ServerMsg {
         /// cannot tell "not scanned yet" from "there really are no projects" and
         /// would give the wrong guidance for a few seconds.
         scanning: bool,
+        /// Session ids taken out of "live & today" by hand, from `config.toml` —
+        /// the same list on every device.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        hidden_sessions: Vec<String>,
+        /// Terminal ids whose tab was closed by hand this run. Never written to
+        /// disk; see `SetDismissed`.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        dismissed_terminals: Vec<u32>,
     },
     /// The answer to `Ping`: proof the link is alive end to end, including the
     /// relay when this connection is going to another machine.

@@ -139,6 +139,12 @@ pub fn run(cfg: Config, rx: Receiver<Cmd>, tx: Sender<Cmd>, registry_cfg: Sender
     let mut cfg = cfg;
     let mut clients: HashMap<ClientId, Client> = HashMap::new();
     let mut terminals: HashMap<u32, Terminal> = HashMap::new();
+    // Tabs closed by hand, kept here rather than per-browser so every device
+    // agrees on which ones are put away. Ids never repeat within one run (see
+    // `next_run`'s comment), and this is never written to disk — a fresh
+    // daemon starts the numbering over, so there is nothing old to mean
+    // anything by the time it would matter.
+    let mut dismissed: HashSet<u32> = HashSet::new();
     let mut next_term: u32 = 1;
     // Never reused, so a message from a replaced process can always be told
     // apart from one belonging to the terminal that replaced it.
@@ -202,7 +208,7 @@ pub fn run(cfg: Config, rx: Receiver<Cmd>, tx: Sender<Cmd>, registry_cfg: Sender
                 clients.insert(id, Client { tx, rx });
                 info!(client = id, "client connected");
                 crate::telemetry::track("client_open", serde_json::json!({ "client": id, "clients": clients.len() }));
-                send_state(&cfg, &projects, &agent_names, scanned, &clients, &terminals, Some(id));
+                send_state(&cfg, &projects, &agent_names, scanned, &clients, &terminals, &dismissed, Some(id));
                 if let Some(load) = &last_load {
                     send_to(&clients, id, json(load));
                 }
@@ -220,7 +226,7 @@ pub fn run(cfg: Config, rx: Receiver<Cmd>, tx: Sender<Cmd>, registry_cfg: Sender
             }
 
             Cmd::ClientMsg { id, msg } => match msg {
-                ClientMsg::List => send_state(&cfg, &projects, &agent_names, scanned, &clients, &terminals, Some(id)),
+                ClientMsg::List => send_state(&cfg, &projects, &agent_names, scanned, &clients, &terminals, &dismissed, Some(id)),
 
                 ClientMsg::Spawn { project, agent, resume, pick, cols, rows } => {
                     let (cols, rows) = sane_size(cols, rows);
@@ -242,7 +248,7 @@ pub fn run(cfg: Config, rx: Receiver<Cmd>, tx: Sender<Cmd>, registry_cfg: Sender
                                     "live": terminals.values().filter(|t| t.alive).count(),
                                 }),
                             );
-                            send_state(&cfg, &projects, &agent_names, scanned, &clients, &terminals, None);
+                            send_state(&cfg, &projects, &agent_names, scanned, &clients, &terminals, &dismissed, None);
                             send_to(&clients, id, json(&ServerMsg::Attached { id: tid, cols, rows }));
                         }
                         Err((code, message)) => {
@@ -264,7 +270,7 @@ pub fn run(cfg: Config, rx: Receiver<Cmd>, tx: Sender<Cmd>, registry_cfg: Sender
                             next_term += 1;
                             next_run += 1;
                             info!(terminal = tid, %project, %agent, %session_id, "session forked");
-                            send_state(&cfg, &projects, &agent_names, scanned, &clients, &terminals, None);
+                            send_state(&cfg, &projects, &agent_names, scanned, &clients, &terminals, &dismissed, None);
                             send_to(&clients, id, json(&ServerMsg::Attached { id: tid, cols, rows }));
                         }
                         Err((code, message)) => {
@@ -567,7 +573,7 @@ pub fn run(cfg: Config, rx: Receiver<Cmd>, tx: Sender<Cmd>, registry_cfg: Sender
                     agent_names = enabled_agents(&cfg);
                     // The registry needs to know which agents are still scanned.
                     let _ = registry_cfg.try_send(cfg.clone());
-                    send_state(&cfg, &projects, &agent_names, scanned, &clients, &terminals, None);
+                    send_state(&cfg, &projects, &agent_names, scanned, &clients, &terminals, &dismissed, None);
                     // Answer with the latest contents so the settings panel never
                     // has to guess what was actually stored.
                     if tx.send(Cmd::ClientMsg { id, msg: ClientMsg::Config }).is_err() {
@@ -623,7 +629,7 @@ pub fn run(cfg: Config, rx: Receiver<Cmd>, tx: Sender<Cmd>, registry_cfg: Sender
                     info!(agent = %name, "agent removed");
                     agent_names = enabled_agents(&cfg);
                     let _ = registry_cfg.try_send(cfg.clone());
-                    send_state(&cfg, &projects, &agent_names, scanned, &clients, &terminals, None);
+                    send_state(&cfg, &projects, &agent_names, scanned, &clients, &terminals, &dismissed, None);
                     if tx.send(Cmd::ClientMsg { id, msg: ClientMsg::Config }).is_err() {
                         return;
                     }
@@ -758,7 +764,7 @@ pub fn run(cfg: Config, rx: Receiver<Cmd>, tx: Sender<Cmd>, registry_cfg: Sender
                         });
                     }
                     let _ = registry_cfg.try_send(cfg.clone());
-                    send_state(&cfg, &projects, &agent_names, scanned, &clients, &terminals, None);
+                    send_state(&cfg, &projects, &agent_names, scanned, &clients, &terminals, &dismissed, None);
                 }
 
                 // The file panel. All three touch the disk, so none of them run
@@ -846,7 +852,7 @@ pub fn run(cfg: Config, rx: Receiver<Cmd>, tx: Sender<Cmd>, registry_cfg: Sender
                     // moment would only look like a flicker.
                     projects.retain(|p| !p.path.eq_ignore_ascii_case(&path) || !p.sessions.is_empty());
                     let _ = registry_cfg.try_send(cfg.clone());
-                    send_state(&cfg, &projects, &agent_names, scanned, &clients, &terminals, None);
+                    send_state(&cfg, &projects, &agent_names, scanned, &clients, &terminals, &dismissed, None);
                 }
 
                 ClientMsg::SetDrops { max_age_hours, max_total_mb, max_file_mb } => {
@@ -1407,7 +1413,46 @@ pub fn run(cfg: Config, rx: Receiver<Cmd>, tx: Sender<Cmd>, registry_cfg: Sender
                     }
                     info!(%name, on, "autostart changed");
                     let _ = registry_cfg.send(cfg.clone());
-                    send_state(&cfg, &projects, &agent_names, scanned, &clients, &terminals, None);
+                    send_state(&cfg, &projects, &agent_names, scanned, &clients, &terminals, &dismissed, None);
+                }
+
+                ClientMsg::SetHiddenSession { session_id, hidden } => {
+                    let already = cfg.hidden_sessions.contains(&session_id);
+                    if already == hidden {
+                        continue;
+                    }
+                    let before = cfg.hidden_sessions.clone();
+                    if hidden {
+                        cfg.hidden_sessions.push(session_id.clone());
+                    } else {
+                        cfg.hidden_sessions.retain(|s| s != &session_id);
+                    }
+                    if let Err(e) = crate::config::save(&cfg) {
+                        cfg.hidden_sessions = before;
+                        warn!(error = %e, "could not save config");
+                        send_to(
+                            &clients,
+                            id,
+                            json(&ServerMsg::Error {
+                                code: "config_write_failed".into(),
+                                message: format!("Could not write config.toml: {e}"),
+                            }),
+                        );
+                        continue;
+                    }
+                    info!(%session_id, hidden, "hidden session changed");
+                    send_state(&cfg, &projects, &agent_names, scanned, &clients, &terminals, &dismissed, None);
+                }
+
+                // Never written to disk — an id only means anything within the
+                // run that handed it out, and a fresh run starts the numbering
+                // over. See `dismissed`'s own comment, by its declaration.
+                ClientMsg::SetDismissed { id: tid, dismissed: on } => {
+                    let changed = if on { dismissed.insert(tid) } else { dismissed.remove(&tid) };
+                    if !changed {
+                        continue;
+                    }
+                    send_state(&cfg, &projects, &agent_names, scanned, &clients, &terminals, &dismissed, None);
                 }
 
                 ClientMsg::UpdateCheck => {
@@ -1545,7 +1590,7 @@ pub fn run(cfg: Config, rx: Receiver<Cmd>, tx: Sender<Cmd>, registry_cfg: Sender
                             next_term += 1;
                             next_run += 1;
                             info!(terminal = tid, %name, "running the agent's updater");
-                            send_state(&cfg, &projects, &agent_names, scanned, &clients, &terminals, None);
+                            send_state(&cfg, &projects, &agent_names, scanned, &clients, &terminals, &dismissed, None);
                             send_to(&clients, id, json(&ServerMsg::Attached { id: tid, cols, rows }));
                         }
                         Err((code, message)) => {
@@ -1621,7 +1666,7 @@ pub fn run(cfg: Config, rx: Receiver<Cmd>, tx: Sender<Cmd>, registry_cfg: Sender
                                 send_to(&clients, cid, Out::Binary(clear.clone()));
                             }
                             info!(terminal = tid, %agent, "relaunched");
-                            send_state(&cfg, &projects, &agent_names, scanned, &clients, &terminals, None);
+                            send_state(&cfg, &projects, &agent_names, scanned, &clients, &terminals, &dismissed, None);
                         }
                         Err((code, message)) => {
                             warn!(terminal = tid, %message, "relaunch failed");
@@ -1903,7 +1948,7 @@ pub fn run(cfg: Config, rx: Receiver<Cmd>, tx: Sender<Cmd>, registry_cfg: Sender
                         }
                     }
                     info!(terminal = tid, %color, "tab colour set");
-                    send_state(&cfg, &projects, &agent_names, scanned, &clients, &terminals, None);
+                    send_state(&cfg, &projects, &agent_names, scanned, &clients, &terminals, &dismissed, None);
                 }
 
                 ClientMsg::SaveTerminal { id: tid, name, command, autostart } => {
@@ -2012,7 +2057,7 @@ pub fn run(cfg: Config, rx: Receiver<Cmd>, tx: Sender<Cmd>, registry_cfg: Sender
                         t.name = Some(name.clone());
                     }
                     info!(terminal = tid, %name, "terminal saved");
-                    send_state(&cfg, &projects, &agent_names, scanned, &clients, &terminals, None);
+                    send_state(&cfg, &projects, &agent_names, scanned, &clients, &terminals, &dismissed, None);
                 }
 
                 ClientMsg::ForgetTerminal { project, name } => {
@@ -2042,7 +2087,7 @@ pub fn run(cfg: Config, rx: Receiver<Cmd>, tx: Sender<Cmd>, registry_cfg: Sender
                         }
                     }
                     info!(%project, %name, "saved terminal forgotten");
-                    send_state(&cfg, &projects, &agent_names, scanned, &clients, &terminals, None);
+                    send_state(&cfg, &projects, &agent_names, scanned, &clients, &terminals, &dismissed, None);
                 }
 
                 ClientMsg::OpenSaved { project, name, cols, rows } => {
@@ -2115,7 +2160,7 @@ pub fn run(cfg: Config, rx: Receiver<Cmd>, tx: Sender<Cmd>, registry_cfg: Sender
                             next_run += 1;
                             info!(terminal = tid, name = %saved.name, "saved terminal opened");
                             send_state(
-                                &cfg, &projects, &agent_names, scanned, &clients, &terminals, None,
+                                &cfg, &projects, &agent_names, scanned, &clients, &terminals, &dismissed, None,
                             );
                             send_to(&clients, id, json(&ServerMsg::Attached { id: tid, cols, rows }));
                         }
@@ -2224,7 +2269,7 @@ pub fn run(cfg: Config, rx: Receiver<Cmd>, tx: Sender<Cmd>, registry_cfg: Sender
                             send_to(&clients, cid, msg.clone());
                         }
                     }
-                    send_state(&cfg, &projects, &agent_names, scanned, &clients, &terminals, None);
+                    send_state(&cfg, &projects, &agent_names, scanned, &clients, &terminals, &dismissed, None);
                 }
             },
 
@@ -2252,7 +2297,7 @@ pub fn run(cfg: Config, rx: Receiver<Cmd>, tx: Sender<Cmd>, registry_cfg: Sender
                     }
                 }
                 if changed {
-                    send_state(&cfg, &projects, &agent_names, scanned, &clients, &terminals, None);
+                    send_state(&cfg, &projects, &agent_names, scanned, &clients, &terminals, &dismissed, None);
                 }
             }
 
@@ -2293,7 +2338,7 @@ pub fn run(cfg: Config, rx: Receiver<Cmd>, tx: Sender<Cmd>, registry_cfg: Sender
                         t.session_id = Some(sid);
                     }
                 }
-                send_state(&cfg, &projects, &agent_names, scanned, &clients, &terminals, None);
+                send_state(&cfg, &projects, &agent_names, scanned, &clients, &terminals, &dismissed, None);
             }
 
             Cmd::Remote { name, reply } => {
@@ -2946,6 +2991,7 @@ fn send_state(
     scanned: bool,
     clients: &HashMap<ClientId, Client>,
     terminals: &HashMap<u32, Terminal>,
+    dismissed: &HashSet<u32>,
     only: Option<ClientId>,
 ) {
     // Which sessions currently have a live terminal.
@@ -3025,12 +3071,17 @@ fn send_state(
         })
         .collect();
 
+    let mut dismissed_terminals: Vec<u32> = dismissed.iter().copied().collect();
+    dismissed_terminals.sort_unstable();
+
     let msg = json(&ServerMsg::State {
         projects,
         terminals: list,
         agents: agents.to_vec(),
         saved,
         scanning: !scanned,
+        hidden_sessions: cfg.hidden_sessions.clone(),
+        dismissed_terminals,
     });
     match only {
         Some(id) => send_to(clients, id, msg),
