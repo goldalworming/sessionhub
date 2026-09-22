@@ -624,11 +624,10 @@ export class Settings {
       Settings.stat(
         this.remoteCommands ? 'muted' : 'warn',
         this.remoteCommands
-          ? 'A machine paired with this one can run commands here and send files here — ' +
-              'that is how `sessionhubd run` builds something on this computer from another. ' +
-              'Every command is written to the log. Reading files is separate and stays on.'
-          : 'Commands sent from another machine are refused. Its terminals and its file ' +
-              'panel still work — only unattended commands and sent files are turned away.',
+          ? 'A paired machine can run commands and send files here — how `sessionhubd run` ' +
+              'builds on this computer from another. Commands are logged. File reads stay on either way.'
+          : 'Commands from another machine are refused. Its terminals and file panel still ' +
+              'work — only unattended commands and sent files are blocked.',
       ),
     );
     wrap.appendChild(this.skillRow());
@@ -734,10 +733,9 @@ export class Settings {
     wrap.appendChild(
       Settings.stat(
         'warn',
-        'The old token stops working at once, everywhere. Every other browser and phone ' +
-          'needs the new address, any Cloudflare hostname here changes with it, and a machine ' +
-          'paired to this one must be paired again. Terminals keep running throughout — this ' +
-          'tab will carry itself over.',
+        'The old token stops working everywhere at once. Every other browser or phone needs ' +
+          'the new address; any Cloudflare hostname changes too, and paired machines must ' +
+          're-pair. Terminals keep running — this tab updates itself.',
       ),
     );
     return wrap;
@@ -811,9 +809,9 @@ export class Settings {
     wrap.appendChild(
       Settings.stat(
         'muted',
-        'Clears everything sessionhub kept in this browser — the sign-in and every preference. ' +
-          'The token itself keeps working, and the signed-in address may still be in this ' +
-          'browser’s history: if the device is not yours, run `sessionhubd token rotate` on yours.',
+        'Clears the sign-in and every preference from this browser. The token itself still ' +
+          'works, and may remain in this browser’s history — if the device isn’t yours, run ' +
+          '`sessionhubd token rotate` on yours instead.',
       ),
     );
     return wrap;
@@ -1362,8 +1360,8 @@ export class Settings {
     pane.appendChild(
       this.head(
         'Cloudflare',
-        'Give something a way in from outside — a dev server here, or a machine ' +
-          'on your network that cannot run a tunnel of its own.',
+        'Let something in from outside — a dev server here, or a machine that can’t run ' +
+          'its own tunnel.',
       ),
     );
 
@@ -1372,9 +1370,8 @@ export class Settings {
     pane.appendChild(
       Settings.stat(
         'warn',
-        'Anyone holding one of these addresses and its token reaches what is behind ' +
-          'it. A dev server is not built to sit on the internet — Vite will hand out ' +
-          'files from outside the project.',
+        'Anyone with an address and its token reaches what’s behind it. A dev server ' +
+          'isn’t built for the internet — Vite will serve files outside the project.',
       ),
     );
     return pane;
