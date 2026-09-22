@@ -70,8 +70,15 @@ const OPENCODE_KILL: Duration = Duration::from_secs(10);
 const DEBOUNCE: Duration = Duration::from_millis(600);
 
 /// A safety net for events that never arrive (a watcher can miss changes on
-/// some filesystems).
-const SWEEP: Duration = Duration::from_secs(60);
+/// some filesystems) — the floor of how often it fires.
+const SWEEP_MIN: Duration = Duration::from_secs(60);
+
+/// ...growing towards this while sweep after sweep walks the whole tree and
+/// finds nothing different. A full sweep re-reads every session file's
+/// metadata — hundreds of them, for someone with a long history — and an idle
+/// registry does not need paying that every minute. Drops back to the floor
+/// the moment a sweep (or a real file event) finds something has moved.
+const SWEEP_MAX: Duration = Duration::from_secs(900);
 
 const TITLE_MAX: usize = 60;
 
@@ -101,6 +108,9 @@ pub fn spawn(cfg: Config, tx: Sender<Cmd>) -> Sender<Config> {
         let mut last: Option<Vec<ProjectInfo>> = None;
         // The first round looks at everything; after that only what changed.
         let mut scan = Scan::Full;
+        // How long an idle registry waits before sweeping again on its own —
+        // grows while sweeps keep finding nothing, resets the moment one does.
+        let mut sweep = SWEEP_MIN;
         loop {
             // Settings can change while the daemon is alive; a disabled agent
             // stops being scanned from the next round.
@@ -142,7 +152,8 @@ pub fn spawn(cfg: Config, tx: Sender<Cmd>) -> Sender<Config> {
             if ms >= 250 {
                 crate::telemetry::track("slow_scan", serde_json::json!({ "ms": ms }));
             }
-            if last.as_ref() != Some(&projects) {
+            let scan_changed = last.as_ref() != Some(&projects);
+            if scan_changed {
                 let sessions: usize = projects.iter().map(|p| p.sessions.len()).sum();
                 info!(projects = projects.len(), sessions, ms, "registry changed");
                 last = Some(projects.clone());
@@ -164,7 +175,7 @@ pub fn spawn(cfg: Config, tx: Sender<Cmd>) -> Sender<Config> {
                 .as_ref()
                 .filter(|_| cfg.agents.get("opencode").is_some_and(|a| a.enabled))
                 .map(|o| o.due.saturating_duration_since(Instant::now()))
-                .map_or(SWEEP, |left| left.min(SWEEP));
+                .map_or(sweep, |left| left.min(sweep));
             let mut from_cfg = false;
             let mut from_file = false;
             crossbeam_channel::select! {
@@ -193,12 +204,19 @@ pub fn spawn(cfg: Config, tx: Sender<Cmd>) -> Sender<Config> {
             // and those are all that is re-read; anything else — the sweep, a
             // settings change, a watcher that lost track — walks the lot.
             scan = if from_cfg {
+                sweep = SWEEP_MIN;
                 Scan::Full
             } else if from_file {
+                sweep = SWEEP_MIN;
                 let mut p = pending.lock().unwrap_or_else(|e| e.into_inner());
                 let taken = std::mem::take(&mut *p);
                 if taken.full { Scan::Full } else { Scan::Only(taken.paths) }
             } else {
+                // Nothing else woke us: the sweep that just ran was this
+                // safety net firing on its own. Found nothing, wait longer
+                // next time; found something, a watcher likely missed an
+                // event and the tree is worth checking again sooner.
+                sweep = if scan_changed { SWEEP_MIN } else { (sweep * 2).min(SWEEP_MAX) };
                 Scan::Full
             };
         }
