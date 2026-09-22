@@ -56,8 +56,6 @@ const el = {
   menu: document.getElementById('menu'),
   filter: document.getElementById('filter'),
   filterClear: document.getElementById('filter-clear'),
-  collapseAll: document.getElementById('collapse-all'),
-  expandAll: document.getElementById('expand-all'),
   backdrop: document.getElementById('backdrop'),
   newProject: document.getElementById('new-project'),
   work: document.getElementById('work'),
@@ -2669,22 +2667,6 @@ el.newProject.onclick = () => {
 };
 
 conn.on.onDir = (msg) => picker.update(msg);
-
-el.collapseAll.onclick = () => {
-  for (const p of state.projects) {
-    collapsed.add(p.path);
-    filterCollapsed.add(p.path);
-  }
-  saveCollapsed();
-  renderTree();
-};
-
-el.expandAll.onclick = () => {
-  collapsed.clear();
-  filterCollapsed.clear();
-  saveCollapsed();
-  renderTree();
-};
 
 const savedWidth = Number(localStorage.getItem(LS.width));
 if (savedWidth >= 160 && savedWidth <= 600) el.sidebar.style.width = `${savedWidth}px`;

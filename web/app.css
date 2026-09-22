@@ -36,7 +36,14 @@
   --t-bright-magenta: #A24FB5;
   --t-bright-cyan: #268F9C;
   --t-bright-white: #3A3F46;
+  /* Not part of the 16-colour ANSI set — added only so claude's icon can be
+     orange, which nothing in that palette is. */
+  --t-bright-orange: #C1650E;
   --t-selection: rgba(76, 154, 138, 0.30);
+  /* Text on an agent icon's bright fill: white on this theme's darker
+     saturated colours, flipped to near-black below where the palette turns
+     pastel. */
+  --icon-fg: #FFFFFF;
 
   /* The scrim and shadow for floating layers. Deliberately neutral rather than
      mixed from --bg: on a light theme, dimming with white separates nothing
@@ -72,6 +79,8 @@
     --t-bright-magenta: #D9A0EA;
     --t-bright-cyan: #7BD4DE;
     --t-bright-white: #E6E9EF;
+    --t-bright-orange: #F5B67B;
+    --icon-fg: #1A1A1A;
 
     --scrim: rgba(0, 0, 0, 0.58);
     --shadow: 0 16px 40px rgba(0, 0, 0, 0.55), 0 2px 8px rgba(0, 0, 0, 0.45);
@@ -101,6 +110,8 @@
   --t-bright-magenta: #D9A0EA;
   --t-bright-cyan: #7BD4DE;
   --t-bright-white: #E6E9EF;
+  --t-bright-orange: #F5B67B;
+  --icon-fg: #1A1A1A;
 
   --scrim: rgba(0, 0, 0, 0.58);
   --shadow: 0 16px 40px rgba(0, 0, 0, 0.55), 0 2px 8px rgba(0, 0, 0, 0.45);
@@ -343,6 +354,64 @@ html, body {
 
 .session { padding-left: 22px; cursor: pointer; }
 
+/* The row's hover actions, as one unit. On a mouse or trackpad it slides in
+   over the date instead of reserving its own width at rest — a session with
+   nothing hovering it should not carry blank space for buttons nobody is
+   about to press. Touch has no hover to reveal it, so there it stays put in
+   normal flow, exactly as it always has.
+
+   `any-hover`, not `hover` + `pointer: fine`: a touchscreen laptop with a
+   mouse attached reports its PRIMARY pointer as coarse, so `pointer: fine`
+   is false there even while a mouse is doing the hovering. `any-hover: hover`
+   asks the right question — is some pointer on this device capable of
+   hovering at all — which is true for exactly that machine. */
+.ractions {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  flex: 0 0 auto;
+}
+@media (any-hover: hover) {
+  .project > .row,
+  .session { position: relative; }
+  .ractions {
+    position: absolute;
+    /* Matches the row's own right padding: `right: 0` sits flush with the
+       row's true edge (absolute positioning ignores the ancestor's padding),
+       which is exactly where an overlay scrollbar floats — landing the
+       buttons right where a scrollbar thumb steals the click. */
+    right: 8px;
+    top: 0;
+    bottom: 0;
+    padding: 0 10px;
+    /* Solid, not see-through: whatever is under it — the date, a long title —
+       must not show through the buttons. Matched to the row's own hover tint
+       rather than plain `--bg` so it reads as part of the row, not a patch of
+       a different colour dropped on top of it. */
+    background: color-mix(in srgb, var(--text) 6%, var(--bg));
+    transform: translateX(100%);
+    transition: transform 0.15s ease;
+  }
+  /* Only sessions get a background fill when marked current — a focused
+     project row keeps its accent to a left border, so its `.ractions`
+     needs no colour of its own beyond the plain hover tint above. */
+  .session.selected .ractions {
+    background: color-mix(in srgb, var(--accent) 22%, var(--bg));
+  }
+  .session:hover .ractions,
+  .session:focus-within .ractions,
+  .project > .row:hover .ractions,
+  .project > .row:focus-within .ractions { transform: translateX(0); }
+
+  /* What `.ractions` slides over gets out of the way instead of showing
+     through it — no background patch standing out against the row, just the
+     date or count disappearing while the buttons are up. Project rows
+     already did this for `.pmeta`; this is the same move for `.when.tail`. */
+  .session:hover .when.tail,
+  .session:focus-within .when.tail { display: none; }
+}
+
 .fork {
   flex: 0 0 auto;
   width: 18px;
@@ -353,6 +422,7 @@ html, body {
   color: var(--muted);
   opacity: 0;
   cursor: pointer;
+  transition: opacity 0.12s ease;
 }
 .session:hover .fork { opacity: 1; }
 .fork:hover { background: color-mix(in srgb, var(--text) 12%, transparent); color: var(--text); }
@@ -409,10 +479,33 @@ html, body {
   color: var(--muted);
   user-select: none;
 }
+.zright {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
 .zcount {
   letter-spacing: 0;
   font-family: var(--mono);
 }
+
+/* Collapse/expand-all, on the "all projects" header only — the one list they
+   act on. */
+.zfold {
+  flex: 0 0 auto;
+  width: 16px;
+  height: 16px;
+  line-height: 16px;
+  text-align: center;
+  border-radius: var(--radius);
+  border: none;
+  background: none;
+  color: var(--muted);
+  font: inherit;
+  font-size: 9px;
+  cursor: pointer;
+}
+.zfold:hover { color: var(--text); background: color-mix(in srgb, var(--text) 12%, transparent); }
 .zsep {
   height: 1px;
   background: var(--border);
@@ -492,6 +585,7 @@ html, body {
 }
 .zrow:hover { background: color-mix(in srgb, var(--text) 6%, transparent); }
 .zrow.selected { background: color-mix(in srgb, var(--accent) 22%, transparent); }
+.zrow > .aicon { margin-top: 2px; }
 .zrow > .dot { margin-top: 5px; }
 .zrow > .when { margin-top: 1px; }
 
@@ -529,6 +623,9 @@ html, body {
 .when.on { color: var(--accent); }
 .when.tail {
   width: auto;
+  /* Pushes itself right regardless of whether a sibling before it is flex-grow
+     — a saved terminal with no command has nothing else to do that job. */
+  margin-left: auto;
   text-align: right;
   font-size: 9.5px;
 }
@@ -646,13 +743,25 @@ html, body {
    only says which something. */
 .dot.live { background: none; border-color: var(--accent); }
 
-.badge {
+/* A small colour-coded monogram identifying which agent a row belongs to —
+   the same slot palette agentRow's dot already uses, so a name is
+   recognisable by colour before it is read. */
+.aicon {
   flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 14px;
+  height: 14px;
+  border-radius: 4px;
   font-size: 9px;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
-  color: var(--muted);
+  font-weight: 700;
+  line-height: 1;
+  color: var(--icon-fg);
+  text-transform: none;
 }
+.aicon.live { box-shadow: 0 0 0 1px var(--accent); }
+.aicon svg { width: 9px; height: 9px; display: block; fill: currentColor; }
 
 .empty-hint {
   padding: 12px 10px;
@@ -1508,14 +1617,19 @@ html, body {
 .magent .macount.none { font-style: italic; opacity: 0.75; }
 .magent .secbtn { padding: 2px 9px; font-size: 10.5px; }
 
-/* Recognise an agent by its colour without reading the name. The palette is the
-   terminal's own, so the sidebar and the screen agree about what green means. */
-.magent .dot[data-slot='0'] { background: var(--t-bright-green); border-color: var(--t-bright-green); }
-.magent .dot[data-slot='1'] { background: var(--t-bright-blue); border-color: var(--t-bright-blue); }
-.magent .dot[data-slot='2'] { background: var(--t-bright-magenta); border-color: var(--t-bright-magenta); }
-.magent .dot[data-slot='3'] { background: var(--t-bright-yellow); border-color: var(--t-bright-yellow); }
-.magent .dot[data-slot='4'] { background: var(--t-bright-cyan); border-color: var(--t-bright-cyan); }
-.magent .dot[data-slot='5'] { background: var(--t-bright-red); border-color: var(--t-bright-red); }
+/* Same palette, for the .aicon monogram wherever an agent's identity is shown. */
+.aicon[data-slot='0'] { background: var(--t-bright-green); }
+.aicon[data-slot='1'] { background: var(--t-bright-blue); }
+.aicon[data-slot='2'] { background: var(--t-bright-magenta); }
+.aicon[data-slot='3'] { background: var(--t-bright-yellow); }
+.aicon[data-slot='4'] { background: var(--t-bright-cyan); }
+.aicon[data-slot='5'] { background: var(--t-bright-red); }
+
+/* Fixed colours for the agents common enough to expect one: claude orange,
+   opencode blue, codex purple — regardless of where they land in the list. */
+.aicon[data-agent='claude'] { background: var(--t-bright-orange); }
+.aicon[data-agent='opencode'] { background: var(--t-bright-blue); }
+.aicon[data-agent='codex'] { background: var(--t-bright-magenta); }
 
 /* ---------------------------------------------------------- command palette */
 

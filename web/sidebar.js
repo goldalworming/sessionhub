@@ -10,6 +10,7 @@
 // `24d ago` distinguished nothing because the number shifts every day.
 
 import { absoluteDate, dayBucket, elapsedShort, BUCKETS } from './format.js';
+import { BRAND_ICONS } from './brandicons.js';
 
 const LS_BUCKETS = 'sh.buckets';
 const LS_ALIAS = 'sh.alias';
@@ -81,6 +82,37 @@ function el(tag, cls, text) {
   if (cls) n.className = cls;
   if (text !== undefined) n.textContent = text;
   return n;
+}
+
+/// An agent's colour slot, by its position in the daemon's agent list — the
+/// same index agentRow already colours its dot by, so one name means one
+/// colour everywhere it appears. Unknown names (custom, or not yet loaded)
+/// fall back to slot 0 rather than throwing off the rest of the palette.
+function agentSlot(agents, name) {
+  const i = (agents || []).findIndex((a) => a.name === name);
+  return i < 0 ? 0 : i % 6;
+}
+
+/// Agents common enough to have an expected colour of their own, rather than
+/// whatever slot their entry happens to land on in a given config.toml.
+/// Anything else still gets a colour — just picked by position, in agentSlot.
+const NAMED_COLOR = new Set(['claude', 'opencode', 'codex']);
+
+/// A small colour-coded icon for an agent — its identity, distinct from the
+/// status dot next to it (busy/live/done). A handful of well-known names get
+/// their real mark (BRAND_ICONS); everything else — opencode, pi, omp, or
+/// anything a user's own config.toml names — falls back to a letter, since
+/// there is no art for a name sessionhub has never heard of.
+function agentIcon(name, slot, live) {
+  const key = name.toLowerCase();
+  const brand = BRAND_ICONS[key];
+  const icon = el('span', 'aicon' + (live ? ' live' : ''));
+  if (brand) icon.innerHTML = brand;
+  else icon.textContent = (name[0] || '?').toUpperCase();
+  if (NAMED_COLOR.has(key)) icon.dataset.agent = key;
+  else icon.dataset.slot = String(slot);
+  icon.title = name;
+  return icon;
 }
 
 export function renderTree(ctx) {
@@ -156,18 +188,55 @@ export function renderTree(ctx) {
   if (focus.length) {
     tree.appendChild(zoneLabel('focused', String(focus.length)));
     for (const entry of focus) tree.appendChild(node(entry));
-    if (rest.length) tree.appendChild(zoneLabel('all projects', String(rest.length)));
+    if (rest.length) tree.appendChild(projectsLabel(ctx, 'all projects', String(rest.length)));
   } else {
-    tree.appendChild(zoneLabel('projects', String(rest.length)));
+    tree.appendChild(projectsLabel(ctx, 'projects', String(rest.length)));
   }
   for (const entry of rest) tree.appendChild(node(entry));
 }
 
-function zoneLabel(text, extra) {
+function zoneLabel(text, extra, trailing) {
   const d = el('div', 'zlabel');
   d.appendChild(el('span', null, text));
-  if (extra) d.appendChild(el('span', 'zcount', extra));
+  const right = el('span', 'zright');
+  if (extra) right.appendChild(el('span', 'zcount', extra));
+  if (trailing) for (const t of trailing) right.appendChild(t);
+  d.appendChild(right);
   return d;
+}
+
+/// Collapse/expand-all used to sit in the search bar, which acted on every
+/// project regardless of what the search box currently held — a control with
+/// nothing to do with searching, living where searching happens. It affects
+/// this list, so it lives on this list's own header.
+function projectsLabel(ctx, text, extra) {
+  const fold = (glyph, title, run) => {
+    const b = el('button', 'zfold', glyph);
+    b.type = 'button';
+    b.title = title;
+    b.setAttribute('aria-label', title);
+    b.onclick = (e) => {
+      e.stopPropagation();
+      run();
+    };
+    return b;
+  };
+  return zoneLabel(text, extra, [
+    fold('▸', 'Collapse all projects', () => {
+      for (const p of ctx.state.projects) {
+        ctx.collapsed.add(p.path);
+        ctx.filterCollapsed.add(p.path);
+      }
+      ctx.saveCollapsed();
+      ctx.rerender();
+    }),
+    fold('▾', 'Expand all projects', () => {
+      ctx.collapsed.clear();
+      ctx.filterCollapsed.clear();
+      ctx.saveCollapsed();
+      ctx.rerender();
+    }),
+  ]);
 }
 
 /// How many of the hidden ones would be in the zone today.
@@ -462,8 +531,8 @@ function zoneRow(ctx, o) {
   if (o.tid !== undefined) r.dataset.tid = String(o.tid);
   if (o.color) r.dataset.color = o.color;
 
+  r.appendChild(agentIcon(o.agent, agentSlot(ctx.state.agents, o.agent)));
   r.appendChild(el('span', 'dot' + (o.live ? ' live' : '')));
-  r.appendChild(el('span', 'when' + (o.live ? ' on' : ''), o.when));
 
   const col = el('div', 'zcol');
   // The same marker as in the history: your own name has to look like a name,
@@ -471,10 +540,11 @@ function zoneRow(ctx, o) {
   col.appendChild(
     el('div', 'stitle' + (o.loose ? ' loose' : '') + (o.named ? ' alias' : ''), o.title),
   );
+  // Just the project now: the icon above already says which agent this is,
+  // and this zone is the one place rows from several projects sit together,
+  // so the project name is the one piece of context still worth a line.
   const meta = el('div', 'zmeta');
   meta.appendChild(el('span', 'zproj', o.project));
-  meta.appendChild(el('span', null, '·'));
-  meta.appendChild(el('span', null, o.agent));
   col.appendChild(meta);
 
   // Work still running under this terminal after the agent stopped talking.
@@ -498,6 +568,7 @@ function zoneRow(ctx, o) {
     col.appendChild(line);
   }
   r.appendChild(col);
+  r.appendChild(el('span', 'when tail' + (o.live ? ' on' : ''), o.when));
 
   if (o.session) r.dataset.sid = o.session.s.session_id;
   r.onclick = () => {
@@ -574,7 +645,15 @@ function projectNode(ctx, entry, liveSession, searching) {
     ctx.saveBookmarks();
     ctx.rerender();
   };
-  row.appendChild(star);
+  // Marked stays outside `.ractions` and so stays visible without hovering
+  // (the ribbon is the mark) — the same reason boot stays out of a saved
+  // terminal's. Unmarked has nothing to show at rest, so it joins ＋ in the
+  // slide-in group instead of reserving its own width on every other row:
+  // that reserved width was the gap sitting between an unmarked project's
+  // count and the row's edge.
+  const actions = el('span', 'ractions');
+  if (marked) row.appendChild(star);
+  else actions.appendChild(star);
 
   const add = el('span', 'add', '+');
   add.title = 'New terminal in this project';
@@ -583,7 +662,8 @@ function projectNode(ctx, entry, liveSession, searching) {
     const r = add.getBoundingClientRect();
     ctx.openMenu(r.left, r.bottom + 2, startMenu(ctx, p));
   };
-  row.appendChild(add);
+  actions.appendChild(add);
+  row.appendChild(actions);
 
   row.onclick = () => ctx.focusProject(p.path);
   wrap.appendChild(row);
@@ -601,11 +681,9 @@ function projectNode(ctx, entry, liveSession, searching) {
   // While filtering, day groups are skipped entirely. This is not a
   // simplification: search results hiding behind a fold is the easiest way to
   // make the filter look broken.
-  const mixed = new Set(entry.sessions.map((s) => s.agent)).size > 1;
-
   if (searching) {
     for (const [si, s] of entry.sessions.entries()) {
-      wrap.appendChild(sessionRow(ctx, p, s, liveSession, entry.positions?.[si] || [], mixed));
+      wrap.appendChild(sessionRow(ctx, p, s, liveSession, entry.positions?.[si] || []));
     }
     return wrap;
   }
@@ -614,7 +692,7 @@ function projectNode(ctx, entry, liveSession, searching) {
   // only adds a row without hiding anything — precisely the opposite of its use.
   if (entry.sessions.length <= FLAT_MAX) {
     for (const s of entry.sessions) {
-      wrap.appendChild(sessionRow(ctx, p, s, liveSession, [], mixed));
+      wrap.appendChild(sessionRow(ctx, p, s, liveSession, []));
     }
     return wrap;
   }
@@ -642,12 +720,12 @@ function projectNode(ctx, entry, liveSession, searching) {
     wrap.appendChild(head);
 
     if (!open) continue;
-    for (const s of list) wrap.appendChild(sessionRow(ctx, p, s, liveSession, [], mixed));
+    for (const s of list) wrap.appendChild(sessionRow(ctx, p, s, liveSession, []));
   }
   return wrap;
 }
 
-function sessionRow(ctx, p, s, liveSession, positions, mixed) {
+function sessionRow(ctx, p, s, liveSession, positions) {
   const live = s.live_terminal_id ?? liveSession.get(s.session_id) ?? null;
   const item = el('div', 'session' + (live !== null && live === ctx.activeId ? ' selected' : ''));
   item.title = `${s.title}\n${s.agent}`;
@@ -658,9 +736,11 @@ function sessionRow(ctx, p, s, liveSession, positions, mixed) {
   const running = live !== null ? ctx.state.terminals.find((x) => x.id === live) : null;
   if (running && running.color) item.dataset.color = running.color;
 
+  // Icon, then status dot, then the title — the same order on every row shape
+  // (session, loose terminal, saved terminal, zone), so which agent a row
+  // belongs to is always read from the same spot.
+  item.appendChild(agentIcon(s.agent, agentSlot(ctx.state.agents, s.agent)));
   item.appendChild(el('span', 'dot' + (live !== null ? ' live' : '')));
-  item.appendChild(el('span', 'when', absoluteDate(s.updated_at)));
-  if (mixed) item.appendChild(el('span', 'badge', s.agent));
 
   const custom = alias.get(s.session_id);
   const title = el('span', 'stitle' + (custom ? ' alias' : ''));
@@ -670,10 +750,20 @@ function sessionRow(ctx, p, s, liveSession, positions, mixed) {
   else title.appendChild(ctx.mark(s.title, positions));
   item.appendChild(title);
 
+  // The date is always the last thing before the row's action buttons — never
+  // the fixed left column zoneRow uses, so a session row and a zone row read
+  // the same way at a glance.
+  item.appendChild(el('span', 'when tail', absoluteDate(s.updated_at)));
+
   // `fork` is the shared look of a row action; the second class says which
   // action it is. Without it every selector here matches the pencil, the fork,
   // and the kill alike — which is exactly how a test ends up clicking rename
   // and reporting that forking is broken.
+  //
+  // Both live in `.ractions`, which a pointer device slides in over the date
+  // on hover instead of reserving its own width at rest — on a touch screen,
+  // with no hover to reveal it, the stylesheet keeps it in normal flow.
+  const actions = el('span', 'ractions');
   const rename = el('span', 'fork act-rename', '✎');
   rename.title = custom
     ? 'Rename — leave it empty to go back to the original title'
@@ -682,7 +772,7 @@ function sessionRow(ctx, p, s, liveSession, positions, mixed) {
     e.stopPropagation();
     startRename(ctx, item, title, s);
   };
-  item.appendChild(rename);
+  actions.appendChild(rename);
 
   if (ctx.state.agents.find((a) => a.name === s.agent)?.can_fork) {
     const fork = el('span', 'fork act-fork', '⑂');
@@ -691,8 +781,9 @@ function sessionRow(ctx, p, s, liveSession, positions, mixed) {
       e.stopPropagation();
       ctx.forkSession(p.path, s);
     };
-    item.appendChild(fork);
+    actions.appendChild(fork);
   }
+  item.appendChild(actions);
 
   item.dataset.sid = s.session_id;
   item.onclick = () => {
@@ -835,12 +926,11 @@ function agentRow(a, slot, o) {
 
   const row = el('div', 'magent');
 
-  const dot = el('span', 'dot' + (o.live ? ' live' : ''));
   // Colour by position, so an agent keeps the same one across every project
   // and can be recognised without reading. The palette is in the stylesheet.
-  if (!o.live) dot.dataset.slot = String(slot % 6);
-  dot.title = o.live ? `${a.name} is running here` : '';
-  row.appendChild(dot);
+  const icon = agentIcon(a.name, slot % 6, o.live);
+  icon.title = o.live ? `${a.name} is running here` : a.name;
+  row.appendChild(icon);
 
   row.appendChild(el('span', 'maname', a.name));
 
@@ -945,21 +1035,18 @@ function looseRow(ctx, t, inGroup) {
   item.dataset.tid = String(t.id);
   // The same tag as on its tab: one terminal, one colour, wherever it appears.
   if (t.color) item.dataset.color = t.color;
+  item.appendChild(agentIcon(t.agent, agentSlot(ctx.state.agents, t.agent)));
   item.appendChild(el('span', 'dot live'));
-  // `new` means "just started, nothing behind it". A named one is not new, it is
-  // the thing you set up running — so it says so.
-  item.appendChild(el('span', 'when on', t.name ? 'live' : 'new'));
-  // The badge earns its place when it says something: on an unnamed row the
-  // number tells you nothing, so the agent is all there is. On a named row the
-  // name already identifies it, and a plain shell's badge would only crowd out
-  // the command on a phone.
-  if (!t.name || t.agent !== 'terminal') item.appendChild(el('span', 'badge', t.agent));
   // A saved terminal wears its name here rather than its number — the number is
   // what it is called when nobody has said what it is for.
   item.appendChild(
     el('span', 'stitle' + (t.name ? ' alias' : ' loose'), t.name || `terminal ${t.id}`),
   );
+  // `new` means "just started, nothing behind it". A named one is not new, it is
+  // the thing you set up running — so it says so.
+  item.appendChild(el('span', 'when tail on', t.name ? 'live' : 'new'));
 
+  const actions = el('span', 'ractions');
   const save = el('span', 'fork act-save');
   save.innerHTML = SAVE_ICON;
   save.title = t.name
@@ -969,7 +1056,7 @@ function looseRow(ctx, t, inGroup) {
     e.stopPropagation();
     ctx.saveTerminal(t.id);
   };
-  item.appendChild(save);
+  actions.appendChild(save);
 
   const kill = el('span', 'fork act-kill', '✕');
   kill.title = 'Kill this terminal';
@@ -977,7 +1064,8 @@ function looseRow(ctx, t, inGroup) {
     e.stopPropagation();
     ctx.killTerminal(t.id);
   };
-  item.appendChild(kill);
+  actions.appendChild(kill);
+  item.appendChild(actions);
 
   item.onclick = () => {
     if (ctx.terms.has(t.id)) ctx.show(t.id);
@@ -1098,21 +1186,19 @@ function savedRow(ctx, s, inGroup) {
 
   if (s.color) item.dataset.color = s.color;
 
+  item.appendChild(agentIcon(s.agent, agentSlot(ctx.state.agents, s.agent)));
   item.appendChild(el('span', 'dot'));
-  item.appendChild(el('span', 'when', 'saved'));
-  // Same rule as the live row: the badge only when it says something the name
-  // does not. On a phone every pixel it takes comes out of the command.
-  if (s.agent !== 'terminal') item.appendChild(el('span', 'badge', s.agent));
-
   item.appendChild(el('span', 'stitle alias', s.name));
   // The command is shown, not just kept in the tooltip: clicking this row runs
   // it, and a row that runs something must say what.
   if (s.command) item.appendChild(el('span', 'scmd', s.command));
 
-  // Autostarting is the normal state for something you named, so it
-  // is left to the hover like the other row actions. Turned off it stays on
-  // screen: "this one will not come back on its own" is the fact you would
-  // otherwise have no way of seeing.
+  // Autostarting is the normal state for something you named, so it joins
+  // forget in `.ractions` and is left to the hover like the other row
+  // actions. Turned off it comes out of that group and stays on screen
+  // instead: "this one will not come back on its own" is the fact you would
+  // otherwise have no way of seeing, and a container a pointer device slides
+  // fully off to the right at rest cannot leave just one child peeking out.
   const boot = el('span', 'fork act-boot' + (s.autostart ? '' : ' off'), '⏻');
   boot.title = s.autostart
     ? 'Autostarts with sessionhub. Click so it does not.'
@@ -1121,7 +1207,8 @@ function savedRow(ctx, s, inGroup) {
     e.stopPropagation();
     ctx.setAutostart(s.project, s.name, !s.autostart);
   };
-  item.appendChild(boot);
+  if (!s.autostart) item.appendChild(boot);
+  item.appendChild(el('span', 'when tail', 'saved'));
 
   // Two clicks, because a mis-tap on a phone should not quietly delete the one
   // note saying how a bot is started.
@@ -1143,7 +1230,10 @@ function savedRow(ctx, s, inGroup) {
     }
     ctx.forgetSaved(s.project, s.name);
   };
-  item.appendChild(forget);
+  const actions = el('span', 'ractions');
+  if (s.autostart) actions.appendChild(boot);
+  actions.appendChild(forget);
+  item.appendChild(actions);
 
   item.onclick = () => ctx.openSaved(s.project, s.name);
   return item;
