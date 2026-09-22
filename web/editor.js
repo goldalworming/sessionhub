@@ -117,9 +117,20 @@ export class Editor {
     this.el.classList.toggle('dark', this.resolvedTheme() === 'vs-dark');
   }
 
+  /// The URL `/api/file` answers this path on, carrying `via` when it belongs
+  /// to a paired machine rather than this one.
+  fileUrl() {
+    const via = this.machineVia();
+    return (
+      `/api/file?path=${encodeURIComponent(this.current)}` +
+      (via ? `&via=${encodeURIComponent(via)}` : '')
+    );
+  }
+
   /// Everything besides Save, gathered behind the one button that opens them —
   /// wrap and theme apply to every text file, viewing rendered only to HTML,
   /// and a binary or an image has neither a wrap nor a theme to speak of.
+  /// Download applies to anything, so it sits outside that check.
   moreItems() {
     const meta = this.meta.get(this.key(this.current));
     const items = [];
@@ -134,10 +145,9 @@ export class Editor {
         },
       });
       items.push({
-        // Cycling on click is the button's old behaviour; a menu row states
-        // the next value plainly instead, since there is no second click a
-        // moment later to show what it became.
-        label: `Theme: ${this.mode} → click for ${THEMES[(THEMES.indexOf(this.mode) + 1) % THEMES.length]}`,
+        // Cycling on click is the button's old behaviour; the label states
+        // the current value, not a running explanation of what a click does.
+        label: `Theme: ${this.mode}`,
         run: () => {
           this.mode = THEMES[(THEMES.indexOf(this.mode) + 1) % THEMES.length];
           localStorage.setItem(LS_THEME, this.mode);
@@ -149,13 +159,19 @@ export class Editor {
     if (/\.html?$/i.test(meta?.name || '')) {
       items.push({
         label: 'Open rendered, in a new tab',
+        run: () => window.open(this.fileUrl(), '_blank', 'noopener'),
+      });
+    }
+    if (this.current) {
+      items.push({
+        label: 'Download',
         run: () => {
-          if (!this.current) return;
-          const via = this.machineVia();
-          const url =
-            `/api/file?path=${encodeURIComponent(this.current)}` +
-            (via ? `&via=${encodeURIComponent(via)}` : '');
-          window.open(url, '_blank', 'noopener');
+          // A real click, not `window.open`: that is what makes the browser
+          // save the file instead of trying to display it.
+          const a = document.createElement('a');
+          a.href = this.fileUrl();
+          a.download = meta?.name || '';
+          a.click();
         },
       });
     }
