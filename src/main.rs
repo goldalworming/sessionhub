@@ -91,6 +91,7 @@ fn main() -> ExitCode {
         "tray" => tray::run(home),
         "tunnel" => cmd_tunnel(),
         "bundle-web" => cmd_bundle_web(&argv),
+        "install-web" => cmd_install_web(&argv),
         "revert-web" => cmd_revert_web(),
         "help" | "--help" | "-h" => {
             print_help();
@@ -126,6 +127,7 @@ fn print_help() {
          sessionhubd tray                   show the tray icon; `start` does this too\n\
          sessionhubd tunnel                 expose it externally through cloudflared\n\
          sessionhubd bundle-web FILE [--raw]  pack the frontend for a release\n\
+         sessionhubd install-web FILE       install a .shweb already on disk, no download\n\
          sessionhubd revert-web             drop an installed interface, back to the built-in\n\
          sessionhubd install [--account NAME --password SECRET]\n\
          sessionhubd uninstall\n\
@@ -614,6 +616,38 @@ fn cmd_bundle_web(argv: &[String]) -> ExitCode {
     }
     println!("  needs  : sessionhub {} or newer", version.needs_daemon);
     ExitCode::SUCCESS
+}
+
+/// Install a `.shweb` already sitting on disk, without asking GitHub for it.
+///
+/// Settings does the same thing over HTTPS, and that is the way to go when it
+/// works. This is for when it does not — a network that cannot reach
+/// github.com, the exact reason `push_to_mac.py` carries the source over SFTP
+/// instead. Whatever daemon is already running this machine's `~/.sessionhub`
+/// picks the file up on the next page load; nothing here restarts it.
+fn cmd_install_web(argv: &[String]) -> ExitCode {
+    let Some(path) = argv.iter().skip(1).find(|a| !a.starts_with("--")) else {
+        eprintln!("Usage: sessionhubd install-web FILE.shweb");
+        return ExitCode::from(2);
+    };
+    let bytes = match std::fs::read(path) {
+        Ok(b) => b,
+        Err(e) => {
+            eprintln!("could not read {path}: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    match webpack::install(&bytes, update::current()) {
+        Ok(v) => {
+            println!("installed frontend {}", v.version);
+            println!("Reload the page — the daemon already running picks it up with no restart.");
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("{e}");
+            ExitCode::FAILURE
+        }
+    }
 }
 
 /// Throw away an installed interface and go back to the one inside the binary.
