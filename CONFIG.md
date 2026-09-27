@@ -123,6 +123,12 @@ attaches to it rather than starting a second copy, and forgetting one takes two
 clicks so a mis-tap on a phone does not delete the note. `color` is one of red,
 green, yellow, blue, magenta, cyan.
 
+`sessionhubd spawn --name` names a terminal the same way, for scripts, but
+that name lives only as long as the terminal does — it is never written here.
+Two different things, spelled the same: a saved terminal restarts with the
+daemon and keeps its name forever, a spawned one is forgotten the moment it
+ends. See the README's [Scripted control](README.md#scripted-control) section.
+
 ### Fork session
 
 `fork_args` is filled in on first run for the agents known to support it, and is
@@ -403,6 +409,11 @@ INFO ran a command asked for from elsewhere cmd=./gradlew assembleDebug cwd=C:/b
 Turned off, commands and sent files are refused with a 403 that names the switch.
 **Reading** a file is not covered — the file panel has always read from a paired
 machine, and breaking that is not what this switch is for.
+
+The same switch covers `sessionhubd spawn` and `send`: both change what is
+running there, so both are refused with the same 403 when it is off. `ls` and
+`capture` only read, so they work regardless — the same rule `run`/`push`/`pull`
+already follow, extended to terminals.
 
 > On a `host:port` address the traffic is **not encrypted**, exactly as with Network access. The token proves who is calling; it does not hide what is being said. A paired machine means **full access** to that machine — that daemon does hand out a shell. Use it only on networks you trust, over a VPN, or over `https://` as below.
 

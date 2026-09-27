@@ -59,6 +59,98 @@ pub enum Cmd {
     Remote { name: String, reply: Sender<Option<crate::config::Remote>> },
     /// Kill every terminal, then end the actor.
     Shutdown,
+
+    // -------------------------------------------------------- scripted control
+    //
+    // `sessionhubd ls/spawn/send/capture` (main.rs), reaching in from an HTTP
+    // handler rather than a WebSocket client — there is no `ClientId` here,
+    // and none of these should need one. Same reply-channel shape as `Stats`
+    // and `Remote` above.
+    /// Every live terminal, in the same shape `State` already sends.
+    TermList { reply: Sender<Vec<TerminalInfo>> },
+    /// Start a terminal the way `ClientMsg::Spawn` does, minus the viewer that
+    /// message registers for its own caller — a script has no viewport to
+    /// negotiate a size against. `name` is never written to `config.toml`;
+    /// see `resolve_target` for why that matters.
+    TermSpawn {
+        project: String,
+        agent: String,
+        resume: Option<String>,
+        name: Option<String>,
+        reply: Sender<Result<u32, (String, String)>>,
+    },
+    /// Write bytes into a terminal by id or by its in-memory name — the exact
+    /// same write `Cmd::ClientInput` already does, just reachable without a
+    /// live WebSocket client behind it.
+    TermSend { target: TermTarget, data: Vec<u8>, reply: Sender<Result<u32, String>> },
+    /// The raw scrollback for one terminal. Deliberately not built on
+    /// `Attach`: attaching renegotiates the PTY's size to the smallest of all
+    /// its viewers, and a script reading the screen must never be the thing
+    /// that shrinks it out from under someone actually looking at it.
+    TermCapture { target: TermTarget, reply: Sender<Result<Vec<u8>, String>> },
+}
+
+/// How a scripted-control command names the terminal it means.
+pub enum TermTarget {
+    Id(u32),
+    Name(String),
+}
+
+/// Find the one live terminal a script meant by an id or a name.
+///
+/// An id is trusted outright — whether it exists is for the caller to find
+/// out from `terminals.get`, same as `Kill`/`Attach` already leave it. A name
+/// is resolved globally, not per-project the way `SaveTerminal`'s `(project,
+/// name)` key is: a script has no "current project" the way a browser tab
+/// does, so the only sensible scope left is "every live terminal right now."
+fn resolve_target(terminals: &HashMap<u32, Terminal>, target: &TermTarget) -> Result<u32, String> {
+    match target {
+        TermTarget::Id(id) => Ok(*id),
+        TermTarget::Name(name) => {
+            let mut found = terminals.values().filter(|t| t.name.as_deref() == Some(name.as_str()));
+            let Some(first) = found.next() else {
+                return Err(format!("no live terminal named '{name}'"));
+            };
+            if found.next().is_some() {
+                return Err(format!(
+                    "more than one live terminal is named '{name}' — use its id instead"
+                ));
+            }
+            Ok(first.id)
+        }
+    }
+}
+
+/// `Terminal` as the wire wants it — the one place that mapping happens, used
+/// by `send_state`'s broadcast and by `Cmd::TermList` alike.
+fn terminal_info(t: &Terminal) -> TerminalInfo {
+    TerminalInfo {
+        id: t.id,
+        project: t.project.clone(),
+        agent: t.agent.clone(),
+        alive: t.alive,
+        cols: t.cols,
+        rows: t.rows,
+        session_id: t.session_id.clone(),
+        name: t.name.clone(),
+        color: t.color.clone(),
+        working: t.working(),
+        jobs: t.jobs.clone(),
+    }
+}
+
+/// Write bytes into a terminal — the one thing a keystroke, a paste, and a
+/// script's `send` all reduce to. Typed-line tracking only follows a plain
+/// shell; an agent's own TUI reads keys for its own prompt, and "the last
+/// line typed into claude" is a sentence of English, not a command worth
+/// saving.
+fn deliver_input(t: &mut Terminal, data: &[u8]) {
+    if let Some(p) = t.pty.as_ref() {
+        p.write_input(data);
+    }
+    if t.agent == crate::config::TERMINAL_AGENT {
+        t.typed.feed(data);
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -2174,15 +2266,7 @@ pub fn run(cfg: Config, rx: Receiver<Cmd>, tx: Sender<Cmd>, registry_cfg: Sender
 
             Cmd::ClientInput { term, data } => {
                 if let Some(t) = terminals.get_mut(&term) {
-                    if let Some(p) = t.pty.as_ref() {
-                        p.write_input(&data);
-                    }
-                    // Only for a plain shell. An agent's TUI reads keys for its
-                    // own prompt, and "the last line typed into claude" is a
-                    // sentence of English, not a command worth saving.
-                    if t.agent == crate::config::TERMINAL_AGENT {
-                        t.typed.feed(&data);
-                    }
+                    deliver_input(t, &data);
                 }
             }
 
@@ -2349,6 +2433,80 @@ pub fn run(cfg: Config, rx: Receiver<Cmd>, tx: Sender<Cmd>, registry_cfg: Sender
                 let total = terminals.len();
                 let alive = terminals.values().filter(|t| t.alive).count();
                 let _ = reply.send((alive, total));
+            }
+
+            Cmd::TermList { reply } => {
+                let mut list: Vec<TerminalInfo> = terminals.values().map(terminal_info).collect();
+                list.sort_by_key(|t| t.id);
+                let _ = reply.send(list);
+            }
+
+            Cmd::TermSpawn { project, agent, resume, name, reply } => {
+                // Global, not per-project: a script names a terminal to find
+                // it again by that name alone, the same way it would use an
+                // id — a second live terminal quietly answering to the same
+                // name would make every later `send`/`capture` ambiguous.
+                if let Some(name) = &name {
+                    if resolve_target(&terminals, &TermTarget::Name(name.clone())).is_ok() {
+                        let _ = reply.send(Err((
+                            "name_taken".into(),
+                            format!("a live terminal named '{name}' already exists"),
+                        )));
+                        continue;
+                    }
+                }
+                let resumed = resume.is_some();
+                let (cols, rows) = sane_size(80, 24);
+                match spawn_terminal(
+                    &cfg, next_term, next_run, &project, &agent, resume, false, cols, rows, &tx,
+                ) {
+                    Ok(mut term) => {
+                        let tid = term.id;
+                        term.name = name;
+                        // No viewer: this caller is a script, not a browser
+                        // tab, and has no size of its own to negotiate. The
+                        // first real `Attach` renegotiates it as normal.
+                        terminals.insert(tid, term);
+                        next_term += 1;
+                        next_run += 1;
+                        info!(terminal = tid, %project, %agent, "terminal created from a script");
+                        crate::telemetry::track(
+                            "spawn",
+                            serde_json::json!({
+                                "terminal": tid, "agent": agent, "resume": resumed, "pick": false,
+                                "live": terminals.values().filter(|t| t.alive).count(),
+                            }),
+                        );
+                        send_state(&cfg, &projects, &agent_names, scanned, &clients, &terminals, &dismissed, None);
+                        let _ = reply.send(Ok(tid));
+                    }
+                    Err(e) => {
+                        warn!(%project, %agent, message = %e.1, "scripted spawn failed");
+                        let _ = reply.send(Err(e));
+                    }
+                }
+            }
+
+            Cmd::TermSend { target, data, reply } => {
+                let result = resolve_target(&terminals, &target).and_then(|tid| {
+                    let t = terminals.get_mut(&tid).ok_or_else(|| format!("terminal {tid} not found"))?;
+                    if !t.alive {
+                        return Err(format!("terminal {tid} has already exited"));
+                    }
+                    deliver_input(t, &data);
+                    Ok(tid)
+                });
+                let _ = reply.send(result);
+            }
+
+            Cmd::TermCapture { target, reply } => {
+                let result = resolve_target(&terminals, &target).and_then(|tid| {
+                    terminals
+                        .get(&tid)
+                        .map(|t| t.ring.snapshot())
+                        .ok_or_else(|| format!("terminal {tid} not found"))
+                });
+                let _ = reply.send(result);
             }
 
             Cmd::Shutdown => {
@@ -3032,22 +3190,7 @@ fn send_state(
     let named: Vec<&str> = cfg.saved.iter().map(|s| s.project.as_str()).collect();
     projects.sort_by_key(|p| project_rank(&p.path, &running, &named));
 
-    let mut list: Vec<TerminalInfo> = terminals
-        .values()
-        .map(|t| TerminalInfo {
-            id: t.id,
-            project: t.project.clone(),
-            agent: t.agent.clone(),
-            alive: t.alive,
-            cols: t.cols,
-            rows: t.rows,
-            session_id: t.session_id.clone(),
-            name: t.name.clone(),
-            color: t.color.clone(),
-            working: t.working(),
-            jobs: t.jobs.clone(),
-        })
-        .collect();
+    let mut list: Vec<TerminalInfo> = terminals.values().map(terminal_info).collect();
     list.sort_by_key(|t| t.id);
 
     let saved: Vec<SavedInfo> = cfg
@@ -3186,6 +3329,46 @@ mod tests {
             resting: 0,
             jobs: Vec::new(),
         }
+    }
+
+    #[test]
+    fn resolve_target_by_id_passes_through_unchecked() {
+        // Existence is for the caller to find out from `.get()` — same as
+        // `Kill`/`Attach` already leave a bad id today.
+        let terminals: HashMap<u32, Terminal> = HashMap::new();
+        assert_eq!(resolve_target(&terminals, &TermTarget::Id(42)), Ok(42));
+    }
+
+    #[test]
+    fn resolve_target_by_name_finds_the_one_live_terminal() {
+        let mut t = terminal_with(&[], 80, 24);
+        t.id = 5;
+        t.name = Some("builder".into());
+        let mut terminals = HashMap::new();
+        terminals.insert(5, t);
+        assert_eq!(resolve_target(&terminals, &TermTarget::Name("builder".into())), Ok(5));
+    }
+
+    #[test]
+    fn resolve_target_by_name_says_so_when_nothing_matches() {
+        let terminals: HashMap<u32, Terminal> = HashMap::new();
+        let err = resolve_target(&terminals, &TermTarget::Name("ghost".into())).unwrap_err();
+        assert!(err.contains("no live terminal"), "{err}");
+    }
+
+    #[test]
+    fn resolve_target_by_name_refuses_to_guess_when_ambiguous() {
+        let mut a = terminal_with(&[], 80, 24);
+        a.id = 1;
+        a.name = Some("dup".into());
+        let mut b = terminal_with(&[], 80, 24);
+        b.id = 2;
+        b.name = Some("dup".into());
+        let mut terminals = HashMap::new();
+        terminals.insert(1, a);
+        terminals.insert(2, b);
+        let err = resolve_target(&terminals, &TermTarget::Name("dup".into())).unwrap_err();
+        assert!(err.contains("more than one"), "{err}");
     }
 
     #[test]

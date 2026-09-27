@@ -4,6 +4,7 @@
 //! negotiation, then the daemon lifecycle (detach, status, stop, service).
 //! The session registry and the frontend came after.
 
+mod ansi;
 mod config;
 mod browse;
 mod cloudflare;
@@ -88,6 +89,11 @@ fn main() -> ExitCode {
         "run" => cmd_run(&argv),
         "push" => cmd_push(&argv),
         "pull" => cmd_pull(&argv),
+        "ls" => cmd_ls(&argv),
+        "spawn" => cmd_spawn(&argv),
+        "send" => cmd_send(&argv),
+        "capture" => cmd_capture(&argv),
+        "wait" => cmd_wait(&argv),
         "tray" => tray::run(home),
         "tunnel" => cmd_tunnel(),
         "bundle-web" => cmd_bundle_web(&argv),
@@ -123,6 +129,19 @@ fn print_help() {
          sessionhubd push --on NAME LOCAL THERE    send one file\n\
          sessionhubd pull --on NAME THERE LOCAL    fetch one file\n\
          \x20                                 a whole folder: tar it, push it, run tar -xzf\n\
+         \n\
+         Driving a terminal from a script — every one of these takes [--on NAME]\n\
+         to reach it on a paired machine instead of this one:\n\
+         sessionhubd ls [--json]             live terminals: id, name, agent, project, status\n\
+         sessionhubd spawn --agent NAME --project DIR [--resume ID] [--name NAME]\n\
+         \x20                                 start one, prints its id\n\
+         sessionhubd send <id-or-name> [--file PATH | TEXT] [--enter] [--key NAME]…\n\
+         \x20                                 [--from LABEL] [--raw] [--verify]\n\
+         \x20                                 text with no --file reads stdin\n\
+         sessionhubd capture <id-or-name> [--lines N] [--raw] [--json]\n\
+         \x20                                 what is on screen, as plain text\n\
+         sessionhubd wait <id-or-name> [--idle SECONDS] [--timeout SECONDS]\n\
+         \x20                                 until quiet, or the process ends\n\
          \n\
          sessionhubd tray                   show the tray icon; `start` does this too\n\
          sessionhubd tunnel                 expose it externally through cloudflared\n\
@@ -886,14 +905,517 @@ fn cmd_pull(argv: &[String]) -> ExitCode {
     }
 }
 
+// ------------------------------------------------------- scripted control
+//
+// `ls`/`spawn`/`send`/`capture`/`wait` — a script's way to do what a person
+// does by hand in the browser: start an agent's terminal, tell it something,
+// read what it said back, wait until it is done. Every one of these also
+// takes `--on NAME` and goes through the exact same local-daemon-then-relay
+// path `run`/`push`/`pull` above already use — nothing new about *how* they
+// reach another machine, only about what they ask it to do once there.
+//
+// A short-lived process only ever gets a request/response answer here, never
+// a live view — `wait` polls `capture`/`ls` on an interval rather than
+// holding anything open, and that is a deliberate choice, not a limitation
+// worth working around: see the daemon-side comments on `Cmd::TermCapture`
+// and `Cmd::TermSpawn` in `state.rs` for why the actor stays out of it.
+
+/// A daemon old enough to have never heard of a new route answers with the
+/// same bare `404\n` any unmatched path gets. Told apart from a real, useful
+/// 404 — "no terminal with that id" — only by checking the body is exactly
+/// that generic one.
+fn old_daemon_message(status: u16, body: &[u8]) -> Option<&'static str> {
+    if status == 404 && body == b"404\n" {
+        Some("This sessionhub does not understand this command yet — update it first.")
+    } else {
+        None
+    }
+}
+
+/// `id=...` if the target parses as a number, `name=...` otherwise — the
+/// query fragment every scripted-control command that names a terminal sends.
+fn target_query(target: &str) -> String {
+    match target.parse::<u32>() {
+        Ok(id) => format!("id={id}"),
+        Err(_) => format!("name={}", remote::percent_encode(target)),
+    }
+}
+
+/// The exact byte sequences `web/keybar.js` sends for the same names, so
+/// `--key` means the same thing on a script as it does on a phone's on-screen
+/// key bar. `None` for anything this table and the generic `ctrl-<letter>`
+/// rule below do not recognise.
+fn key_bytes(name: &str) -> Option<Vec<u8>> {
+    let literal: &[u8] = match name {
+        "esc" => b"\x1b",
+        "enter" => b"\r",
+        "tab" => b"\t",
+        "shift-tab" => b"\x1b[Z",
+        "up" => b"\x1b[A",
+        "down" => b"\x1b[B",
+        "right" => b"\x1b[C",
+        "left" => b"\x1b[D",
+        "home" => b"\x1b[H",
+        "end" => b"\x1b[F",
+        "pgup" => b"\x1b[5~",
+        "pgdn" => b"\x1b[6~",
+        "del" => b"\x1b[3~",
+        "ctrl-c" => b"\x03",
+        "ctrl-d" => b"\x04",
+        "ctrl-r" => b"\x12",
+        _ => {
+            let letter = name.strip_prefix("ctrl-")?;
+            let mut chars = letter.chars();
+            let c = chars.next()?;
+            if chars.next().is_some() || !c.is_ascii_alphabetic() {
+                return None;
+            }
+            return Some(vec![c.to_ascii_uppercase() as u8 - 64]);
+        }
+    };
+    Some(literal.to_vec())
+}
+
+const PASTE_START: &[u8] = b"\x1b[200~";
+const PASTE_END: &[u8] = b"\x1b[201~";
+
+/// Wrap text in a bracketed paste, so a readline-style prompt takes embedded
+/// newlines as part of one block instead of as separate Enter presses — the
+/// same thing that already happens when a person pastes multiple lines into
+/// a terminal by hand. `src/typed.rs` already parses these markers on the way
+/// in; nothing before this wrote them going out.
+fn wrap_paste(text: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(text.len() + PASTE_START.len() + PASTE_END.len());
+    out.extend_from_slice(PASTE_START);
+    out.extend_from_slice(text);
+    out.extend_from_slice(PASTE_END);
+    out
+}
+
+fn cmd_ls(argv: &[String]) -> ExitCode {
+    let Some((port, token)) = local_daemon() else { return ExitCode::FAILURE };
+    let mut target = format!("/api/term/ls?token={}", remote::percent_encode(&token));
+    if let Some(on) = flag_value(argv, "--on") {
+        target.push_str(&format!("&via={}", remote::percent_encode(&on)));
+    }
+    let (status, body) = match daemon::ask(port, "GET", &target, &[], Duration::from_secs(10)) {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("{e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    if let Some(msg) = old_daemon_message(status, &body) {
+        eprintln!("{msg}");
+        return ExitCode::FAILURE;
+    }
+    if status != 200 {
+        eprintln!("{}", String::from_utf8_lossy(&body).trim());
+        return ExitCode::FAILURE;
+    }
+    if has_flag(argv, "--json") {
+        print!("{}", String::from_utf8_lossy(&body));
+        return ExitCode::SUCCESS;
+    }
+    let list: Vec<serde_json::Value> = match serde_json::from_slice(&body) {
+        Ok(v) => v,
+        Err(_) => {
+            eprintln!("sessionhub sent something this version cannot read.");
+            return ExitCode::FAILURE;
+        }
+    };
+    if list.is_empty() {
+        println!("No live terminals.");
+        return ExitCode::SUCCESS;
+    }
+    println!("{:<6} {:<16} {:<10} {:<7} {}", "ID", "NAME", "AGENT", "STATUS", "PROJECT");
+    for t in &list {
+        let id = t.get("id").and_then(|v| v.as_u64()).unwrap_or(0);
+        let name = t.get("name").and_then(|v| v.as_str()).unwrap_or("-");
+        let agent = t.get("agent").and_then(|v| v.as_str()).unwrap_or("");
+        let alive = t.get("alive").and_then(|v| v.as_bool()).unwrap_or(false);
+        let working = t.get("working").and_then(|v| v.as_bool()).unwrap_or(false);
+        let status = if !alive { "exited" } else if working { "busy" } else { "idle" };
+        let project = t.get("project").and_then(|v| v.as_str()).unwrap_or("");
+        println!("{id:<6} {name:<16} {agent:<10} {status:<7} {project}");
+    }
+    ExitCode::SUCCESS
+}
+
+fn cmd_spawn(argv: &[String]) -> ExitCode {
+    let (Some(project), Some(agent)) = (flag_value(argv, "--project"), flag_value(argv, "--agent"))
+    else {
+        eprintln!(
+            "Usage: sessionhubd spawn --agent NAME --project DIR [--resume ID] [--name NAME] [--on MACHINE]"
+        );
+        return ExitCode::from(2);
+    };
+    let on = flag_value(argv, "--on");
+    // Worth catching here, on this machine — but only when the folder IS on
+    // this machine. `--on` means the path belongs to whatever is on the far
+    // end, which this process cannot see.
+    if on.is_none() && !std::path::Path::new(&project).is_dir() {
+        eprintln!("{project} is not a folder on this machine.");
+        return ExitCode::FAILURE;
+    }
+    let Some((port, token)) = local_daemon() else { return ExitCode::FAILURE };
+    let mut target = format!(
+        "/api/term/spawn?token={}&project={}&agent={}",
+        remote::percent_encode(&token),
+        remote::percent_encode(&project),
+        remote::percent_encode(&agent),
+    );
+    if let Some(resume) = flag_value(argv, "--resume") {
+        target.push_str(&format!("&resume={}", remote::percent_encode(&resume)));
+    }
+    if let Some(name) = flag_value(argv, "--name") {
+        target.push_str(&format!("&name={}", remote::percent_encode(&name)));
+    }
+    if let Some(on) = &on {
+        target.push_str(&format!("&via={}", remote::percent_encode(on)));
+    }
+    let (status, body) = match daemon::ask(port, "PUT", &target, &[], Duration::from_secs(20)) {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("{e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    if let Some(msg) = old_daemon_message(status, &body) {
+        eprintln!("{msg}");
+        return ExitCode::FAILURE;
+    }
+    // A 403 (remote commands off) or 502 (relay failed) answers in plain
+    // text, not JSON — the same shape `run`'s own non-200 handling expects.
+    if status != 200 {
+        eprintln!("{}", String::from_utf8_lossy(&body).trim());
+        return ExitCode::FAILURE;
+    }
+    let parsed: serde_json::Value = match serde_json::from_slice(&body) {
+        Ok(v) => v,
+        Err(_) => {
+            eprintln!("sessionhub sent something this version cannot read.");
+            return ExitCode::FAILURE;
+        }
+    };
+    if let Some(message) = parsed.get("error").and_then(|v| v.as_str()) {
+        eprintln!("{message}");
+        return ExitCode::FAILURE;
+    }
+    let Some(id) = parsed.get("id").and_then(|v| v.as_u64()) else {
+        eprintln!("sessionhub did not say which terminal it started.");
+        return ExitCode::FAILURE;
+    };
+    // Human-readable line to stderr, bare id to stdout — so
+    // `id=$(sessionhubd spawn ...)` in a script gets exactly the id and
+    // nothing else, the same discipline `run` already keeps between its
+    // stdout and stderr.
+    eprintln!("spawned terminal {id} ({agent} in {project})");
+    println!("{id}");
+    ExitCode::SUCCESS
+}
+
+fn cmd_send(argv: &[String]) -> ExitCode {
+    let rest = positional(argv);
+    let Some(target) = rest.first().map(|s| s.to_string()) else {
+        eprintln!(
+            "Usage: sessionhubd send <id-or-name> [--file PATH | TEXT] [--enter] [--key NAME]… \
+             [--from LABEL] [--raw] [--verify] [--on MACHINE]"
+        );
+        return ExitCode::from(2);
+    };
+
+    let raw = has_flag(argv, "--raw");
+    let enter = has_flag(argv, "--enter");
+    let verify = has_flag(argv, "--verify");
+    let from = flag_value(argv, "--from");
+    let on = flag_value(argv, "--on");
+
+    let mut keys = Vec::new();
+    let mut i = 0;
+    while i < argv.len() {
+        if argv[i] == "--key" {
+            match argv.get(i + 1).and_then(|n| key_bytes(n)) {
+                Some(bytes) => keys.push(bytes),
+                None => {
+                    eprintln!("Unknown --key '{}'.", argv.get(i + 1).map(String::as_str).unwrap_or(""));
+                    return ExitCode::from(2);
+                }
+            }
+        }
+        i += 1;
+    }
+
+    let text: Option<Vec<u8>> = if let Some(path) = flag_value(argv, "--file") {
+        match std::fs::read(&path) {
+            Ok(b) => Some(b),
+            Err(e) => {
+                eprintln!("could not read {path}: {e}");
+                return ExitCode::FAILURE;
+            }
+        }
+    } else if let Some(t) = rest.get(1) {
+        Some(t.as_bytes().to_vec())
+    } else if keys.is_empty() {
+        // Nothing else was asked for — read whatever is piped in, the same
+        // way `cat` would.
+        use std::io::Read;
+        let mut buf = Vec::new();
+        match std::io::stdin().read_to_end(&mut buf) {
+            Ok(_) => Some(buf),
+            Err(e) => {
+                eprintln!("could not read stdin: {e}");
+                return ExitCode::FAILURE;
+            }
+        }
+    } else {
+        None
+    };
+
+    if keys.is_empty() && text.as_ref().is_none_or(|t| t.is_empty()) && !enter {
+        eprintln!("Nothing to send — give text, --file, or --key.");
+        return ExitCode::from(2);
+    }
+
+    let Some((port, token)) = local_daemon() else { return ExitCode::FAILURE };
+    let id_query = target_query(&target);
+
+    let send_bytes = |payload: &[u8]| -> Result<u64, ExitCode> {
+        let mut url = format!("/api/term/send?token={}&{id_query}", remote::percent_encode(&token));
+        if let Some(from) = &from {
+            url.push_str(&format!("&from={}", remote::percent_encode(from)));
+        }
+        if let Some(on) = &on {
+            url.push_str(&format!("&via={}", remote::percent_encode(on)));
+        }
+        let (status, body) = daemon::ask(port, "PUT", &url, payload, Duration::from_secs(15))
+            .map_err(|e| {
+                eprintln!("{e}");
+                ExitCode::FAILURE
+            })?;
+        if let Some(msg) = old_daemon_message(status, &body) {
+            eprintln!("{msg}");
+            return Err(ExitCode::FAILURE);
+        }
+        if status != 200 {
+            eprintln!("{}", String::from_utf8_lossy(&body).trim());
+            return Err(ExitCode::FAILURE);
+        }
+        let parsed: serde_json::Value = serde_json::from_slice(&body).map_err(|_| {
+            eprintln!("sessionhub sent something this version cannot read.");
+            ExitCode::FAILURE
+        })?;
+        if let Some(message) = parsed.get("error").and_then(|v| v.as_str()) {
+            eprintln!("{message}");
+            return Err(ExitCode::FAILURE);
+        }
+        parsed.get("id").and_then(|v| v.as_u64()).ok_or_else(|| {
+            eprintln!("sessionhub did not say which terminal received it.");
+            ExitCode::FAILURE
+        })
+    };
+
+    let mut sent_id = None;
+    for key in &keys {
+        sent_id = Some(match send_bytes(key) {
+            Ok(id) => id,
+            Err(code) => return code,
+        });
+    }
+    if let Some(text) = &text {
+        let payload = if raw { text.clone() } else { wrap_paste(text) };
+        sent_id = Some(match send_bytes(&payload) {
+            Ok(id) => id,
+            Err(code) => return code,
+        });
+    }
+    if enter {
+        sent_id = Some(match send_bytes(b"\r") {
+            Ok(id) => id,
+            Err(code) => return code,
+        });
+    }
+
+    if verify {
+        if let (Some(text), Some(id)) = (&text, sent_id) {
+            if !verify_visible(port, &token, id, &on, text) {
+                eprintln!("warning: could not confirm the text appeared on screen within 3s.");
+                return ExitCode::from(1);
+            }
+        }
+    }
+    ExitCode::SUCCESS
+}
+
+/// After sending, check the sent text actually shows up in the terminal's
+/// scrollback within a few seconds — proof it landed somewhere visible, not
+/// just that the daemon accepted it onto the wire. Best-effort: a prompt that
+/// echoes differently than it was sent (word-wrap, no echo at all in some
+/// ink-based TUIs) can still fail this honestly even when the send worked.
+fn verify_visible(port: u16, token: &str, id: u64, on: &Option<String>, text: &[u8]) -> bool {
+    let stripped = crate::ansi::strip_ansi(text);
+    let needle: String = stripped.trim().chars().take(80).collect();
+    if needle.is_empty() {
+        return true;
+    }
+    for _ in 0..6 {
+        std::thread::sleep(Duration::from_millis(500));
+        let mut url = format!("/api/term/capture?token={}&id={id}", remote::percent_encode(token));
+        if let Some(on) = on {
+            url.push_str(&format!("&via={}", remote::percent_encode(on)));
+        }
+        if let Ok((200, body)) = daemon::ask(port, "GET", &url, &[], Duration::from_secs(5)) {
+            if crate::ansi::strip_ansi(&body).contains(&needle) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn cmd_capture(argv: &[String]) -> ExitCode {
+    let rest = positional(argv);
+    let Some(target) = rest.first() else {
+        eprintln!("Usage: sessionhubd capture <id-or-name> [--lines N] [--raw] [--json] [--on MACHINE]");
+        return ExitCode::from(2);
+    };
+    let Some((port, token)) = local_daemon() else { return ExitCode::FAILURE };
+    let mut url = format!(
+        "/api/term/capture?token={}&{}",
+        remote::percent_encode(&token),
+        target_query(target)
+    );
+    if let Some(on) = flag_value(argv, "--on") {
+        url.push_str(&format!("&via={}", remote::percent_encode(&on)));
+    }
+    let (status, body) = match daemon::ask(port, "GET", &url, &[], Duration::from_secs(10)) {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("{e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    if let Some(msg) = old_daemon_message(status, &body) {
+        eprintln!("{msg}");
+        return ExitCode::FAILURE;
+    }
+    if status != 200 {
+        eprintln!("{}", String::from_utf8_lossy(&body).trim());
+        return ExitCode::FAILURE;
+    }
+    let text = if has_flag(argv, "--raw") {
+        String::from_utf8_lossy(&body).into_owned()
+    } else {
+        crate::ansi::strip_ansi(&body)
+    };
+    let text = match flag_value(argv, "--lines").and_then(|n| n.parse::<usize>().ok()) {
+        Some(n) => {
+            let lines: Vec<&str> = text.lines().collect();
+            let start = lines.len().saturating_sub(n);
+            lines[start..].join("\n")
+        }
+        None => text,
+    };
+    if has_flag(argv, "--json") {
+        println!("{}", serde_json::json!({ "text": text }));
+    } else {
+        println!("{text}");
+    }
+    ExitCode::SUCCESS
+}
+
+/// The ceiling on `wait --timeout` — `exec::clamp_timeout`'s 600s belongs to
+/// `run`, which is a single bounded command; a script legitimately waiting on
+/// a long build needs more room than that, just not forever.
+const WAIT_MAX_TIMEOUT: u64 = 3600;
+
+fn cmd_wait(argv: &[String]) -> ExitCode {
+    let rest = positional(argv);
+    let Some(target) = rest.first().map(|s| s.to_string()) else {
+        eprintln!("Usage: sessionhubd wait <id-or-name> [--idle SECONDS] [--timeout SECONDS] [--on MACHINE]");
+        return ExitCode::from(2);
+    };
+    let idle_secs = flag_value(argv, "--idle").and_then(|s| s.parse::<u64>().ok());
+    let timeout_secs = flag_value(argv, "--timeout")
+        .and_then(|s| s.parse::<u64>().ok())
+        .unwrap_or(300)
+        .min(WAIT_MAX_TIMEOUT);
+    let on = flag_value(argv, "--on");
+    let Some((port, token)) = local_daemon() else { return ExitCode::FAILURE };
+
+    let ls_url = {
+        let mut u = format!("/api/term/ls?token={}", remote::percent_encode(&token));
+        if let Some(on) = &on {
+            u.push_str(&format!("&via={}", remote::percent_encode(on)));
+        }
+        u
+    };
+    let capture_url = {
+        let mut u = format!(
+            "/api/term/capture?token={}&{}",
+            remote::percent_encode(&token),
+            target_query(&target)
+        );
+        if let Some(on) = &on {
+            u.push_str(&format!("&via={}", remote::percent_encode(on)));
+        }
+        u
+    };
+
+    let start = Instant::now();
+    let mut last_output: Option<Vec<u8>> = None;
+    let mut quiet_since = Instant::now();
+    loop {
+        if start.elapsed().as_secs() >= timeout_secs {
+            eprintln!("timed out after {timeout_secs}s, still busy or running");
+            return ExitCode::from(1);
+        }
+        if let Ok((200, body)) = daemon::ask(port, "GET", &ls_url, &[], Duration::from_secs(10)) {
+            if let Ok(list) = serde_json::from_slice::<Vec<serde_json::Value>>(&body) {
+                let numeric = target.parse::<u64>().ok();
+                let mine = list.iter().find(|t| {
+                    t.get("id").and_then(|v| v.as_u64()) == numeric
+                        || t.get("name").and_then(|v| v.as_str()) == Some(target.as_str())
+                });
+                match mine {
+                    Some(t) if t.get("alive").and_then(|v| v.as_bool()) == Some(false) => {
+                        println!("exited");
+                        return ExitCode::SUCCESS;
+                    }
+                    None => {
+                        eprintln!("no live terminal '{target}'");
+                        return ExitCode::FAILURE;
+                    }
+                    _ => {}
+                }
+            }
+        }
+        if let Some(idle_secs) = idle_secs {
+            if let Ok((200, body)) = daemon::ask(port, "GET", &capture_url, &[], Duration::from_secs(10)) {
+                if Some(&body) != last_output.as_ref() {
+                    last_output = Some(body);
+                    quiet_since = Instant::now();
+                } else if quiet_since.elapsed().as_secs() >= idle_secs {
+                    println!("idle");
+                    return ExitCode::SUCCESS;
+                }
+            }
+        }
+        std::thread::sleep(Duration::from_secs(1));
+    }
+}
+
 /// The arguments that are not the subcommand, a flag, or a flag's value.
 ///
 /// Every flag that swallows the word after it has to be listed, `--home`
 /// included — it is global, so it can appear in front of these commands too, and
 /// leaving it out made its path look like the file being sent.
 fn positional(argv: &[String]) -> Vec<&String> {
-    const TAKES_VALUE: [&str; 6] =
-        ["--on", "--cwd", "--timeout", "--home", "--account", "--password"];
+    const TAKES_VALUE: [&str; 15] = [
+        "--on", "--cwd", "--timeout", "--home", "--account", "--password",
+        "--agent", "--project", "--resume", "--name", "--file", "--key", "--from", "--idle",
+        "--lines",
+    ];
     let mut out = Vec::new();
     let mut skip = false;
     for a in argv.iter().skip(1) {
@@ -1141,5 +1663,64 @@ mod tests {
     #[test]
     fn flag_at_end_without_value_is_none() {
         assert_eq!(flag_value(&argv(&["install", "--home"]), "--home"), None);
+    }
+
+    #[test]
+    fn positional_swallows_every_new_scripted_control_flag_value() {
+        let a = argv(&[
+            "send", "builder", "--from", "orchestrator", "--key", "esc", "--idle", "20",
+            "--lines", "5",
+        ]);
+        assert_eq!(positional(&a), vec!["builder"]);
+    }
+
+    #[test]
+    fn positional_keeps_spawn_args_and_drops_their_flags() {
+        let a = argv(&[
+            "spawn", "--agent", "omp", "--project", "~/code/demo", "--resume", "abc",
+            "--name", "builder", "--file", "task.md",
+        ]);
+        assert!(positional(&a).is_empty());
+    }
+
+    #[test]
+    fn old_daemon_message_only_matches_the_generic_404() {
+        assert!(old_daemon_message(404, b"404\n").is_some());
+        assert!(old_daemon_message(404, b"no terminal 9\n").is_none());
+        assert!(old_daemon_message(200, b"404\n").is_none());
+    }
+
+    #[test]
+    fn target_query_picks_id_for_numbers_and_name_otherwise() {
+        assert_eq!(target_query("42"), "id=42");
+        assert_eq!(target_query("builder"), "name=builder");
+        assert_eq!(target_query("bui lder"), "name=bui%20lder");
+    }
+
+    #[test]
+    fn key_bytes_matches_the_keybar_table() {
+        assert_eq!(key_bytes("esc"), Some(b"\x1b".to_vec()));
+        assert_eq!(key_bytes("enter"), Some(b"\r".to_vec()));
+        assert_eq!(key_bytes("shift-tab"), Some(b"\x1b[Z".to_vec()));
+        assert_eq!(key_bytes("ctrl-c"), Some(b"\x03".to_vec()));
+    }
+
+    #[test]
+    fn key_bytes_supports_generic_ctrl_letter() {
+        assert_eq!(key_bytes("ctrl-a"), Some(vec![1]));
+        assert_eq!(key_bytes("ctrl-z"), Some(vec![26]));
+        assert_eq!(key_bytes("ctrl-A"), Some(vec![1]));
+    }
+
+    #[test]
+    fn key_bytes_rejects_unknown_names() {
+        assert_eq!(key_bytes("ctrl-1"), None);
+        assert_eq!(key_bytes("ctrl-ab"), None);
+        assert_eq!(key_bytes("nonsense"), None);
+    }
+
+    #[test]
+    fn wrap_paste_brackets_the_text_unchanged() {
+        assert_eq!(wrap_paste(b"line1\nline2"), b"\x1b[200~line1\nline2\x1b[201~".to_vec());
     }
 }

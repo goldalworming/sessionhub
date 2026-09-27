@@ -3,15 +3,20 @@
 Environment: Windows 11 Pro 26200, no WSL. Rust 1.96.0, Node 24.19 (only for the
 test scripts), Chrome 151 headless over the DevTools Protocol.
 
-**214 unit tests** on Windows and **216 on unix** (`cargo test`; two of them test the PATH merging, which only exists on unix) cover the ring buffer, size
+**329 unit tests** on Windows (`cargo test`; a couple more on unix, for the PATH
+merging that only exists there) cover the ring buffer, size
 negotiation, backpressure, JSONL parsing, cwd resolution, time formatting, process
 tree summation, HTTP and token parsing, cloudflared URL extraction, agent name
 filtering, dropped-file sweeping, folder-picker path cleanup, file tree reading,
 truncation of large files, percent decoding in HTTP queries, pairing link parsing
 along with machine name filtering, the login page shown when no token is present
 yet, the path comparison rules that differ per system, release version comparison
-and asset picking for self-update, and the shell-input tracker that decides when
-it can honestly name the command a terminal is running.
+and asset picking for self-update, the shell-input tracker that decides when
+it can honestly name the command a terminal is running, ANSI/VT100 stripping for
+`capture`, resolving a scripted-control target by id or by its live name
+(including the ambiguous- and no-match cases), and the `sessionhubd`
+`send`/`capture`/`wait` CLI's flag parsing, `--key` table, and old-daemon
+detection.
 
 Everything is green on **macOS 26.5.2 (arm64)** too — see
 [Cross-platform](#cross-platform).
@@ -679,6 +684,7 @@ Every test above runs natively on Windows 11. The PTY uses ConPTY through
 | `remotetest.mjs` | 34/34 | Two real daemons, the whole flow over `?via=`: half-finished links and wrong tokens rejected before anything is stored, pairing with itself rejected, then spawn/type/resize, the file tree and files that **exist only on the remote machine**, saves that really do change its disk, images over `/api/file`, the remote machine's settings; raw addresses rejected (not an open proxy), unregistered names rejected while naming the name, `forget` removing its token from the config |
 | `keybarui.mjs` | 20/20 | The key bar on a 390×844 phone screen: appearing only when there is a terminal, stuck to the bottom, every key ≥32px, the arrows calling up real shell history, a sticky Ctrl turning the next letter from the on-screen keyboard and then releasing itself, and no keys that are meaningless to a PTY |
 | `remoteui.mjs` | 31/31 | The machine tab bar in the browser: a paste dialog with no Connect button, the machine tab appearing on its own once connected, switching tabs swapping the entire window contents, remote-machine projects never leaking into the local machine's tab, terminals landing in their own machine's container, **the remote machine's token present in neither `localStorage` nor the DOM**, `✕` dropping it |
+| `termtest.mjs` | 16/16 | The scripted-control HTTP routes (`/api/term/ls\|spawn\|send\|capture`): a scripted `spawn` reaching an already-open WebSocket client as a normal `State` broadcast — proving it shows up live in the browser without the browser doing anything — a taken `name` refused rather than duplicated, `send`/`capture` round-tripping real bytes through a live PowerShell, an unknown name answered with 404, **Remote commands** off refusing `spawn`/`send` with 403 while `ls`/`capture` keep working, and a killed terminal turning up as `alive: false` |
 
 ## Cross-platform
 
@@ -740,6 +746,25 @@ platform-aware `Path::components()`.
   executed.
 - **Long-running load.** The longest test is a few minutes; memory leaks or thread
   build-up after days have not been observed.
+- **Scripted control (`ls`/`spawn`/`send`/`capture`/`wait`) against a real coding
+  agent.** `termtest.mjs` proves the HTTP routes, the gating, and the live-broadcast
+  against a plain `terminal` (shell) agent — it cannot exercise what only a real
+  agent's own input handling decides:
+  - Whether bracketed paste actually makes Claude Code, opencode, and Oh My Pi treat
+    a multi-line `send` as one message rather than running it line by line — the
+    single most load-bearing assumption in the feature, and the one thing no amount
+    of reading `src/typed.rs` or `src/ansi.rs` can confirm.
+  - Whether `capture` stays readable once ANSI is stripped from an agent that
+    redraws heavily (a spinner, streamed tokens) rather than the simple prompt
+    redraws seen in the PowerShell smoke test.
+  - Whether `wait --idle` reports "idle" too early because an agent keeps redrawing
+    a status line (an elapsed timer, a token counter) even while genuinely done.
+  - The `spawn` → first `send` timing race: whether the recommended settle,
+    `wait --idle 2 --timeout 10`, is actually enough for each agent's own startup.
+  - Bracketed-paste and ConPTY behaviour specifically on Windows vs. macOS/Linux —
+    only Windows has been run.
+  - `--verify`'s reliability against an agent whose TUI does not echo input the way
+    it was typed (some `ink`-based front ends do not echo at all).
 
 ## Findings that changed the design
 

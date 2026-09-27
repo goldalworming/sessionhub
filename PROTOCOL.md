@@ -380,6 +380,23 @@ cookie.
 | `POST /api/stop` | Answers 200, then the daemon stops |
 | `POST /api/reload` | Re-reads the config; used by `token rotate` |
 | `GET /api/file?path=…` | The raw bytes of a file, for `<img src>` in the file panel. 25 MB maximum; folders get a 404 |
+| `GET /api/term/ls` | `[TerminalInfo, …]` — every live terminal, same shape as the WebSocket `State` frame's `terminals` |
+| `PUT /api/term/spawn?project=…&agent=…[&resume=…][&name=…]` | Starts a terminal exactly like the browser's *New* button; `{"id": N}`, or 400 with `{"error", "code"}` (`code: "name_taken"` when `name` is already live) |
+| `PUT /api/term/send?(id=N\|name=…)[&from=…]`, body = raw bytes to type | Types the body into that terminal, as if a person had; `{"id": N, "bytes": N}` |
+| `GET /api/term/capture?(id=N\|name=…)` | The terminal's raw scrollback (same bytes as the ring buffer), as `application/octet-stream` |
+
+`send`'s body is delivered to the PTY exactly as given — bracketed-paste
+wrapping, a trailing Enter, and named keys (`--key esc`, `--raw`, …) are all
+`sessionhubd send`'s job on the way in, not this endpoint's; a raw client can
+send whatever framing it wants in the body.
+
+`spawn` and `send` are gated by **Remote commands**, refused with a 403 when it
+is off, same as `/api/exec` and `/api/put`; `ls` and `capture` are not, same as
+`/api/file`. A `name=` that matches nothing, or more than one live terminal, is
+a 404 explaining which. A name given to `spawn` lives only as long as that
+terminal does and is never written to `config.toml` — a saved terminal's name
+is a different, persistent thing (see CONFIG.md). All four also accept
+`&via=<name>` to reach a paired machine, same as `/api/file` below.
 
 The cookie exists because a `<script>` tag cannot carry a token from localStorage;
 the cookie is set when `/?token=…` is opened once.
@@ -388,6 +405,9 @@ the cookie is set when `/?token=…` is opened once.
 version; that is the number matched during `pair`. `version` is included so that a
 rejection message can name **both** sides.
 
-`/api/file` also accepts `&via=<name>` and forwards it to that machine — this is
-how an image on a remote machine shows up in the file panel. Other routes **cannot**
-be relayed; attempts get an explanation, not a bare 404.
+`/api/file`, `/api/exec`, `/api/put`, and the four `/api/term/*` routes above
+also accept `&via=<name>` and forward the request to that machine — this is how
+`run`/`push`/`pull --on` and the scripted-control commands reach a paired
+machine, and how an image on a remote machine shows up in the file panel.
+Every other route **cannot** be relayed; attempts get an explanation, not a
+bare 404.

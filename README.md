@@ -111,6 +111,53 @@ commands** and are logged on the machine that runs them. See
 [CONFIG.md](CONFIG.md#running-commands-there) for pairing, security, and tunnel
 setup.
 
+## Scripted control
+
+A script or another program on the same machine (a workflow engine, a build
+step) can create and drive an agent terminal directly, without a human ever
+opening it in the browser first. The terminal it spawns is a normal terminal:
+it appears live in the browser immediately and can be typed into from there
+at the same time.
+
+```text
+sessionhubd spawn --agent omp --project ~/code/demo --name builder
+sessionhubd send builder --file task.md
+sessionhubd wait builder --idle 20 --timeout 1800
+sessionhubd capture builder
+```
+
+```text
+sessionhubd ls [--json]
+sessionhubd spawn --agent NAME --project DIR [--resume ID] [--name LABEL] [--on MACHINE]
+sessionhubd send <id-or-name> [TEXT | --file PATH] [--enter] [--key NAME]... [--from LABEL] [--raw] [--verify] [--on MACHINE]
+sessionhubd capture <id-or-name> [--lines N] [--raw] [--json] [--on MACHINE]
+sessionhubd wait <id-or-name> [--idle S] [--timeout S] [--on MACHINE]
+```
+
+`ls` lists live terminals with their id, name, agent, project, and status.
+`spawn` prints the new terminal's id on stdout, so `id=$(sessionhubd spawn
+...)` works in a script; `--name` gives it a label other commands can target
+instead of the id, valid only while that terminal is alive (it is never
+written to `config.toml`, unlike a terminal saved from the browser). `send`
+reads the text to send from a trailing argument, `--file`, or stdin, and
+wraps it in a bracketed paste so a multi-line message reaches the agent as
+one message rather than one line at a time — pass `--raw` for an agent that
+does not honour that. Repeat `--key` (`esc`, `enter`, `tab`, `shift-tab`,
+arrows, `home`/`end`/`pgup`/`pgdn`/`del`, `ctrl-c`/`ctrl-d`/`ctrl-r`, or
+`ctrl-<letter>`) to send special keys before the text; `--enter` presses
+Enter after it; `--verify` polls the screen afterwards and fails if the text
+never became visible. `capture` reads the terminal's current screen as plain
+text with ANSI codes stripped; `--lines N` limits it to the last N lines.
+`wait` blocks until the terminal has produced no new output for `--idle`
+seconds or its process has exited, up to `--timeout` seconds (default 300, max
+3600). Give `spawn` a moment to settle before the first `send` — for example
+`wait --idle 2 --timeout 10`.
+
+All five commands accept `--on MACHINE` to run against a paired machine
+instead, under the same **Remote commands** setting and logging as `run`.
+`ls` and `capture` are read-only and work even when Remote commands is off;
+`spawn` and `send` are refused with a 403 when it is off, the same as `run`.
+
 ## Known limits
 
 - Each terminal keeps the last 2 MB of output. History is lost when the daemon stops.

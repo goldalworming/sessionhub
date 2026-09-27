@@ -23,7 +23,7 @@ use tungstenite::Message;
 
 use crate::config::Config;
 use crate::proto::{decode_drop, decode_frame, ClientMsg};
-use crate::state::{Cmd, Out, CLIENT_QUEUE};
+use crate::state::{Cmd, Out, TermTarget, CLIENT_QUEUE};
 
 const MAX_HEAD: usize = 16 * 1024;
 
@@ -474,7 +474,7 @@ fn handle(
     // because both the local handler and the relay need it — and because the
     // bytes are sitting on the socket either way: leaving them there would
     // desynchronise anything that read from it next.
-    let put_body = if req.path == "/api/put" {
+    let put_body = if req.path == "/api/put" || req.path == "/api/term/send" {
         match read_body(&mut sock, &req) {
             Ok(b) => b,
             Err(message) => {
@@ -502,6 +502,10 @@ fn handle(
             "/api/file" => relay_file(&mut sock, &req, &r),
             "/api/exec" => relay_exec(&mut sock, &req, &r),
             "/api/put" => relay_put(&mut sock, &req, &r, put_body),
+            "/api/term/ls" => relay_term_ls(&mut sock, &req, &r),
+            "/api/term/spawn" => relay_term_spawn(&mut sock, &req, &r),
+            "/api/term/send" => relay_term_send(&mut sock, &req, &r, put_body),
+            "/api/term/capture" => relay_term_capture(&mut sock, &req, &r),
             other => respond(
                 &mut sock,
                 404,
@@ -519,6 +523,10 @@ fn handle(
         "/api/file" => api_file(&mut sock, &req),
         "/api/exec" => api_exec(&mut sock, &req),
         "/api/put" => api_put(&mut sock, &req, put_body),
+        "/api/term/ls" => api_term_ls(&mut sock, &tx),
+        "/api/term/spawn" => api_term_spawn(&mut sock, &req, &tx),
+        "/api/term/send" => api_term_send(&mut sock, &req, &tx, put_body),
+        "/api/term/capture" => api_term_capture(&mut sock, &req, &tx),
         "/api/signout" => api_signout(&mut sock),
         _ => serve_static(&mut sock, &req, set_cookie, &secret),
     }
@@ -794,6 +802,232 @@ fn api_put(sock: &mut TcpStream, req: &Request, body: Vec<u8>) -> io::Result<()>
     info!(path = %path.display(), bytes, "wrote a file sent from elsewhere");
     let answer = serde_json::json!({ "path": path.to_string_lossy(), "bytes": bytes }).to_string();
     respond(sock, 200, "application/json", answer.as_bytes())
+}
+
+// ------------------------------------------------------- scripted control
+//
+// `sessionhubd ls/spawn/send/capture` (main.rs). Same shape as `api_exec`/
+// `api_put` above — a oneshot reply channel into the actor, same
+// `remote_commands_on()` gate on anything that changes state, same
+// `relay_*` sibling per route so `--on` keeps working.
+
+/// `id=` or `name=` from the query string, as the actor's own `TermTarget`.
+fn term_target(req: &Request) -> Result<TermTarget, &'static str> {
+    if let Some(id) = req.query_param("id") {
+        return id.parse().map(TermTarget::Id).map_err(|_| "400 id must be a number\n");
+    }
+    if let Some(name) = req.query_param("name") {
+        return Ok(TermTarget::Name(name));
+    }
+    Err("400 missing id or name\n")
+}
+
+/// Every live terminal, the same shape a WebSocket client already gets in
+/// `State`. Read-only, so unlike `spawn`/`send` below it is never gated by
+/// `remote_commands_on()` — the same tier as `/api/file`.
+fn api_term_ls(sock: &mut TcpStream, tx: &Sender<Cmd>) -> io::Result<()> {
+    let (reply, wait) = bounded(1);
+    if tx.send(Cmd::TermList { reply }).is_err() {
+        return respond(sock, 500, "text/plain; charset=utf-8", b"actor is gone\n");
+    }
+    let list = wait.recv_timeout(Duration::from_secs(3)).unwrap_or_default();
+    let body = serde_json::to_string(&list).unwrap_or_else(|_| "[]".into());
+    respond(sock, 200, "application/json", body.as_bytes())
+}
+
+/// Start a terminal the way the browser's own "New" button does, minus the
+/// viewport a script does not have. Shows up in every open browser tab the
+/// instant it exists, same as any other spawn — see `Cmd::TermSpawn`.
+fn api_term_spawn(sock: &mut TcpStream, req: &Request, tx: &Sender<Cmd>) -> io::Result<()> {
+    if !remote_commands_on() {
+        return refuse_remote_commands(sock);
+    }
+    let Some(project) = req.query_param("project") else {
+        return respond(sock, 400, "text/plain; charset=utf-8", b"400 missing project\n");
+    };
+    let Some(agent) = req.query_param("agent") else {
+        return respond(sock, 400, "text/plain; charset=utf-8", b"400 missing agent\n");
+    };
+    let resume = req.query_param("resume");
+    let name = req.query_param("name");
+    let (reply, wait) = bounded(1);
+    if tx
+        .send(Cmd::TermSpawn { project: project.clone(), agent: agent.clone(), resume, name, reply })
+        .is_err()
+    {
+        return respond(sock, 500, "text/plain; charset=utf-8", b"actor is gone\n");
+    }
+    match wait.recv_timeout(Duration::from_secs(10)) {
+        Ok(Ok(tid)) => {
+            info!(terminal = tid, %project, %agent, "spawned a terminal from a script");
+            let body = serde_json::json!({ "id": tid }).to_string();
+            respond(sock, 200, "application/json", body.as_bytes())
+        }
+        Ok(Err((code, message))) => {
+            warn!(%project, %agent, %message, "scripted spawn failed");
+            let body = serde_json::json!({ "error": message, "code": code }).to_string();
+            respond(sock, 400, "application/json", body.as_bytes())
+        }
+        Err(_) => {
+            respond(sock, 504, "text/plain; charset=utf-8", b"504 the daemon did not answer in time\n")
+        }
+    }
+}
+
+/// Write bytes into a terminal's stdin — a keystroke, a paste, a script's
+/// `send`, all the same write underneath. The body is the raw text; how it is
+/// framed (bracketed paste, a trailing Enter, a key name) is `sessionhubd
+/// send`'s job, not this endpoint's — it just delivers whatever bytes it was
+/// handed.
+fn api_term_send(
+    sock: &mut TcpStream,
+    req: &Request,
+    tx: &Sender<Cmd>,
+    body: Vec<u8>,
+) -> io::Result<()> {
+    if !remote_commands_on() {
+        return refuse_remote_commands(sock);
+    }
+    let target = match term_target(req) {
+        Ok(t) => t,
+        Err(msg) => return respond(sock, 400, "text/plain; charset=utf-8", msg.as_bytes()),
+    };
+    let from = req.query_param("from");
+    let bytes = body.len();
+    // A capped preview, not the whole payload, in the audit line: this can be
+    // a whole task.md, and logging megabytes on every send would be its own
+    // problem. Enough to recognise what was sent, not to reproduce it.
+    const PREVIEW_MAX: usize = 200;
+    let preview = String::from_utf8_lossy(&body[..bytes.min(PREVIEW_MAX)]).replace('\n', "\\n");
+    let (reply, wait) = bounded(1);
+    if tx.send(Cmd::TermSend { target, data: body, reply }).is_err() {
+        return respond(sock, 500, "text/plain; charset=utf-8", b"actor is gone\n");
+    }
+    match wait.recv_timeout(Duration::from_secs(5)) {
+        Ok(Ok(tid)) => {
+            info!(
+                terminal = tid,
+                from = from.as_deref().unwrap_or(""),
+                bytes,
+                preview = %preview,
+                "sent input from a script"
+            );
+            let body = serde_json::json!({ "id": tid, "bytes": bytes }).to_string();
+            respond(sock, 200, "application/json", body.as_bytes())
+        }
+        Ok(Err(message)) => {
+            respond(sock, 404, "text/plain; charset=utf-8", format!("404 {message}\n").as_bytes())
+        }
+        Err(_) => {
+            respond(sock, 504, "text/plain; charset=utf-8", b"504 the daemon did not answer in time\n")
+        }
+    }
+}
+
+/// A terminal's raw scrollback. Deliberately not built on `Attach` — that one
+/// renegotiates the PTY to the smallest size among all its viewers, and a
+/// script reading the screen must never be the thing that shrinks it out from
+/// under someone actually looking at it in the browser. Read-only, so not
+/// gated by `remote_commands_on()`, same tier as `/api/file`.
+fn api_term_capture(sock: &mut TcpStream, req: &Request, tx: &Sender<Cmd>) -> io::Result<()> {
+    let target = match term_target(req) {
+        Ok(t) => t,
+        Err(msg) => return respond(sock, 400, "text/plain; charset=utf-8", msg.as_bytes()),
+    };
+    let (reply, wait) = bounded(1);
+    if tx.send(Cmd::TermCapture { target, reply }).is_err() {
+        return respond(sock, 500, "text/plain; charset=utf-8", b"actor is gone\n");
+    }
+    match wait.recv_timeout(Duration::from_secs(5)) {
+        Ok(Ok(bytes)) => respond(sock, 200, "application/octet-stream", &bytes),
+        Ok(Err(message)) => {
+            respond(sock, 404, "text/plain; charset=utf-8", format!("404 {message}\n").as_bytes())
+        }
+        Err(_) => {
+            respond(sock, 504, "text/plain; charset=utf-8", b"504 the daemon did not answer in time\n")
+        }
+    }
+}
+
+/// Forward a listing request to another machine.
+fn relay_term_ls(sock: &mut TcpStream, _req: &Request, r: &crate::config::Remote) -> io::Result<()> {
+    let url = format!("/api/term/ls?token={}", r.token);
+    match crate::remote::http_get(&crate::remote::Peer::of(r), &url) {
+        Ok(body) => respond(sock, 200, "application/json", &body),
+        Err(e) => respond(sock, 502, "text/plain; charset=utf-8", e.as_bytes()),
+    }
+}
+
+/// Forward a spawn request to another machine.
+fn relay_term_spawn(
+    sock: &mut TcpStream,
+    req: &Request,
+    r: &crate::config::Remote,
+) -> io::Result<()> {
+    let Some(project) = req.query_param("project") else {
+        return respond(sock, 400, "text/plain; charset=utf-8", b"400 missing project\n");
+    };
+    let Some(agent) = req.query_param("agent") else {
+        return respond(sock, 400, "text/plain; charset=utf-8", b"400 missing agent\n");
+    };
+    let mut url = format!(
+        "/api/term/spawn?token={}&project={}&agent={}",
+        r.token,
+        crate::remote::percent_encode(&project),
+        crate::remote::percent_encode(&agent),
+    );
+    if let Some(resume) = req.query_param("resume") {
+        url.push_str(&format!("&resume={}", crate::remote::percent_encode(&resume)));
+    }
+    if let Some(name) = req.query_param("name") {
+        url.push_str(&format!("&name={}", crate::remote::percent_encode(&name)));
+    }
+    match crate::remote::http_get_slow(&crate::remote::Peer::of(r), &url, Duration::from_secs(15)) {
+        Ok(body) => respond(sock, 200, "application/json", &body),
+        Err(e) => respond(sock, 502, "text/plain; charset=utf-8", e.as_bytes()),
+    }
+}
+
+/// Forward input to a terminal on another machine.
+fn relay_term_send(
+    sock: &mut TcpStream,
+    req: &Request,
+    r: &crate::config::Remote,
+    body: Vec<u8>,
+) -> io::Result<()> {
+    let mut url = format!("/api/term/send?token={}", r.token);
+    if let Some(id) = req.query_param("id") {
+        url.push_str(&format!("&id={}", crate::remote::percent_encode(&id)));
+    }
+    if let Some(name) = req.query_param("name") {
+        url.push_str(&format!("&name={}", crate::remote::percent_encode(&name)));
+    }
+    if let Some(from) = req.query_param("from") {
+        url.push_str(&format!("&from={}", crate::remote::percent_encode(&from)));
+    }
+    match crate::remote::http_put(&crate::remote::Peer::of(r), &url, &body) {
+        Ok(answer) => respond(sock, 200, "application/json", &answer),
+        Err(e) => respond(sock, 502, "text/plain; charset=utf-8", e.as_bytes()),
+    }
+}
+
+/// Forward a capture request to another machine.
+fn relay_term_capture(
+    sock: &mut TcpStream,
+    req: &Request,
+    r: &crate::config::Remote,
+) -> io::Result<()> {
+    let mut url = format!("/api/term/capture?token={}", r.token);
+    if let Some(id) = req.query_param("id") {
+        url.push_str(&format!("&id={}", crate::remote::percent_encode(&id)));
+    }
+    if let Some(name) = req.query_param("name") {
+        url.push_str(&format!("&name={}", crate::remote::percent_encode(&name)));
+    }
+    match crate::remote::http_get(&crate::remote::Peer::of(r), &url) {
+        Ok(body) => respond(sock, 200, "application/octet-stream", &body),
+        Err(e) => respond(sock, 502, "text/plain; charset=utf-8", e.as_bytes()),
+    }
 }
 
 /// The bytes after the head. `read_head` stops at the blank line, so whatever
