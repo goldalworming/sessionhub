@@ -116,7 +116,8 @@ fn print_help() {
     println!(
         "sessionhubd — keeps coding agent terminals alive independently of the UI\n\
          \n\
-         sessionhubd start [--foreground] [--no-open]  run; detaches and exits by default\n\
+         sessionhubd start [--foreground] [--no-open] [--no-wait]\n\
+         \x20                                 run; detaches and exits by default\n\
          sessionhubd stop                   stop the running daemon\n\
          sessionhubd restart [--force]      stop and start again, to load a new build\n\
          sessionhubd status                 port, live terminal count, uptime\n\
@@ -153,6 +154,7 @@ fn print_help() {
          \n\
          --home PATH   use a specific home directory (used by service mode)\n\
          --no-open     do not open a browser at the address it just printed\n\
+         --no-wait     close a double-clicked window straight away, not on Enter\n\
          --no-tray     do not put an icon in the tray or the menu bar\n"
     );
 }
@@ -165,6 +167,13 @@ fn print_help() {
 fn cmd_start(argv: &[String], home: Option<PathBuf>, open_browser: bool) -> ExitCode {
     let Some(cfg) = load_config() else { return ExitCode::FAILURE };
     let open = open_browser && !has_flag(argv, "--no-open");
+    // The installer's start-at-login shortcut opens a console like a
+    // double-click does, and nobody is there at login to press Enter.
+    let hold = || {
+        if !has_flag(argv, "--no-wait") {
+            hold_console_open();
+        }
+    };
 
     // Running it again is how someone who lost the address asks for it back —
     // most likely after double-clicking the exe and watching the window vanish
@@ -176,7 +185,7 @@ fn cmd_start(argv: &[String], home: Option<PathBuf>, open_browser: bool) -> Exit
         println!("  pid    : {}", s.pid);
         print_access(&cfg, s.port, open, argv, home.as_ref());
         println!("\nStop it with: sessionhubd stop");
-        hold_console_open();
+        hold();
         return ExitCode::SUCCESS;
     }
 
@@ -190,13 +199,13 @@ fn cmd_start(argv: &[String], home: Option<PathBuf>, open_browser: bool) -> Exit
             print_access(&cfg, port, open, argv, home.as_ref());
             println!("\nClose this terminal any time — the daemon keeps running.");
             println!("Stop it with: sessionhubd stop");
-            hold_console_open();
+            hold();
             ExitCode::SUCCESS
         }
         Err(e) => {
             eprintln!("Could not start the daemon: {e}");
             eprintln!("See {}", config::log_path().display());
-            hold_console_open();
+            hold();
             ExitCode::FAILURE
         }
     }
