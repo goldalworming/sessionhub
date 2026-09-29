@@ -177,18 +177,32 @@ impl Pty {
 /// only where it lives. Empty when the command is missing, refuses `--version`,
 /// or takes too long — a version is worth showing but never worth waiting on,
 /// and a blank line reads better than an excuse.
+/// Remembered against the binary's own timestamp: an agent that updates itself
+/// is re-asked on the next open, with nothing to invalidate by hand.
+type VersionCache = Mutex<HashMap<PathBuf, (Option<SystemTime>, String)>>;
+
+fn version_cache() -> &'static VersionCache {
+    static SEEN: OnceLock<VersionCache> = OnceLock::new();
+    SEEN.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// The version `agent_version` already knows, without asking the command —
+/// `None` when it would have to. Lets the settings panel go out at once with
+/// what is known and the rest marked as on its way.
+pub fn cached_agent_version(command: &str) -> Option<String> {
+    let Some(path) = resolve_command(command) else { return Some(String::new()) };
+    let stamp = std::fs::metadata(&path).and_then(|m| m.modified()).ok();
+    let map = version_cache().lock().ok()?;
+    map.get(&path).filter(|(when, _)| *when == stamp).map(|(_, v)| v.clone())
+}
+
 pub fn agent_version(command: &str) -> String {
     use std::io::Read;
     let Some(path) = resolve_command(command) else { return String::new() };
 
-    // Remembered against the binary's own timestamp. Asking two agents costs the
-    // better part of two seconds, and the settings panel cannot arrive until it
-    // is done — which was enough to make agent rows appear late and tests that
-    // waited a fixed moment for them fail. Keying on mtime means an agent that
-    // updates itself is re-asked on the next open, with nothing to invalidate by
-    // hand.
-    static SEEN: OnceLock<Mutex<HashMap<PathBuf, (Option<SystemTime>, String)>>> = OnceLock::new();
-    let cache = SEEN.get_or_init(|| Mutex::new(HashMap::new()));
+    // Asking costs up to seconds per agent — a cold `opencode --version` took
+    // three here — so the answer is kept (`version_cache`).
+    let cache = version_cache();
     let stamp = std::fs::metadata(&path).and_then(|m| m.modified()).ok();
     if let Ok(map) = cache.lock() {
         if let Some((when, version)) = map.get(&path) {
@@ -213,19 +227,23 @@ pub fn agent_version(command: &str) -> String {
         Err(_) => return remember(cache, path, stamp, String::new()),
     };
 
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+    // Generous, since nothing waits on it any more — the settings panel is sent
+    // without it and the version follows. A cold start of an npm-installed agent
+    // (node loading its whole package) came within a hair of the old 3 seconds.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
     let ok = loop {
         match child.try_wait() {
             Ok(Some(status)) => break status.success(),
             Ok(None) if std::time::Instant::now() < deadline => {
                 std::thread::sleep(std::time::Duration::from_millis(30));
             }
-            // Out of time, or it cannot be waited on. Either way this version is
-            // not worth the panel hanging for.
+            // Out of time, or it cannot be waited on. Not remembered: a slow first
+            // start says nothing about the next, and a blank kept against the
+            // binary's timestamp would stay blank until the agent next updated.
             _ => {
                 let _ = child.kill();
                 let _ = child.wait();
-                return remember(cache, path, stamp, String::new());
+                return String::new();
             }
         }
     };

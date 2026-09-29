@@ -228,6 +228,25 @@ export class Settings {
     this.paint();
   }
 
+  /// One agent's version, arriving after the panel it belongs to. Written into
+  /// its own label rather than repainting the panel, which would throw away
+  /// whatever is being typed into an open agent form at that moment.
+  setAgentVersion(msg) {
+    const a = this.agents.find((x) => x.name === msg.name);
+    if (!a) return;
+    a.version = msg.version || '';
+    a.version_pending = false;
+    for (const ver of this.el.querySelectorAll('.aver')) {
+      if (ver.dataset.agent !== msg.name) continue;
+      if (!a.version) {
+        ver.remove();
+        continue;
+      }
+      ver.classList.remove('loading');
+      ver.textContent = a.version;
+    }
+  }
+
   /// The forwarding settings, from the config message or on their own after one
   /// of them changed.
   setCloudflare(info, repaint = true) {
@@ -1645,10 +1664,13 @@ export class Settings {
 
     // What is installed, beside where it is. An Update button with no version
     // next to it asks you to press it to find out what you already have.
-    if (a.enabled && a.resolved && a.version) {
+    // Still being asked for, it holds a "loading…" place; `setAgentVersion`
+    // fills it in when the answer comes.
+    if (a.enabled && a.resolved && (a.version || a.version_pending)) {
       const ver = document.createElement('span');
-      ver.className = 'aver';
-      ver.textContent = a.version;
+      ver.className = 'aver' + (a.version_pending ? ' loading' : '');
+      ver.dataset.agent = a.name;
+      ver.textContent = a.version_pending ? 'loading…' : a.version;
       ver.title = `${a.command} --version`;
       head.appendChild(ver);
     }

@@ -129,6 +129,7 @@ export class Conn {
         mem: 'onMem',
         load: 'onLoad',
         config: 'onConfig',
+        agent_version: 'onAgentVersion',
         dropped: 'onDropped',
         dir: 'onDir',
         tree: 'onTree',

@@ -1474,6 +1474,7 @@ function sidebarCtx() {
     killTerminal,
     forkSession,
     closeDrawerIfNarrow,
+    copyPath,
     // A project's own icon, on the machine the sidebar is showing. `v` is its
     // modified time: the daemon lets that exact URL be cached for good.
     iconUrl: (icon) => {
@@ -3112,6 +3113,7 @@ conn.on.onError = (msg, m) => {
 };
 
 conn.on.onConfig = (msg) => settings.update(msg);
+conn.on.onAgentVersion = (msg) => settings.setAgentVersion(msg);
 
 conn.on.onCloudflare = (msg, m) => {
   // Only for the machine on screen: an answer from a background machine must

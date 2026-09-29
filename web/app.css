@@ -998,6 +998,10 @@ html, body {
   color: var(--muted);
   white-space: nowrap;
 }
+/* Asked for after the panel went out; a slow breath says it is coming. */
+.aver.loading { font-style: italic; animation: averwait 1.2s ease-in-out infinite alternate; }
+@keyframes averwait { from { opacity: 0.35; } to { opacity: 0.9; } }
+@media (prefers-reduced-motion: reduce) { .aver.loading { animation: none; } }
 .abtn.aupdate {
   flex: 0 0 auto;
   font: inherit;

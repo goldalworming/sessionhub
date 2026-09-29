@@ -491,6 +491,12 @@ pub enum ServerMsg {
         path: String,
         modified_ms: u64,
     },
+    /// One agent's version, for an `AgentInfo` that went out with
+    /// `version_pending` — empty when it could not be had.
+    AgentVersion {
+        name: String,
+        version: String,
+    },
     Config {
         agents: Vec<AgentInfo>,
         config_path: String,
@@ -718,6 +724,11 @@ pub struct AgentInfo {
     /// What `<command> --version` printed, when it could be asked. Shown so the
     /// panel says which build is installed rather than only where it is.
     pub version: String,
+    /// The version is still being asked for; it follows in `AgentVersion`.
+    /// The panel is sent without waiting on it — a cold `--version` of an
+    /// npm-installed agent takes seconds, and every other setting was stuck
+    /// behind it.
+    pub version_pending: bool,
     /// `false` for agents rebuilt every time the daemon starts, where removing
     /// one would only appear to work until the next restart.
     pub removable: bool,

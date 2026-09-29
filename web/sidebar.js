@@ -655,6 +655,12 @@ function projectNode(ctx, entry, liveSession, searching) {
   }
 
   const marked = ctx.bookmarks.has(p.path);
+  const toggleMark = () => {
+    if (marked) ctx.bookmarks.delete(p.path);
+    else ctx.bookmarks.add(p.path);
+    ctx.saveBookmarks();
+    ctx.rerender();
+  };
   const makeStar = (extra = '') => {
     const star = el('span', 'star' + (marked ? ' on' : '') + extra);
     star.innerHTML =
@@ -665,10 +671,7 @@ function projectNode(ctx, entry, liveSession, searching) {
     star.title = marked ? 'Remove from focus' : 'Mark as focus';
     star.onclick = (e) => {
       e.stopPropagation();
-      if (marked) ctx.bookmarks.delete(p.path);
-      else ctx.bookmarks.add(p.path);
-      ctx.saveBookmarks();
-      ctx.rerender();
+      toggleMark();
     };
     return star;
   };
@@ -692,6 +695,14 @@ function projectNode(ctx, entry, liveSession, searching) {
   row.appendChild(actions);
 
   row.onclick = () => ctx.focusProject(p.path);
+  // Right-click, or a long press on a phone: the row's buttons in one place,
+  // with Copy path, which has no button of its own.
+  ctx.bindMenu(row, () => [
+    { label: 'Copy path', run: () => ctx.copyPath(p.path) },
+    { label: marked ? 'Remove bookmark' : 'Bookmark', run: toggleMark },
+    { sep: true },
+    ...startMenu(ctx, p),
+  ]);
   wrap.appendChild(row);
 
   if (!expanded) return wrap;

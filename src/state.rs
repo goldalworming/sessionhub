@@ -542,34 +542,42 @@ pub fn run(cfg: Config, rx: Receiver<Cmd>, tx: Sender<Cmd>, registry_cfg: Sender
                     std::thread::spawn(move || {
                         let live: std::collections::HashMap<String, usize> =
                             live.into_iter().collect();
+                        // Versions not yet known, asked for after the panel has
+                        // gone out rather than before: a cold `--version` of an
+                        // npm-installed agent takes seconds, and everything else
+                        // in the panel used to wait behind it.
+                        let mut ask: Vec<(String, String)> = Vec::new();
                         let list: Vec<AgentInfo> = agents
                             .into_iter()
-                            .map(|(name, a)| AgentInfo {
-                                resolved: crate::pty::resolve_command(&a.command)
-                                    .map(|p| p.display().to_string()),
-                                is_terminal: a.resume_args.is_empty(),
-                                fork_args: a.fork_args.unwrap_or_default(),
-                                update_args: a.update_args.unwrap_or_default(),
-                                picker_args: a.picker_args.unwrap_or_default(),
-                                // Asked here, on the thread that already resolves
-                                // each command on PATH, because it costs a process
-                                // spawn and the actor must not wait for it.
-                                //
+                            .map(|(name, a)| {
                                 // Never for a shell: `resume_args` empty means
                                 // this is a plain shell, and `cmd.exe --version`
                                 // has no answer to give — it waits for input.
-                                version: if a.resume_args.is_empty() {
-                                    String::new()
+                                let known = if a.resume_args.is_empty() {
+                                    Some(String::new())
                                 } else {
-                                    crate::pty::agent_version(&a.command)
-                                },
-                                removable: name != crate::config::TERMINAL_AGENT,
-                                live: live.get(&name).copied().unwrap_or(0),
-                                name,
-                                command: a.command,
-                                args: a.args,
-                                resume_args: a.resume_args,
-                                enabled: a.enabled,
+                                    crate::pty::cached_agent_version(&a.command)
+                                };
+                                if known.is_none() {
+                                    ask.push((name.clone(), a.command.clone()));
+                                }
+                                AgentInfo {
+                                    resolved: crate::pty::resolve_command(&a.command)
+                                        .map(|p| p.display().to_string()),
+                                    is_terminal: a.resume_args.is_empty(),
+                                    fork_args: a.fork_args.unwrap_or_default(),
+                                    update_args: a.update_args.unwrap_or_default(),
+                                    picker_args: a.picker_args.unwrap_or_default(),
+                                    version_pending: known.is_none(),
+                                    version: known.unwrap_or_default(),
+                                    removable: name != crate::config::TERMINAL_AGENT,
+                                    live: live.get(&name).copied().unwrap_or(0),
+                                    name,
+                                    command: a.command,
+                                    args: a.args,
+                                    resume_args: a.resume_args,
+                                    enabled: a.enabled,
+                                }
                             })
                             .collect();
                         let shells = crate::config::shell_presets()
@@ -632,6 +640,18 @@ pub fn run(cfg: Config, rx: Receiver<Cmd>, tx: Sender<Cmd>, registry_cfg: Sender
                         };
                         if let Ok(text) = serde_json::to_string(&msg) {
                             let _ = out.try_send(Out::Text(text));
+                        }
+                        // All at once, each sent the moment it answers: the
+                        // slowest one sets the wait, not the sum of them.
+                        for (name, command) in ask {
+                            let out = out.clone();
+                            std::thread::spawn(move || {
+                                let version = crate::pty::agent_version(&command);
+                                let msg = ServerMsg::AgentVersion { name, version };
+                                if let Ok(text) = serde_json::to_string(&msg) {
+                                    let _ = out.try_send(Out::Text(text));
+                                }
+                            });
                         }
                     });
                 }
