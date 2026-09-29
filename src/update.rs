@@ -508,6 +508,23 @@ mod tests {
     }
 
     #[test]
+    fn an_installer_beside_the_binary_is_never_taken_for_it() {
+        // Listed first on purpose: the match takes the first name that fits,
+        // so a setup.exe or .dmg that fit the suffix would be swapped in over
+        // the running daemon.
+        let body = br#"{"tag_name":"v0.0.2","assets":[
+            {"name":"sessionhub-0.0.2-windows-x86_64-setup.exe","browser_download_url":"https://example.invalid/setup"},
+            {"name":"sessionhub-0.0.2-macos-arm64.dmg","browser_download_url":"https://example.invalid/dmg"},
+            {"name":"sessionhub-0.0.2-macos-arm64.app.zip","browser_download_url":"https://example.invalid/zip"},
+            {"name":"sessionhubd-0.0.2-windows-x86_64.exe","browser_download_url":"https://example.invalid/win"},
+            {"name":"sessionhubd-0.0.2-macos-arm64","browser_download_url":"https://example.invalid/mac"}]}"#;
+        let win = parse_release(body, "windows-x86_64.exe").unwrap();
+        assert_eq!(win.asset_url.as_deref(), Some("https://example.invalid/win"));
+        let mac = parse_release(body, "macos-arm64").unwrap();
+        assert_eq!(mac.asset_url.as_deref(), Some("https://example.invalid/mac"));
+    }
+
+    #[test]
     fn a_release_without_a_build_for_us_says_so_rather_than_guessing() {
         // Offering the wrong architecture would install something that cannot
         // run, and the daemon would be gone with no way back through the UI.

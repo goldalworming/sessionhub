@@ -31,6 +31,10 @@ OUT="$(cd "$OUT" && here)"
 SETUP="$OUT/sessionhub-$VERSION-windows-x86_64-setup.exe"
 HERE="$(cd "$(dirname "$0")" && here)"
 
-makensis -V2 -DVERSION="$VERSION" -DBINARY="$BIN" -DOUTFILE="$SETUP" "$HERE/sessionhub.nsi"
+# And with backslashes: makensis.exe's `File` finds nothing at a path written
+# with forward slashes. Elsewhere (no `pwd -W`) they are left as they are.
+win() { if pwd -W >/dev/null 2>&1; then printf '%s' "$1" | tr / '\\'; else printf '%s' "$1"; fi; }
+
+makensis -V2 -DVERSION="$VERSION" -DBINARY="$(win "$BIN")" -DOUTFILE="$(win "$SETUP")" "$HERE/sessionhub.nsi"
 
 echo "built $SETUP ($(wc -c < "$SETUP" | tr -d ' ') bytes)"

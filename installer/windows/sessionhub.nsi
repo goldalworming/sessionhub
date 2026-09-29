@@ -45,7 +45,9 @@ RequestExecutionLevel user
 !define PUBLISHER "goldalworming"
 !define URL       "https://github.com/goldalworming/sessionhub"
 !define UNINST    "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APP}"
-!define ICON      "../../assets/sessionhub.ico"
+; Backslashes: makensis.exe's `File` finds nothing at a path written with
+; forward slashes, and makensis on Linux reads backslashes just as well.
+!define ICON      "..\..\assets\sessionhub.ico"
 
 Name "${APP}"
 OutFile "${OUTFILE}"
@@ -92,25 +94,32 @@ VIAddVersionKey "LegalCopyright"  "${PUBLISHER}"
 
 ; A running daemon or tray icon holds the exe open, and Windows will not
 ; overwrite or delete a file in use. `stop` ends the daemon cleanly (it takes
-; its terminals with it); the tray has no stop of its own, so it is killed.
+; its terminals with it); the tray has no stop of its own, so it is killed —
+; only a process running THIS folder's exe. `taskkill /IM` would match the
+; name alone and take down every sessionhubd.exe the user runs: a portable
+; copy, a development build, and the live terminals under each.
 !macro StopRunning
   ${If} ${FileExists} "$INSTDIR\${EXE}"
     DetailPrint "Stopping a running sessionhub…"
     nsExec::Exec '"$INSTDIR\${EXE}" stop'
     Pop $0
   ${EndIf}
-  nsExec::Exec 'taskkill /F /IM ${EXE}'
+  nsExec::Exec `powershell -NoProfile -ExecutionPolicy Bypass -Command "\
+    Get-Process sessionhubd -ErrorAction SilentlyContinue | \
+    Where-Object { $$_.Path -eq '$INSTDIR\${EXE}' } | Stop-Process -Force"`
   Pop $0
   Sleep 500
 !macroend
 
 ; The user PATH lives in HKCU\Environment and is routinely longer than NSIS's
 ; 1024-character strings, so PowerShell edits it rather than ReadRegStr.
+; `@(...)` around the filter: with one entry left it yields a lone string, and
+; `+=` then glued the new folder straight onto it — one broken PATH entry.
 !macro EditUserPath VERB DIR
   nsExec::Exec `powershell -NoProfile -ExecutionPolicy Bypass -Command "\
     $$d = '${DIR}'; \
     $$p = [Environment]::GetEnvironmentVariable('Path', 'User'); \
-    $$parts = @(); if ($$p) { $$parts = $$p.Split(';') | Where-Object { $$_ -and ($$_.TrimEnd('\') -ne $$d.TrimEnd('\')) } }; \
+    $$parts = @(); if ($$p) { $$parts = @($$p.Split(';') | Where-Object { $$_ -and ($$_.TrimEnd('\') -ne $$d.TrimEnd('\')) }) }; \
     if ('${VERB}' -eq 'add') { $$parts += $$d }; \
     [Environment]::SetEnvironmentVariable('Path', ($$parts -join ';'), 'User')"`
   Pop $0
