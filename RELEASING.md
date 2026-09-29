@@ -92,9 +92,13 @@ There is no CI. Nothing here needs a runner.
      install`; remove that first with `sessionhubd uninstall`.
 
    - **macOS .dmg**, on the Mac, from the same inputs as step 5 (it runs
-     `make-app.sh` itself):
+     `make-app.sh` itself). It opens on the usual drag-to-Applications
+     window; Finder writes that layout, so someone has to be logged in on
+     the Mac, and no volume named `sessionhub <version>` may be mounted
+     there. `put_to_mac.py` does not create folders:
 
-         python ../put_to_mac.py installer/macos/make-dmg.sh data/code/installer/macos/make-dmg.sh assets/make-app.sh data/code/assets/make-app.sh
+         python ../mac.py 'mkdir -p ~/data/code/installer/macos ~/data/code/assets'
+         python ../put_to_mac.py installer/macos/make-dmg.sh data/code/installer/macos/make-dmg.sh installer/macos/background.png data/code/installer/macos/background.png installer/macos/background@2x.png data/code/installer/macos/background@2x.png assets/make-app.sh data/code/assets/make-app.sh
          python ../mac.py 'cd ~/data/code && sh installer/macos/make-dmg.sh $HOME/data/code/sessionhubd/target/release/sessionhubd $HOME/data/code/sessionhub.icns <version> $HOME/data/code/appbuild'
          python ../fetch_from_mac.py data/code/appbuild/sessionhub-<version>-macos-arm64.dmg <local path>
 
