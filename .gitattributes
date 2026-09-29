@@ -1,3 +1,7 @@
 # One repo, two OSes (this source also lives on a Mac): store LF, let each
 # checkout do what its platform likes.
 * text=auto
+
+# Shell scripts run under Git Bash on Windows too, and `sh` there chokes on a
+# carriage return at the end of each line.
+*.sh text eol=lf

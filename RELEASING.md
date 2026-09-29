@@ -76,12 +76,34 @@ There is no CI. Nothing here needs a runner.
        python ../mac.py 'cd ~/data/code && sh make-app.sh $HOME/data/code/sessionhubd/target/release/sessionhubd $HOME/data/code/sessionhub.icns <version> $HOME/data/code/appbuild'
        python ../fetch_from_mac.py data/code/appbuild/sessionhub-<version>-macos-arm64.app.zip <local path>
 
-6. **The frontend bundle**, when `web/` moved since the last release. Raise
+6. **The installers** — optional; the plain binaries above stay what the
+   updater uses, and an installed copy keeps updating itself from them.
+
+   - **Windows setup.exe**, with NSIS 3 (`apt install nsis` works too — it
+     cross-builds from Linux):
+
+         sh installer/windows/build-installer.sh <sessionhubd.exe> <version> <out dir>
+
+     It installs per-user into `%LOCALAPPDATA%\Programs\sessionhub` with no
+     administrator prompt — a folder the self-updater can still write to —
+     and offers Start menu and desktop shortcuts, start at login, and adding
+     the folder to the user PATH. Uninstalling asks before deleting
+     `~/.sessionhub`. It does not touch a service made by `sessionhubd
+     install`; remove that first with `sessionhubd uninstall`.
+
+   - **macOS .dmg**, on the Mac, from the same inputs as step 5 (it runs
+     `make-app.sh` itself):
+
+         python ../put_to_mac.py installer/macos/make-dmg.sh data/code/installer/macos/make-dmg.sh assets/make-app.sh data/code/assets/make-app.sh
+         python ../mac.py 'cd ~/data/code && sh installer/macos/make-dmg.sh $HOME/data/code/sessionhubd/target/release/sessionhubd $HOME/data/code/sessionhub.icns <version> $HOME/data/code/appbuild'
+         python ../fetch_from_mac.py data/code/appbuild/sessionhub-<version>-macos-arm64.dmg <local path>
+
+7. **The frontend bundle**, when `web/` moved since the last release. Raise
    `version` in `web/version.json` first:
 
        sessionhubd bundle-web sessionhub-web-<web version>.shweb
 
-7. **Create the release**, then upload:
+8. **Create the release**, then upload:
 
        python ../create_release.py v<version> <full commit sha> "<title>" <notes.md>
        python ../upload_asset.py <file> <asset name>
@@ -96,6 +118,8 @@ Parsed by the updater (`src/update.rs`), so they must be exact:
 | `sessionhubd-<version>-macos-arm64` | likewise, on the Mac |
 | `sessionhubd-<version>-linux-x86_64` | likewise, on Linux — the static musl build |
 | `sessionhub-<version>-macos-arm64.app.zip` | beside the binary, never instead of it — the updater matches the suffix `macos-arm64` and cannot swap a zip into place |
+| `sessionhub-<version>-windows-x86_64-setup.exe` | the NSIS installer — ends in `-setup.exe`, so the updater never mistakes it for the binary |
+| `sessionhub-<version>-macos-arm64.dmg` | the disk image; `.dmg` keeps it clear of the `macos-arm64` suffix likewise |
 | `sessionhub-web-<web version>.shweb` | installs from Settings, no restart |
 
 **One `.shweb` per release.** Two leaves the updater choosing between them, so
