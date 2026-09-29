@@ -10,7 +10,7 @@
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 
-use crate::proto::{DirEntry, DirList};
+use crate::proto::{Crumb, DirEntry, DirList};
 
 /// Directories longer than this are not sent whole. Folders with tens of
 /// thousands of children exist in the real world, and one giant message would
@@ -204,6 +204,82 @@ fn roots() -> Vec<DirEntry> {
     out
 }
 
+/// The file browser's sidebar shortcuts: standard user folders, then every
+/// drive/volume mounted on this machine. Computed fresh on each request —
+/// cheap enough (a few dozen `stat`s at most) that caching would only add a
+/// staleness bug for a drive plugged in after the page loaded.
+pub fn shortcuts() -> (Vec<Crumb>, Vec<Crumb>) {
+    (places(), drives())
+}
+
+/// Home, then the standard folders that actually exist. Not every folder
+/// exists on every machine — a fresh Linux desktop often has no Music or
+/// Videos — so each one is checked rather than assumed, the same reasoning
+/// as `roots()` only offering Home when it is really there.
+fn places() -> Vec<Crumb> {
+    let home = crate::config::home();
+    let mut out = Vec::new();
+    if home.is_dir() {
+        out.push(Crumb { name: "Home".into(), path: home.to_string_lossy().into_owned() });
+    }
+    let mut folders = vec!["Desktop", "Documents", "Downloads", "Pictures", "Music"];
+    // The one folder whose real name differs by OS — every other name here is
+    // shared by Windows, macOS, and Linux alike.
+    folders.push(if cfg!(target_os = "macos") { "Movies" } else { "Videos" });
+    for folder in folders {
+        let p = home.join(folder);
+        if p.is_dir() {
+            out.push(Crumb { name: folder.into(), path: p.to_string_lossy().into_owned() });
+        }
+    }
+    out
+}
+
+/// Every drive or volume mounted on this machine — "Storage" in the sidebar.
+/// Windows: every letter that answers. macOS: `/Volumes`, which lists the
+/// boot drive too (as a symlink to `/`, under its real label — confirmed
+/// against a real Mac, not assumed). Linux has no one convention, so both of
+/// the common mount points are checked.
+fn drives() -> Vec<Crumb> {
+    let mut out = Vec::new();
+    if cfg!(windows) {
+        for c in 'A'..='Z' {
+            let p = format!("{c}:\\");
+            if fs::metadata(&p).is_ok() {
+                out.push(Crumb { name: format!("{c}:"), path: p });
+            }
+        }
+    } else if cfg!(target_os = "macos") {
+        if let Ok(rd) = fs::read_dir("/Volumes") {
+            for e in rd.flatten() {
+                let path = e.path();
+                if fs::metadata(&path).map(|m| m.is_dir()).unwrap_or(false) {
+                    out.push(Crumb {
+                        name: e.file_name().to_string_lossy().into_owned(),
+                        path: path.to_string_lossy().into_owned(),
+                    });
+                }
+            }
+        }
+        out.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+    } else {
+        out.push(Crumb { name: "/".into(), path: "/".into() });
+        for base in ["/media", "/mnt"] {
+            let Ok(rd) = fs::read_dir(base) else { continue };
+            for e in rd.flatten() {
+                let path = e.path();
+                if fs::metadata(&path).map(|m| m.is_dir()).unwrap_or(false) {
+                    out.push(Crumb {
+                        name: e.file_name().to_string_lossy().into_owned(),
+                        path: path.to_string_lossy().into_owned(),
+                    });
+                }
+            }
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -297,5 +373,34 @@ mod tests {
         // The comparison has to ignore case: Windows writes the same drive and
         // folder with different spellings.
         assert!(me.is_some_and(|e| e.is_project), "project yang sudah ada harus ditandai");
+    }
+
+    #[test]
+    fn shortcuts_always_include_home() {
+        let (places, _) = shortcuts();
+        assert!(places.iter().any(|c| c.name == "Home" && c.path == crate::config::home().to_string_lossy()));
+    }
+
+    #[test]
+    fn shortcuts_never_list_a_folder_that_does_not_exist() {
+        // Whatever came back, each one really is a folder on this machine —
+        // never a dead link for a Music/Videos folder a fresh account lacks.
+        let (places, drives) = shortcuts();
+        for c in places.iter().chain(drives.iter()) {
+            assert!(std::path::Path::new(&c.path).is_dir(), "{} ({}) is not a real folder", c.name, c.path);
+        }
+    }
+
+    #[test]
+    fn windows_drives_include_the_one_this_test_runs_from() {
+        if cfg!(windows) {
+            let (_, drives) = shortcuts();
+            let here = std::env::current_dir().unwrap();
+            let letter = here.to_string_lossy().chars().next().unwrap().to_ascii_uppercase();
+            assert!(
+                drives.iter().any(|c| c.name == format!("{letter}:")),
+                "{letter}: should be among {drives:?}"
+            );
+        }
     }
 }

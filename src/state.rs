@@ -2,7 +2,7 @@
 //! Every other thread talks to it over a channel; no shared state is held
 //! while writing to a socket.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -28,6 +28,12 @@ pub const CLIENT_QUEUE: usize = 256;
 
 /// How much output history is kept per terminal for replay on attach.
 pub const RING_CAP: usize = 2 * 1024 * 1024;
+
+/// Limits for `Cmd::TermSpawn`'s per-terminal environment — generous for a
+/// handful of account/config-dir variables, bounded so a script gone wrong
+/// cannot hand the PTY an unbounded environment block.
+const MAX_ENV_VARS: usize = 32;
+const MAX_ENV_VALUE_LEN: usize = 4096;
 
 pub enum Cmd {
     ClientUp { id: ClientId, tx: Sender<Out>, rx: Receiver<Out> },
@@ -77,6 +83,10 @@ pub enum Cmd {
         agent: String,
         resume: Option<String>,
         name: Option<String>,
+        /// Extra environment for this terminal alone, layered on top of
+        /// `[agents.<name>.env]` — see `validate_env` for what is allowed in
+        /// here. Empty for every caller except a script that asked for it.
+        env: BTreeMap<String, String>,
         reply: Sender<Result<u32, (String, String)>>,
     },
     /// Write bytes into a terminal by id or by its in-memory name — the exact
@@ -119,6 +129,46 @@ fn resolve_target(terminals: &HashMap<u32, Terminal>, target: &TermTarget) -> Re
             Ok(first.id)
         }
     }
+}
+
+/// The daemon is the authoritative gate for `Cmd::TermSpawn`'s `env` — a
+/// script could be talking through a relay to a machine whose CLI never
+/// validated anything, so refusing here is what actually stops a bad
+/// variable from reaching a child process. Checked before `spawn_terminal`
+/// is called at all: a partly-applied environment is worse than no terminal.
+fn validate_env(env: &BTreeMap<String, String>) -> Result<(), String> {
+    if env.len() > MAX_ENV_VARS {
+        return Err(format!("too many --env variables ({}, max {MAX_ENV_VARS})", env.len()));
+    }
+    for (name, value) in env {
+        let mut chars = name.chars();
+        let starts_ok = chars.next().is_some_and(|c| c.is_ascii_alphabetic() || c == '_');
+        let rest_ok = chars.all(|c| c.is_ascii_alphanumeric() || c == '_');
+        if !starts_ok || !rest_ok {
+            return Err(format!(
+                "'{name}' is not a valid environment variable name (letters, digits, _ only, cannot start with a digit)"
+            ));
+        }
+        if value.len() > MAX_ENV_VALUE_LEN {
+            return Err(format!("'{name}' is too long (max {MAX_ENV_VALUE_LEN} bytes)"));
+        }
+        if value.contains('\0') {
+            return Err(format!("'{name}' contains a NUL byte"));
+        }
+    }
+    Ok(())
+}
+
+/// `extra_env` is empty for every caller except a script that asked for it
+/// (see `Cmd::TermSpawn`) — applied last, same reasoning as why the agent's
+/// own `env` already overrides TERM/COLORTERM in `Pty::spawn`.
+fn merged_env(
+    agent_env: &BTreeMap<String, String>,
+    extra_env: &BTreeMap<String, String>,
+) -> BTreeMap<String, String> {
+    let mut env = agent_env.clone();
+    env.extend(extra_env.iter().map(|(k, v)| (k.clone(), v.clone())));
+    env
 }
 
 /// `Terminal` as the wire wants it — the one place that mapping happens, used
@@ -266,7 +316,8 @@ pub fn run(cfg: Config, rx: Receiver<Cmd>, tx: Sender<Cmd>, registry_cfg: Sender
     // the shell first speaks, not when somebody looks — see `Cmd::Pty`.
     for saved in cfg.saved.clone().iter().filter(|s| s.autostart) {
         match spawn_terminal(
-            &cfg, next_term, next_run, &saved.project, &saved.agent, None, false, 80, 24, &tx,
+            &cfg, next_term, next_run, &saved.project, &saved.agent, None, false, 80, 24,
+            &BTreeMap::new(), &tx,
         ) {
             Ok(mut term) => {
                 let tid = term.id;
@@ -324,7 +375,8 @@ pub fn run(cfg: Config, rx: Receiver<Cmd>, tx: Sender<Cmd>, registry_cfg: Sender
                     let (cols, rows) = sane_size(cols, rows);
                     let resumed = resume.is_some();
                     match spawn_terminal(
-                        &cfg, next_term, next_run, &project, &agent, resume, pick, cols, rows, &tx,
+                        &cfg, next_term, next_run, &project, &agent, resume, pick, cols, rows,
+                        &BTreeMap::new(), &tx,
                     ) {
                         Ok(mut term) => {
                             let tid = term.id;
@@ -850,6 +902,7 @@ pub fn run(cfg: Config, rx: Receiver<Cmd>, tx: Sender<Cmd>, registry_cfg: Sender
                     if !projects.iter().any(|p| p.path.eq_ignore_ascii_case(&path)) {
                         projects.push(ProjectInfo {
                             name: crate::registry::project_name(&path),
+                            icon: crate::registry::project_icon(&path),
                             path: path.clone(),
                             exists: true,
                             sessions: Vec::new(),
@@ -869,6 +922,17 @@ pub fn run(cfg: Config, rx: Receiver<Cmd>, tx: Sender<Cmd>, registry_cfg: Sender
                             Ok(t) => ServerMsg::Tree(t),
                             Err(e) => ServerMsg::Error { code: "tree_failed".into(), message: e },
                         };
+                        if let Ok(text) = serde_json::to_string(&msg) {
+                            let _ = out.try_send(Out::Text(text));
+                        }
+                    });
+                }
+
+                ClientMsg::Shortcuts => {
+                    let Some(out) = clients.get(&id).map(|c| c.tx.clone()) else { continue };
+                    std::thread::spawn(move || {
+                        let (places, drives) = crate::browse::shortcuts();
+                        let msg = ServerMsg::Shortcuts { places, drives, os: std::env::consts::OS };
                         if let Ok(text) = serde_json::to_string(&msg) {
                             let _ = out.try_send(Out::Text(text));
                         }
@@ -1674,7 +1738,10 @@ pub fn run(cfg: Config, rx: Receiver<Cmd>, tx: Sender<Cmd>, registry_cfg: Sender
                     // Home, not a project: updating a toolchain is not work on
                     // anyone's repository, and it must not litter one.
                     let cwd = crate::config::home().display().to_string();
-                    match build_terminal(&cfg, next_term, next_run, &cwd, &name, args, None, cols, rows, &tx) {
+                    match build_terminal(
+                        &cfg, next_term, next_run, &cwd, &name, args, None, cols, rows,
+                        &BTreeMap::new(), &tx,
+                    ) {
                         Ok(mut term) => {
                             let tid = term.id;
                             term.viewers.insert(id, (cols, rows));
@@ -1724,7 +1791,8 @@ pub fn run(cfg: Config, rx: Receiver<Cmd>, tx: Sender<Cmd>, registry_cfg: Sender
                     });
 
                     match spawn_terminal(
-                        &cfg, tid, next_run, &project, &agent, session, false, cols, rows, &tx,
+                        &cfg, tid, next_run, &project, &agent, session, false, cols, rows,
+                        &BTreeMap::new(), &tx,
                     ) {
                         Ok(mut fresh) => {
                             // Everything that made this tab itself is carried
@@ -2124,6 +2192,7 @@ pub fn run(cfg: Config, rx: Receiver<Cmd>, tx: Sender<Cmd>, registry_cfg: Sender
                         if !projects.iter().any(|p| same_path(&p.path, &entry.project)) {
                             projects.push(ProjectInfo {
                                 name: crate::registry::project_name(&entry.project),
+                                icon: crate::registry::project_icon(&entry.project),
                                 path: entry.project.clone(),
                                 exists: true,
                                 sessions: Vec::new(),
@@ -2232,7 +2301,7 @@ pub fn run(cfg: Config, rx: Receiver<Cmd>, tx: Sender<Cmd>, registry_cfg: Sender
 
                     match spawn_terminal(
                         &cfg, next_term, next_run, &saved.project, &saved.agent, None, false,
-                        cols, rows, &tx,
+                        cols, rows, &BTreeMap::new(), &tx,
                     ) {
                         Ok(mut term) => {
                             let tid = term.id;
@@ -2441,7 +2510,15 @@ pub fn run(cfg: Config, rx: Receiver<Cmd>, tx: Sender<Cmd>, registry_cfg: Sender
                 let _ = reply.send(list);
             }
 
-            Cmd::TermSpawn { project, agent, resume, name, reply } => {
+            Cmd::TermSpawn { project, agent, resume, name, env, reply } => {
+                // Checked before anything else touches `terminals` or the
+                // PTY: a bad variable name must refuse the whole spawn, not
+                // start the terminal and then leave it running without the
+                // env it was asked for.
+                if let Err(message) = validate_env(&env) {
+                    let _ = reply.send(Err(("bad_env".into(), message)));
+                    continue;
+                }
                 // Global, not per-project: a script names a terminal to find
                 // it again by that name alone, the same way it would use an
                 // id — a second live terminal quietly answering to the same
@@ -2458,7 +2535,8 @@ pub fn run(cfg: Config, rx: Receiver<Cmd>, tx: Sender<Cmd>, registry_cfg: Sender
                 let resumed = resume.is_some();
                 let (cols, rows) = sane_size(80, 24);
                 match spawn_terminal(
-                    &cfg, next_term, next_run, &project, &agent, resume, false, cols, rows, &tx,
+                    &cfg, next_term, next_run, &project, &agent, resume, false, cols, rows,
+                    &env, &tx,
                 ) {
                     Ok(mut term) => {
                         let tid = term.id;
@@ -2475,6 +2553,9 @@ pub fn run(cfg: Config, rx: Receiver<Cmd>, tx: Sender<Cmd>, registry_cfg: Sender
                             serde_json::json!({
                                 "terminal": tid, "agent": agent, "resume": resumed, "pick": false,
                                 "live": terminals.values().filter(|t| t.alive).count(),
+                                // A count only — the names travel no further
+                                // than the local log, and the values never do.
+                                "env_count": env.len(),
                             }),
                         );
                         send_state(&cfg, &projects, &agent_names, scanned, &clients, &terminals, &dismissed, None);
@@ -2565,7 +2646,7 @@ fn fork_terminal(
         )
         .collect();
 
-    build_terminal(cfg, id, run, project, agent, args, None, cols, rows, tx)
+    build_terminal(cfg, id, run, project, agent, args, None, cols, rows, &BTreeMap::new(), tx)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2579,6 +2660,7 @@ fn spawn_terminal(
     pick: bool,
     cols: u16,
     rows: u16,
+    extra_env: &BTreeMap<String, String>,
     tx: &Sender<Cmd>,
 ) -> Result<Terminal, (String, String)> {
     let agent_cfg = cfg.agents.get(agent).ok_or_else(|| {
@@ -2616,7 +2698,7 @@ fn spawn_terminal(
     // whatever this particular start is about.
     let args: Vec<String> = agent_cfg.args.iter().cloned().chain(rest).collect();
 
-    build_terminal(cfg, id, run, project, agent, args, resume, cols, rows, tx)
+    build_terminal(cfg, id, run, project, agent, args, resume, cols, rows, extra_env, tx)
 }
 
 /// Look at what is running under each live terminal, and what it is called.
@@ -2692,6 +2774,7 @@ fn build_terminal(
     session_id: Option<String>,
     cols: u16,
     rows: u16,
+    extra_env: &BTreeMap<String, String>,
     tx: &Sender<Cmd>,
 ) -> Result<Terminal, (String, String)> {
     let agent_cfg = cfg.agents.get(agent).ok_or_else(|| {
@@ -2708,13 +2791,14 @@ fn build_terminal(
     // `opencode -s` resumes a session in whatever directory the command ran in.
     let cwd = PathBuf::from(project);
     let sink_tx = tx.clone();
+    let env = merged_env(&agent_cfg.env, extra_env);
     let pty = Pty::spawn(
         &agent_cfg.command,
         &args,
         &cwd,
         cols,
         rows,
-        &agent_cfg.env,
+        &env,
         Arc::new(move |event| {
             let _ = sink_tx.send(Cmd::Pty { term: id, run, event });
         }),
@@ -3369,6 +3453,80 @@ mod tests {
         terminals.insert(2, b);
         let err = resolve_target(&terminals, &TermTarget::Name("dup".into())).unwrap_err();
         assert!(err.contains("more than one"), "{err}");
+    }
+
+    #[test]
+    fn validate_env_accepts_ordinary_names() {
+        let env = BTreeMap::from([
+            ("CLAUDE_CONFIG_DIR".to_string(), "/home/x/.acc/clientx".to_string()),
+            ("_leading_underscore".to_string(), "ok".to_string()),
+            ("A1".to_string(), "ok".to_string()),
+        ]);
+        assert!(validate_env(&env).is_ok());
+    }
+
+    #[test]
+    fn validate_env_rejects_a_name_starting_with_a_digit() {
+        let env = BTreeMap::from([("1FOO".to_string(), "bar".to_string())]);
+        let err = validate_env(&env).unwrap_err();
+        assert!(err.contains("1FOO"), "{err}");
+    }
+
+    #[test]
+    fn validate_env_rejects_odd_characters_in_a_name() {
+        for bad in ["FOO-BAR", "FOO BAR", "FOO=BAR", ""] {
+            let env = BTreeMap::from([(bad.to_string(), "x".to_string())]);
+            assert!(validate_env(&env).is_err(), "{bad:?} should have been rejected");
+        }
+    }
+
+    #[test]
+    fn validate_env_rejects_a_nul_byte_in_a_value() {
+        let env = BTreeMap::from([("FOO".to_string(), "ba\0r".to_string())]);
+        let err = validate_env(&env).unwrap_err();
+        assert!(err.contains("NUL"), "{err}");
+    }
+
+    #[test]
+    fn validate_env_rejects_a_value_over_the_length_limit() {
+        let env = BTreeMap::from([("FOO".to_string(), "x".repeat(MAX_ENV_VALUE_LEN + 1))]);
+        assert!(validate_env(&env).is_err());
+        let ok = BTreeMap::from([("FOO".to_string(), "x".repeat(MAX_ENV_VALUE_LEN))]);
+        assert!(validate_env(&ok).is_ok());
+    }
+
+    #[test]
+    fn validate_env_rejects_too_many_variables() {
+        let env: BTreeMap<String, String> =
+            (0..MAX_ENV_VARS + 1).map(|i| (format!("V{i}"), "x".to_string())).collect();
+        let err = validate_env(&env).unwrap_err();
+        assert!(err.contains("too many"), "{err}");
+    }
+
+    /// The override order the feature exists for: a terminal's own `--env`
+    /// wins over `[agents.<name>.env]`, which in turn already overrides
+    /// TERM/COLORTERM inside `Pty::spawn` (unit-tested there separately) —
+    /// this proves the merge direction `build_terminal` performs.
+    #[test]
+    fn per_terminal_env_overrides_the_agents_own_env() {
+        let mut agent_env = BTreeMap::new();
+        agent_env.insert("CLAUDE_CONFIG_DIR".to_string(), "/home/me/.claude".to_string());
+        agent_env.insert("UNRELATED".to_string(), "kept".to_string());
+        let extra_env = BTreeMap::from([(
+            "CLAUDE_CONFIG_DIR".to_string(),
+            "/home/me/.acc/clientx".to_string(),
+        )]);
+
+        let merged = merged_env(&agent_env, &extra_env);
+
+        assert_eq!(merged.get("CLAUDE_CONFIG_DIR").map(String::as_str), Some("/home/me/.acc/clientx"));
+        assert_eq!(merged.get("UNRELATED").map(String::as_str), Some("kept"));
+    }
+
+    #[test]
+    fn merged_env_is_unchanged_when_there_is_no_extra_env() {
+        let agent_env = BTreeMap::from([("FOO".to_string(), "bar".to_string())]);
+        assert_eq!(merged_env(&agent_env, &BTreeMap::new()), agent_env);
     }
 
     #[test]

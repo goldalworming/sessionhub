@@ -128,7 +128,7 @@ sessionhubd capture builder
 
 ```text
 sessionhubd ls [--json]
-sessionhubd spawn --agent NAME --project DIR [--resume ID] [--name LABEL] [--on MACHINE]
+sessionhubd spawn --agent NAME --project DIR [--resume ID] [--name LABEL] [--env NAME=VALUE | --env NAME]... [--on MACHINE]
 sessionhubd send <id-or-name> [TEXT | --file PATH] [--enter] [--key NAME]... [--from LABEL] [--raw] [--verify] [--on MACHINE]
 sessionhubd capture <id-or-name> [--lines N] [--raw] [--json] [--on MACHINE]
 sessionhubd wait <id-or-name> [--idle S] [--timeout S] [--on MACHINE]
@@ -157,6 +157,24 @@ All five commands accept `--on MACHINE` to run against a paired machine
 instead, under the same **Remote commands** setting and logging as `run`.
 `ls` and `capture` are read-only and work even when Remote commands is off;
 `spawn` and `send` are refused with a 403 when it is off, the same as `run`.
+
+Repeat `--env` on `spawn` to give that one terminal its own environment —
+useful for running two accounts of the same agent side by side (a client's
+`CLAUDE_CONFIG_DIR` in one terminal, yours in another), and layered on top of
+whatever `[agents.<name>.env]` already sets in `config.toml`. `--env NAME`
+without a value reads it from the shell running `spawn` itself, so a token
+never has to be typed on the command line, where any other process on the
+machine can read it back out of the process list:
+
+```text
+CLAUDE_CODE_OAUTH_TOKEN=... sessionhubd spawn --agent claude --project ~/code/demo \
+  --name clientx-builder --env CLAUDE_CONFIG_DIR=$HOME/.acc/clientx --env CLAUDE_CODE_OAUTH_TOKEN
+```
+
+`--on MACHINE` works with `--env` too — `spawn` checks the machine that will
+actually run the terminal (local, or the far end of `--on`) understands
+`--env` before sending anything, and refuses with a clear message rather than
+starting a terminal silently missing the environment it was asked for.
 
 ## Known limits
 

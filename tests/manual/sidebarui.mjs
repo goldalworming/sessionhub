@@ -187,7 +187,7 @@ await ev(`
   (() => {
     const rows = [...document.querySelectorAll('#tree .project')];
     const t = rows.find(r => r.querySelector('.pname')?.textContent === ${JSON.stringify(big.name)});
-    if (t && t.querySelector('.twist')?.textContent === '\\u25b8') t.querySelector('.twist').click();
+    if (t && !t.querySelector('.twist')?.classList.contains('open')) t.querySelector('.twist').click();
   })()
 `);
 await sleep(700);

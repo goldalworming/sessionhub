@@ -12,6 +12,7 @@ import { Drops, quotePath } from './drop.js';
 import { Picker } from './picker.js';
 import { MachineBar } from './machines.js';
 import { SidePanel } from './sidepanel.js';
+import { FileBrowser } from './filebrowser.js';
 import { renderTree as renderSidebar, agentIcon, agentSlot } from './sidebar.js';
 import { KeyBar } from './keybar.js';
 import { LinksSheet, bufferLines, scanLinks } from './links.js';
@@ -247,6 +248,7 @@ let memById = new Map();
 /// check it without tripping over the TDZ.
 let sidePanel = null;
 let picker = null;
+let fileBrowser = null;
 /// The project chosen by hand, through a project name in the sidebar or the
 /// picker in the Explorer. The last action wins: choosing a project beats the
 /// active terminal, and switching terminals takes it back.
@@ -472,8 +474,11 @@ function makeTerminal(id) {
     fontFamily: cs.getPropertyValue('--mono').trim() || 'ui-monospace, monospace',
     fontSize: 13,
     lineHeight: 1.4,
-    cursorBlink: true,
-    scrollback: 5000,
+    // Only the terminal actually on screen blinks its cursor — `show()` turns
+    // this on for it and off for whichever one it replaces. A blink timer per
+    // background terminal is CPU nobody is watching.
+    cursorBlink: false,
+    scrollback: 2000,
     allowProposedApi: true,
     theme: xtermTheme(),
   });
@@ -591,6 +596,7 @@ function attach(id) {
 function show(id) {
   if (id !== activeId && activeId !== null) tele.track('switch', { how: showHow });
   showHow = 'other';
+  const prev = activeId !== id ? terms.get(activeId) : null;
   activeId = id;
   clearDone(id);
   const grid = layout === 'grid';
@@ -600,8 +606,17 @@ function show(id) {
   // height, so computing first and showing it after would cut off the last row.
   keybar.sync(activeId !== null && terms.size > 0);
   paintGrid();
+  if (prev) prev.term.options.cursorBlink = false;
   const entry = terms.get(id);
   if (entry) {
+    entry.term.options.cursorBlink = true;
+    // Output was skipped while this was hidden (see `onOutput`) — the screen
+    // is behind, so ask the daemon for a fresh replay instead of one line at
+    // a time from wherever it left off.
+    if (entry.stale) {
+      entry.stale = false;
+      requestReplay(id, entry);
+    }
     entry.term.focus();
     if (grid) for (const tid of terms.keys()) pushSize(tid);
     else pushSize(id);
@@ -1459,6 +1474,13 @@ function sidebarCtx() {
     killTerminal,
     forkSession,
     closeDrawerIfNarrow,
+    // A project's own icon, on the machine the sidebar is showing. `v` is its
+    // modified time: the daemon lets that exact URL be cached for good.
+    iconUrl: (icon) => {
+      const via = current?.via;
+      return `/api/file?path=${encodeURIComponent(icon.path)}&v=${icon.modified_ms}` +
+        (via ? `&via=${encodeURIComponent(via)}` : '');
+    },
     rerender: renderTree,
   };
 }
@@ -2089,7 +2111,7 @@ uploadInput.onchange = () => {
 document.body.appendChild(uploadInput);
 
 document.addEventListener('paste', (e) => {
-  if (activeId === null || palette.open || settings.open || ask.open || picker.open) return;
+  if (activeId === null || palette.open || settings.open || ask.open || picker.open || fileBrowser.open) return;
   drops.paste(e);
 });
 
@@ -2338,7 +2360,7 @@ function runShortcut(action) {
 
 document.addEventListener('keydown', (ev) => {
   // Floating layers handle their own keys.
-  if (palette.open || settings.open || ask.open || picker.open) return;
+  if (palette.open || settings.open || ask.open || picker.open || fileBrowser.open) return;
   // Ctrl+K, Ctrl+B and Ctrl+W mean something of their own inside a code editor.
   // While focus is in the right panel, let that panel own them.
   if (el.side.contains(ev.target)) return;
@@ -2407,6 +2429,32 @@ el.filterClear.onclick = () => {
 
 // --------------------------------------------------------------- file panel
 
+// Quoted only when it needs to be — the same rule a dropped file already
+// follows, so what lands on the clipboard can be pasted straight into a
+// terminal without a path with spaces in it falling apart. Shared by the
+// tree and the standalone file-finder modal below — copying a path is the
+// same act wherever the click came from.
+async function copyPath(path) {
+  const text = quotePath(path);
+  if (canCopy() && (await copyText(text))) {
+    toasts.show({ key: 'copy-path', title: 'Path copied', note: text });
+    return;
+  }
+  // Over plain HTTP no browser will hand the page a clipboard, so there is
+  // nothing to try and nothing to wait for: the path goes straight into a
+  // field, already selected, and one long-press copies it. Telling someone to
+  // copy it by hand is only advice if the thing to copy is somewhere they can
+  // reach.
+  await ask.show({
+    title: 'Copy path',
+    value: text,
+    note: window.isSecureContext
+      ? 'This browser would not let the page reach the clipboard. The path is selected — copy it from here.'
+      : 'Copying straight to the clipboard needs https, and this page is on plain http. The path is selected — copy it from here.',
+    ok: 'Done',
+  });
+}
+
 // One panel, one tab bar: `Files` is always there, and each file adds its own
 // tab. Monaco is only downloaded when the first file is opened.
 sidePanel = new SidePanel(el.side, {
@@ -2420,28 +2468,19 @@ sidePanel = new SidePanel(el.side, {
   // Where `..` goes. The path was named by the listing it came from, so this
   // side never has to work out what the folder above is called.
   up: (path, name) => browseTo(path, name),
-  // Quoted only when it needs to be — the same rule a dropped file already
-  // follows, so what lands on the clipboard can be pasted straight into a
-  // terminal without a path with spaces in it falling apart.
-  copy: async (path) => {
-    const text = quotePath(path);
-    if (canCopy() && (await copyText(text))) {
-      toasts.show({ key: 'copy-path', title: 'Path copied', note: text });
-      return;
-    }
-    // Over plain HTTP no browser will hand the page a clipboard, so there is
-    // nothing to try and nothing to wait for: the path goes straight into a
-    // field, already selected, and one long-press copies it. Telling someone to
-    // copy it by hand is only advice if the thing to copy is somewhere they can
-    // reach.
-    await ask.show({
-      title: 'Copy path',
-      value: text,
-      note: window.isSecureContext
-        ? 'This browser would not let the page reach the clipboard. The path is selected — copy it from here.'
-        : 'Copying straight to the clipboard needs https, and this page is on plain http. The path is selected — copy it from here.',
-      ok: 'Done',
-    });
+  copy: copyPath,
+  // The tree's own header button — opens the file-finder modal, a separate
+  // dialog over anything the tree is showing rather than replacing it (see
+  // `fileBrowser` below): looking for a photo in Downloads while a project
+  // stays open must not lose the place the tree had scrolled to.
+  browse: () => {
+    fileBrowser.show();
+    // Always the project's own folder to start from — the same place the
+    // old in-panel toggle always landed on. Places/Storage are one click
+    // away from there for anywhere else; nothing is remembered between
+    // opens on purpose, since each opening is its own quick errand.
+    const root = treeRoot();
+    if (root) fileBrowser.open(root.path);
   },
   projects: () => state.projects.filter((p) => p.exists).map((p) => ({ path: p.path, name: p.name })),
   // Picking a project is the way back from wherever `..` led.
@@ -2510,7 +2549,11 @@ const sidePane = {
   },
 };
 
-conn.on.onTree = (msg) => sidePanel.tree.update(msg);
+conn.on.onTree = (msg) => {
+  sidePanel.tree.update(msg);
+  fileBrowser.update(msg);
+};
+conn.on.onShortcuts = (msg) => fileBrowser.updateShortcuts(msg);
 conn.on.onMade = (msg) => sidePanel.tree.made(msg);
 conn.on.onFile = (msg) => sidePanel.openFile(msg);
 conn.on.onSaved = (msg) => {
@@ -2633,6 +2676,33 @@ picker = new Picker(document.body, {
     else spawn(path, agent, null, !!o.pick);
     picker.close();
   },
+});
+
+// A separate dialog over the current project, not another mode the Explorer
+// switches into — finding a photo in Downloads while a project's tree stays
+// open must never lose the place that tree had scrolled to. Same `Tree`/
+// `Shortcuts` messages the tree itself uses, just answered here too.
+fileBrowser = new FileBrowser(document.body, {
+  list: (path) => conn.send({ t: 'tree', path }),
+  shortcuts: () => conn.send({ t: 'shortcuts' }),
+  // Opening a file is what "I found it" usually means — closing behind it
+  // puts the editor back in view without an extra click.
+  open: (path) => {
+    conn.send({ t: 'open_file', path });
+    fileBrowser.close();
+  },
+  // The New project dialog, already on this folder: its "Open here…" offers
+  // New and Resume per agent, and adds the folder to the sidebar on the way.
+  openProject: (path) => {
+    picker.openAt(path);
+    closeDrawerIfNarrow();
+  },
+  copy: copyPath,
+  menu: (x, y, items) => openMenu(x, y, items),
+  // Which machine's files these are. The thumbnails fetch over HTTP rather
+  // than the socket, so — same reasoning as the editor's own image viewer —
+  // it is the one thing that has to be told rather than inferred.
+  via: () => current?.via || '',
 });
 
 // The folder whose appearance in the sidebar is being waited for. The registry
@@ -2783,24 +2853,62 @@ let pendingReattach = false;
 /// to whatever opened next on the machine you had moved to.
 let showNextAttach = null;
 
-function reattachAll() {
+/// Remove any view for a terminal the server no longer lists as alive, and if
+/// that was the one on screen, move to another live one or the empty stage.
+/// Called on every state update, not only a reconnect — a terminal that goes
+/// away (killed, replaced by a fresh one under the same project) must not
+/// leave a stale, silently-blank pane behind in a tab whose socket never
+/// dropped, since nothing else would tell that tab to move on.
+function pruneDeadTerminals() {
   const alive = new Set(state.terminals.filter((t) => t.alive).map((t) => t.id));
+  let activeDied = false;
   for (const id of [...terms.keys()]) {
-    if (!alive.has(id)) {
-      // The terminal really is gone; close its view quietly.
-      const entry = terms.get(id);
-      entry.term.dispose();
-      entry.host.remove();
-      terms.delete(id);
-      if (activeId === id) activeId = null;
+    if (alive.has(id)) continue;
+    // The terminal really is gone; close its view quietly.
+    const entry = terms.get(id);
+    entry.term.dispose();
+    entry.host.remove();
+    terms.delete(id);
+    if (activeId === id) {
+      activeId = null;
+      activeDied = true;
+    }
+  }
+  if (!activeDied) return;
+  if (terms.size) {
+    show([...terms.keys()][0]);
+  } else {
+    paintGrid();
+    el.empty.hidden = false;
+    renderTabs();
+    renderTree();
+  }
+}
+
+/// Ask the daemon to resend a terminal's ring buffer from scratch: after a
+/// reconnect, or when a terminal that went stale while hidden (see `onOutput`)
+/// comes back on screen. Either way the local screen is behind, and a full
+/// replay is simpler and cheaper than tracking exactly what was missed.
+function requestReplay(id, entry) {
+  entry.term.reset();
+  entry.awaitingReplay = true;
+  const size = entry.lastSize || { cols: 80, rows: 24 };
+  // The server resends the ring buffer, so the screen comes back whole by itself.
+  conn.send({ t: 'attach', id, cols: size.cols, rows: size.rows });
+}
+
+function reattachAll() {
+  pruneDeadTerminals();
+  for (const [id, entry] of terms) {
+    if (entry.host.hidden) {
+      // Nothing on screen for it right now, same as any other hidden terminal
+      // (see `onOutput`) — `show()` asks for the replay whenever it actually
+      // comes back on screen, instead of paying for one now that would just
+      // be thrown away unread.
+      entry.stale = true;
       continue;
     }
-    const entry = terms.get(id);
-    entry.term.reset();
-    entry.awaitingReplay = true;
-    const size = entry.lastSize || { cols: 80, rows: 24 };
-    // The server resends the ring buffer, so the screen comes back whole by itself.
-    conn.send({ t: 'attach', id, cols: size.cols, rows: size.rows });
+    requestReplay(id, entry);
   }
   if (activeId === null && terms.size) activeId = [...terms.keys()][0];
   el.empty.hidden = terms.size > 0;
@@ -2830,6 +2938,8 @@ conn.on.onState = (msg, m) => {
   if (pendingReattach) {
     pendingReattach = false;
     reattachAll();
+  } else {
+    pruneDeadTerminals();
   }
   renderTree();
   renderTabs();
@@ -2903,14 +3013,22 @@ conn.on.onSize = (msg, m) => {
 };
 
 conn.on.onOutput = (id, data, m) => {
-  // Output for background machines is still written into their xterm: coming
-  // back has to show what happened while away, not a frozen screen.
   const entry = m.terms.get(id);
   if (entry) {
-    entry.term.write(data);
-    if (entry.openedAt && !entry.firstOut) {
-      entry.firstOut = true;
-      tele.track('first_output', { ms: Math.round(performance.now() - entry.openedAt) });
+    // Nobody is looking at this terminal's host right now — skip the parse
+    // and paint, which is most of the cost of a busy terminal, and let `show`
+    // ask for a full replay instead when it comes back on screen. A terminal
+    // whose host is not hidden — the one on screen now, and, for a background
+    // machine, whichever of its terminals was on screen when last visited —
+    // is still written live, so coming back never shows a frozen screen.
+    if (entry.host.hidden) {
+      entry.stale = true;
+    } else {
+      entry.term.write(data);
+      if (entry.openedAt && !entry.firstOut) {
+        entry.firstOut = true;
+        tele.track('first_output', { ms: Math.round(performance.now() - entry.openedAt) });
+      }
     }
     // Activity bookkeeping — but never for the attach replay: the whole ring
     // buffer arrives as one burst, and old output must not read as a job that

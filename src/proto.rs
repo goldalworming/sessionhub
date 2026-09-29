@@ -106,6 +106,10 @@ pub enum ClientMsg {
     Tree {
         path: String,
     },
+    /// The file browser's sidebar shortcuts (Places/Favorites, Storage) —
+    /// fixed for the life of a page, so asked for once when Browser mode
+    /// first opens, not on every folder navigated into.
+    Shortcuts,
     /// Open one file in the editor.
     OpenFile {
         path: String,
@@ -457,6 +461,20 @@ pub enum ServerMsg {
     Dir(DirList),
     /// One folder's contents for the file panel.
     Tree(TreeList),
+    /// The file browser's sidebar shortcuts — answers `ClientMsg::Shortcuts`.
+    Shortcuts {
+        /// Home plus the standard folders that actually exist on this
+        /// machine (a Linux desktop often has no Music/Videos — left out
+        /// rather than shown as a dead link). "Places" on Windows/Linux,
+        /// "Favorites" on macOS; the client picks the label.
+        places: Vec<Crumb>,
+        /// Every drive/volume mounted on this machine.
+        drives: Vec<Crumb>,
+        /// `std::env::consts::OS` of the machine these folders are on — the
+        /// client draws Finder-style icons for "macos", Explorer-style
+        /// otherwise. The browser's own OS says nothing about a paired machine.
+        os: &'static str,
+    },
     /// What `make_entry` created. The panel then asks for the parent folder
     /// again and opens or expands what came back — rather than this message
     /// carrying a listing that the tree would have to merge by hand.
@@ -612,6 +630,19 @@ pub struct TreeList {
     /// panel can be pointed at another machine — and then it is *that* daemon,
     /// the one that answered this listing, whose age decides.
     pub can_make: bool,
+    /// The path from a drive root (or `/`) down to this folder, root first —
+    /// a clickable breadcrumb. Computed here, not split out of `path` on the
+    /// client: a browser guessing at `\` vs `/` would be using its own idea of
+    /// a separator against a daemon that may be on another operating system,
+    /// same reasoning as `parent` above.
+    pub crumbs: Vec<Crumb>,
+}
+
+/// One segment of a breadcrumb trail.
+#[derive(Debug, Clone, Serialize)]
+pub struct Crumb {
+    pub name: String,
+    pub path: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -622,6 +653,8 @@ pub struct FileEntry {
     /// Bytes; always 0 for folders — a folder's size means walking its contents,
     /// and that is exactly the work this panel avoids.
     pub size: u64,
+    /// Milliseconds since the epoch; 0 when the filesystem would not say.
+    pub modified_ms: u64,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -742,6 +775,18 @@ pub struct ProjectInfo {
     /// — its sessions can still be looked at.
     pub exists: bool,
     pub sessions: Vec<SessionInfo>,
+    /// The project's own app icon, when it has one (`registry::project_icon`)
+    /// — drawn in the sidebar in place of the folder.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub icon: Option<ProjectIcon>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ProjectIcon {
+    pub path: String,
+    /// Last modified, milliseconds — put in the icon's URL, so it can be
+    /// cached for good and still change the moment the file does.
+    pub modified_ms: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]

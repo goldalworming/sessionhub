@@ -30,6 +30,7 @@ mod webpack;
 mod update;
 mod telemetry;
 
+use std::collections::BTreeMap;
 use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::path::PathBuf;
@@ -134,7 +135,10 @@ fn print_help() {
          to reach it on a paired machine instead of this one:\n\
          sessionhubd ls [--json]             live terminals: id, name, agent, project, status\n\
          sessionhubd spawn --agent NAME --project DIR [--resume ID] [--name NAME]\n\
-         \x20                                 start one, prints its id\n\
+         \x20                                 [--env NAME=VALUE | --env NAME]…\n\
+         \x20                                 start one, prints its id — --env NAME (no\n\
+         \x20                                 value) reads this shell's own environment,\n\
+         \x20                                 so a secret is never typed on the command line\n\
          sessionhubd send <id-or-name> [--file PATH | TEXT] [--enter] [--key NAME]…\n\
          \x20                                 [--from LABEL] [--raw] [--verify]\n\
          \x20                                 text with no --file reads stdin\n\
@@ -1042,11 +1046,81 @@ fn cmd_ls(argv: &[String]) -> ExitCode {
     ExitCode::SUCCESS
 }
 
+/// Limits mirrored from `state::validate_env` — the daemon is the
+/// authoritative check (it may be a different machine entirely, over
+/// `--on`), this one is purely for fast local feedback before a round trip.
+const MAX_ENV_VARS: usize = 32;
+const MAX_ENV_VALUE_LEN: usize = 4096;
+
+/// `--env NAME=VALUE` (used as given) or `--env NAME` (pulled from this
+/// process's own environment) — repeatable. The bare-`NAME` form exists so a
+/// secret never has to be typed on the command line, where any other process
+/// on the machine can read it back out of the argument list.
+fn parse_env_flags(argv: &[String]) -> Result<BTreeMap<String, String>, String> {
+    let mut env = BTreeMap::new();
+    let mut i = 0;
+    while i < argv.len() {
+        if argv[i] == "--env" {
+            let spec = argv.get(i + 1).map(String::as_str).unwrap_or("");
+            let (name, value) = match spec.split_once('=') {
+                Some((n, v)) => (n.to_string(), v.to_string()),
+                None => {
+                    let Ok(v) = std::env::var(spec) else {
+                        return Err(format!(
+                            "--env {spec}: not set in this shell's environment"
+                        ));
+                    };
+                    (spec.to_string(), v)
+                }
+            };
+            let mut chars = name.chars();
+            let starts_ok = chars.next().is_some_and(|c| c.is_ascii_alphabetic() || c == '_');
+            let rest_ok = chars.all(|c| c.is_ascii_alphanumeric() || c == '_');
+            if name.is_empty() || !starts_ok || !rest_ok {
+                return Err(format!(
+                    "'{name}' is not a valid environment variable name (letters, digits, _ only, cannot start with a digit)"
+                ));
+            }
+            if value.len() > MAX_ENV_VALUE_LEN {
+                return Err(format!("'{name}' is too long (max {MAX_ENV_VALUE_LEN} bytes)"));
+            }
+            if value.contains('\0') {
+                return Err(format!("'{name}' contains a NUL byte"));
+            }
+            env.insert(name, value);
+            if env.len() > MAX_ENV_VARS {
+                return Err(format!("too many --env variables (max {MAX_ENV_VARS})"));
+            }
+        }
+        i += 1;
+    }
+    Ok(env)
+}
+
+/// Whether the daemon that will actually create the terminal — this machine,
+/// or `on` over `--on` — understands `--env`. Checked before `spawn` is ever
+/// sent: an older daemon would otherwise ignore the request body entirely
+/// and answer 200 having silently started the terminal without it.
+fn term_env_supported(port: u16, token: &str, on: Option<&str>) -> Result<bool, String> {
+    let mut target = format!("/api/status?token={}", remote::percent_encode(token));
+    if let Some(on) = on {
+        target.push_str(&format!("&via={}", remote::percent_encode(on)));
+    }
+    let (status, body) = daemon::ask(port, "GET", &target, &[], Duration::from_secs(10))?;
+    if status != 200 {
+        return Err(String::from_utf8_lossy(&body).trim().to_string());
+    }
+    let parsed: serde_json::Value =
+        serde_json::from_slice(&body).map_err(|_| "sessionhub sent an unreadable status".to_string())?;
+    Ok(parsed.get("term_env").and_then(|v| v.as_bool()).unwrap_or(false))
+}
+
 fn cmd_spawn(argv: &[String]) -> ExitCode {
     let (Some(project), Some(agent)) = (flag_value(argv, "--project"), flag_value(argv, "--agent"))
     else {
         eprintln!(
-            "Usage: sessionhubd spawn --agent NAME --project DIR [--resume ID] [--name NAME] [--on MACHINE]"
+            "Usage: sessionhubd spawn --agent NAME --project DIR [--resume ID] [--name NAME] \
+             [--env NAME=VALUE | --env NAME]… [--on MACHINE]"
         );
         return ExitCode::from(2);
     };
@@ -1058,7 +1132,28 @@ fn cmd_spawn(argv: &[String]) -> ExitCode {
         eprintln!("{project} is not a folder on this machine.");
         return ExitCode::FAILURE;
     }
+    let env = match parse_env_flags(argv) {
+        Ok(e) => e,
+        Err(msg) => {
+            eprintln!("{msg}");
+            return ExitCode::from(2);
+        }
+    };
     let Some((port, token)) = local_daemon() else { return ExitCode::FAILURE };
+    if !env.is_empty() {
+        match term_env_supported(port, &token, on.as_deref()) {
+            Ok(true) => {}
+            Ok(false) => {
+                let where_ = on.as_deref().unwrap_or("this machine");
+                eprintln!("sessionhub on {where_} does not support --env yet. Update it first.");
+                return ExitCode::FAILURE;
+            }
+            Err(e) => {
+                eprintln!("{e}");
+                return ExitCode::FAILURE;
+            }
+        }
+    }
     let mut target = format!(
         "/api/term/spawn?token={}&project={}&agent={}",
         remote::percent_encode(&token),
@@ -1074,7 +1169,15 @@ fn cmd_spawn(argv: &[String]) -> ExitCode {
     if let Some(on) = &on {
         target.push_str(&format!("&via={}", remote::percent_encode(on)));
     }
-    let (status, body) = match daemon::ask(port, "PUT", &target, &[], Duration::from_secs(20)) {
+    // Never in the query string above — env values are secrets, and a URL can
+    // end up in a log line or a proxy's own access log. Empty when `--env`
+    // was not used, so the request is byte-for-byte what it always was.
+    let body: Vec<u8> = if env.is_empty() {
+        Vec::new()
+    } else {
+        serde_json::json!({ "env": env }).to_string().into_bytes()
+    };
+    let (status, body) = match daemon::ask(port, "PUT", &target, &body, Duration::from_secs(20)) {
         Ok(v) => v,
         Err(e) => {
             eprintln!("{e}");
@@ -1411,10 +1514,10 @@ fn cmd_wait(argv: &[String]) -> ExitCode {
 /// included — it is global, so it can appear in front of these commands too, and
 /// leaving it out made its path look like the file being sent.
 fn positional(argv: &[String]) -> Vec<&String> {
-    const TAKES_VALUE: [&str; 15] = [
+    const TAKES_VALUE: [&str; 16] = [
         "--on", "--cwd", "--timeout", "--home", "--account", "--password",
         "--agent", "--project", "--resume", "--name", "--file", "--key", "--from", "--idle",
-        "--lines",
+        "--lines", "--env",
     ];
     let mut out = Vec::new();
     let mut skip = false;
@@ -1722,5 +1825,52 @@ mod tests {
     #[test]
     fn wrap_paste_brackets_the_text_unchanged() {
         assert_eq!(wrap_paste(b"line1\nline2"), b"\x1b[200~line1\nline2\x1b[201~".to_vec());
+    }
+
+    #[test]
+    fn parse_env_flags_reads_name_equals_value() {
+        let a = argv(&["spawn", "--env", "FOO=bar", "--env", "BAZ=qux"]);
+        let env = parse_env_flags(&a).unwrap();
+        assert_eq!(env.get("FOO").map(String::as_str), Some("bar"));
+        assert_eq!(env.get("BAZ").map(String::as_str), Some("qux"));
+    }
+
+    #[test]
+    fn parse_env_flags_reads_bare_name_from_this_process_environment() {
+        std::env::set_var("SESSIONHUBD_TEST_ENV_VAR", "secret-value");
+        let a = argv(&["spawn", "--env", "SESSIONHUBD_TEST_ENV_VAR"]);
+        let env = parse_env_flags(&a).unwrap();
+        std::env::remove_var("SESSIONHUBD_TEST_ENV_VAR");
+        assert_eq!(env.get("SESSIONHUBD_TEST_ENV_VAR").map(String::as_str), Some("secret-value"));
+    }
+
+    #[test]
+    fn parse_env_flags_errors_clearly_when_a_bare_name_is_not_set() {
+        let a = argv(&["spawn", "--env", "SESSIONHUBD_TEST_VAR_NOT_SET"]);
+        let err = parse_env_flags(&a).unwrap_err();
+        assert!(err.contains("SESSIONHUBD_TEST_VAR_NOT_SET"), "{err}");
+    }
+
+    #[test]
+    fn parse_env_flags_rejects_a_bad_name() {
+        let a = argv(&["spawn", "--env", "1FOO=bar"]);
+        assert!(parse_env_flags(&a).is_err());
+    }
+
+    #[test]
+    fn parse_env_flags_rejects_too_many_variables() {
+        let mut items = vec!["spawn".to_string()];
+        for i in 0..=MAX_ENV_VARS {
+            items.push("--env".to_string());
+            items.push(format!("V{i}=x"));
+        }
+        let a: Vec<String> = items;
+        assert!(parse_env_flags(&a).is_err());
+    }
+
+    #[test]
+    fn parse_env_flags_with_no_env_flags_is_empty() {
+        let a = argv(&["spawn", "--agent", "claude"]);
+        assert!(parse_env_flags(&a).unwrap().is_empty());
     }
 }

@@ -54,7 +54,11 @@ check(projects > 10, `the sidebar is filled with ${projects} projects`);
 await ev(`document.getElementById('collapse-all').click()`);
 await sleep(400);
 check(await ev(`document.querySelectorAll('.session').length === 0`), 'collapse all hides every session');
-check(await ev(`[...document.querySelectorAll('.twist')].every(t => t.textContent === '▸')`), 'every fold marker points to closed');
+// A project's marker is a folder (or its app icon), open while expanded.
+check(
+  await ev(`[...document.querySelectorAll('.twist')].every(t => t.classList.contains('picon') ? !t.classList.contains('open') : t.textContent === '▸')`),
+  'every fold marker points to closed',
+);
 check(await ev(`document.querySelectorAll('.project').length === ${projects}`), 'the projects themselves stay visible');
 
 await ev(`document.getElementById('expand-all').click()`);
@@ -85,11 +89,11 @@ await ev(`document.querySelector('.project .row .twist').click()`);
 await sleep(400);
 check(
   (await ev(`document.querySelectorAll('.project')[0].querySelectorAll('.session').length`)) === 0,
-  'it is the left arrow that folds it',
+  'it is the folder on the left that folds it',
 );
 check(
-  await ev(`document.querySelector('.project .row .twist').textContent === '\u25b8'`),
-  'the marker flips over with it',
+  await ev(`!document.querySelector('.project .row .twist').classList.contains('open')`),
+  'the folder closes with it',
 );
 await ev(`document.querySelector('.project .row .twist').click()`);
 await sleep(400);
@@ -234,7 +238,11 @@ check(
   await ev(`document.querySelectorAll('.pname')[0].textContent === ${JSON.stringify(nameToMark)}`),
   `the bookmarked project rises to the top ("${nameToMark}")`
 );
-check(await ev(`document.querySelectorAll('.star.on').length === 1`), 'the marker lights up and stays visible');
+check(await ev(`document.querySelectorAll('.ractions .star.on').length === 1`), 'the marker lights up');
+check(
+  await ev(`!!document.querySelectorAll('.project')[0].querySelector(':scope > .row > .star.rest.on')`),
+  'and a copy stays on the row at rest, outside the hover group',
+);
 
 const shape = await ev(`
   (() => {
@@ -265,10 +273,11 @@ check(
 // A second bookmark so that the group really is a group.
 await ev(`[...document.querySelectorAll('.project')].find(p => !p.querySelector('.star.on')).querySelector('.star').click()`);
 await sleep(400);
-check(await ev(`document.querySelectorAll('.star.on').length === 2`), 'more than one project can be bookmarked');
+check(await ev(`document.querySelectorAll('.ractions .star.on').length === 2`), 'more than one project can be bookmarked');
 
-await ev(`document.querySelectorAll('.star.on')[0].click()`);
-await ev(`document.querySelectorAll('.star.on')[0].click()`);
+// Through the hover group — the one ＋ used to slide in on top of.
+await ev(`document.querySelectorAll('.ractions .star.on')[0].click()`);
+await ev(`document.querySelectorAll('.ractions .star.on')[0].click()`);
 await sleep(400);
 check(
   await ev(`[...document.querySelectorAll('.zlabel')].every(g => g.firstChild.textContent !== 'focused')`),

@@ -163,6 +163,19 @@ To override any of it, including bringing `NO_COLOR` back:
 NO_COLOR = "1"
 ```
 
+`sessionhubd spawn --env NAME=VALUE` sets environment for **one terminal**,
+layered on top of `[agents.<name>.env]` — a name in both wins from `--env`,
+same as `[agents.<name>.env]` already wins over TERM/COLORTERM above. It is
+how one `claude` terminal can run under a different account
+(`CLAUDE_CONFIG_DIR`, and on macOS also `CLAUDE_CODE_OAUTH_TOKEN`, since the
+Keychain credential does not follow a config dir on its own) while every
+other `claude` terminal on the same machine keeps using
+`[agents.claude.env]` unchanged. It is never written to `config.toml` — gone
+the moment that terminal is — and only reaches a terminal created by
+`sessionhubd spawn`; the browser's own *New* button and saved terminals are
+unaffected. See the README's [Scripted control](README.md#scripted-control)
+section for the command itself.
+
 ### Dropped files
 
 ```toml

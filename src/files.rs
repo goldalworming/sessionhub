@@ -9,7 +9,7 @@ use std::fs;
 use std::path::Path;
 use std::time::UNIX_EPOCH;
 
-use crate::proto::{FileBody, FileEntry, TreeList};
+use crate::proto::{Crumb, FileBody, FileEntry, TreeList};
 
 /// Directories with more entries than this are truncated. A real `node_modules`
 /// can hold tens of thousands; sending it whole only loads every layer with
@@ -44,11 +44,13 @@ pub fn list(path: &str) -> Result<TreeList, String> {
         let is_dir = ft.is_dir()
             || (ft.is_symlink() && fs::metadata(e.path()).map(|m| m.is_dir()).unwrap_or(false));
         let size = if is_dir { 0 } else { e.metadata().map(|m| m.len()).unwrap_or(0) };
+        let modified_ms = e.metadata().map(|m| modified_ms(&m)).unwrap_or(0);
         entries.push(FileEntry {
             name: e.file_name().to_string_lossy().into_owned(),
             path: e.path().to_string_lossy().into_owned(),
             is_dir,
             size,
+            modified_ms,
         });
     }
     entries.sort_by(|a, b| {
@@ -66,10 +68,24 @@ pub fn list(path: &str) -> Result<TreeList, String> {
             .map(|p| p.to_string_lossy().into_owned())
             .filter(|p| !p.is_empty()),
         path: dir.to_string_lossy().into_owned(),
+        crumbs: crumbs(&dir),
         entries,
         truncated,
         can_make: true,
     })
+}
+
+/// The breadcrumb trail from a drive root (or `/`) down to `dir`, root first.
+fn crumbs(dir: &Path) -> Vec<Crumb> {
+    let mut out: Vec<Crumb> = dir
+        .ancestors()
+        .map(|p| Crumb {
+            name: crate::browse::display_name(p),
+            path: p.to_string_lossy().into_owned(),
+        })
+        .collect();
+    out.reverse();
+    out
 }
 
 /// Read one file to show in the editor.
@@ -253,6 +269,31 @@ mod tests {
         let d = out.entries.iter().find(|e| e.name == "sub").unwrap();
         assert_eq!(f.size, 5);
         assert_eq!(d.size, 0);
+    }
+
+    #[test]
+    fn a_file_reports_when_it_was_last_modified() {
+        let dir = sandbox("mtime");
+        fs::write(dir.join("a.txt"), "x").unwrap();
+        let out = list(&dir.to_string_lossy()).unwrap();
+        let f = out.entries.iter().find(|e| e.name == "a.txt").unwrap();
+        assert!(f.modified_ms > 0, "a freshly written file must report a real timestamp");
+    }
+
+    /// The breadcrumb the panel renders as clickable segments. Computed here
+    /// rather than by the client splitting `path` on a guessed separator.
+    #[test]
+    fn crumbs_run_root_first_down_to_the_current_folder() {
+        let dir = sandbox("crumbs").join("a").join("b");
+        fs::create_dir_all(&dir).unwrap();
+        let out = list(&dir.to_string_lossy()).unwrap();
+        assert_eq!(out.crumbs.last().unwrap().path, out.path, "the last crumb is here");
+        assert_eq!(out.crumbs.last().unwrap().name, out.name);
+        // Root first: the top of the trail comes before everything under it.
+        let names: Vec<&str> = out.crumbs.iter().map(|c| c.name.as_str()).collect();
+        let ia = names.iter().position(|&n| n == "a");
+        let ib = names.iter().position(|&n| n == "b");
+        assert!(ia.is_some() && ib.is_some() && ia < ib, "{names:?}");
     }
 
     #[test]

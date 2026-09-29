@@ -18,7 +18,7 @@ use crossbeam_channel::{bounded, Sender};
 use tracing::{debug, info, warn};
 
 use crate::config::{self, Config};
-use crate::proto::{ProjectInfo, SessionInfo};
+use crate::proto::{ProjectIcon, ProjectInfo, SessionInfo};
 use crate::state::Cmd;
 
 /// Upper bound when reading a file head. A session file can be tens of MB —
@@ -941,6 +941,57 @@ pub fn project_name(path: &str) -> String {
     if name.is_empty() { path.to_string() } else { name.to_string() }
 }
 
+/// Where a project usually keeps its own app icon, most specific first.
+/// Relative to the project root; `/` works as a separator on every OS.
+const ICON_CANDIDATES: &[&str] = &[
+    "icon.png",
+    "icon.svg",
+    "icon.ico",
+    "app-icon.png",
+    "logo.svg",
+    "logo.png",
+    "favicon.svg",
+    "favicon.png",
+    "favicon.ico",
+    "src-tauri/icons/128x128.png",
+    "src-tauri/icons/icon.png",
+    "public/favicon.svg",
+    "public/favicon.png",
+    "public/favicon.ico",
+    "public/logo.svg",
+    "public/logo.png",
+    "public/icon.png",
+    "static/favicon.png",
+    "static/favicon.ico",
+    "app/favicon.ico",
+    "src/app/favicon.ico",
+    "assets/icon.png",
+    "assets/logo.png",
+    "build/icon.png",
+    "resources/icon.png",
+];
+
+/// Past this, an "icon" is a 1024px master or a screenshot, not something to
+/// fetch for a 16px spot in the sidebar — the folder is drawn instead.
+const ICON_MAX_BYTES: u64 = 256 * 1024;
+
+/// The project's own app icon, if it has one in a usual place: one `stat` per
+/// candidate, nothing read.
+pub fn project_icon(project: &str) -> Option<ProjectIcon> {
+    let root = Path::new(project);
+    ICON_CANDIDATES.iter().find_map(|rel| {
+        let p = root.join(rel);
+        let meta = std::fs::metadata(&p).ok()?;
+        if !meta.is_file() || meta.len() == 0 || meta.len() > ICON_MAX_BYTES {
+            return None;
+        }
+        Some(ProjectIcon {
+            path: p.to_string_lossy().into_owned(),
+            modified_ms: meta.modified().ok().and_then(to_epoch_ms).unwrap_or(0),
+        })
+    })
+}
+
 /// The project list = the manual list in the config merged with every unique cwd
 /// from the session files. A project whose directory is gone is marked, not
 /// removed.
@@ -972,9 +1023,11 @@ pub fn build_projects(config_projects: &[String], sessions: Vec<SessionRow>) -> 
         .map(|(path, mut rows)| {
             rows.sort_by(|a, b| b.updated_ms.cmp(&a.updated_ms).then(a.title.cmp(&b.title)));
             let newest = rows.first().map(|r| r.updated_ms).unwrap_or(0);
+            let exists = Path::new(&path).is_dir();
             (newest, ProjectInfo {
                 name: project_name(&path),
-                exists: Path::new(&path).is_dir(),
+                icon: if exists { project_icon(&path) } else { None },
+                exists,
                 sessions: rows
                     .into_iter()
                     .map(|r| SessionInfo {
@@ -1094,6 +1147,32 @@ mod tests {
             title: title.into(),
             updated_ms: ms,
         }
+    }
+
+    // ---------------------------------------------------------- icon
+
+    #[test]
+    fn a_project_icon_is_found_where_projects_keep_one() {
+        let root = std::env::temp_dir().join(format!("sh-icon-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("public")).unwrap();
+        let project = root.to_string_lossy().into_owned();
+
+        assert_eq!(project_icon(&project), None, "no icon anywhere: none");
+
+        std::fs::write(root.join("public/favicon.ico"), b"ico").unwrap();
+        let found = project_icon(&project).expect("a favicon under public/");
+        assert!(found.path.ends_with("favicon.ico"));
+        assert!(found.modified_ms > 0);
+
+        std::fs::write(root.join("icon.png"), b"png").unwrap();
+        assert!(project_icon(&project).unwrap().path.ends_with("icon.png"), "the root icon wins over a favicon");
+
+        // A 1024px master is not a sidebar icon: skipped for the next one.
+        std::fs::write(root.join("icon.png"), vec![0u8; ICON_MAX_BYTES as usize + 1]).unwrap();
+        assert!(project_icon(&project).unwrap().path.ends_with("favicon.ico"), "an oversized icon is passed over");
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     // ---------------------------------------------------------- time

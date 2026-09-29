@@ -3,7 +3,7 @@
 Environment: Windows 11 Pro 26200, no WSL. Rust 1.96.0, Node 24.19 (only for the
 test scripts), Chrome 151 headless over the DevTools Protocol.
 
-**329 unit tests** on Windows (`cargo test`; a couple more on unix, for the PATH
+**345 unit tests** on Windows (`cargo test`; a couple more on unix, for the PATH
 merging that only exists there) cover the ring buffer, size
 negotiation, backpressure, JSONL parsing, cwd resolution, time formatting, process
 tree summation, HTTP and token parsing, cloudflared URL extraction, agent name
@@ -14,9 +14,12 @@ yet, the path comparison rules that differ per system, release version compariso
 and asset picking for self-update, the shell-input tracker that decides when
 it can honestly name the command a terminal is running, ANSI/VT100 stripping for
 `capture`, resolving a scripted-control target by id or by its live name
-(including the ambiguous- and no-match cases), and the `sessionhubd`
+(including the ambiguous- and no-match cases), the `sessionhubd`
 `send`/`capture`/`wait` CLI's flag parsing, `--key` table, and old-daemon
-detection.
+detection, `spawn --env`'s validation (name/value/count/length, both on the
+daemon and the CLI's own fast-path check) and its override order against
+`[agents.<name>.env]`, and the file browser's breadcrumb trail
+(`Path::ancestors()`, root first, never split from a string on the client).
 
 Everything is green on **macOS 26.5.2 (arm64)** too — see
 [Cross-platform](#cross-platform).
@@ -685,6 +688,9 @@ Every test above runs natively on Windows 11. The PTY uses ConPTY through
 | `keybarui.mjs` | 20/20 | The key bar on a 390×844 phone screen: appearing only when there is a terminal, stuck to the bottom, every key ≥32px, the arrows calling up real shell history, a sticky Ctrl turning the next letter from the on-screen keyboard and then releasing itself, and no keys that are meaningless to a PTY |
 | `remoteui.mjs` | 31/31 | The machine tab bar in the browser: a paste dialog with no Connect button, the machine tab appearing on its own once connected, switching tabs swapping the entire window contents, remote-machine projects never leaking into the local machine's tab, terminals landing in their own machine's container, **the remote machine's token present in neither `localStorage` nor the DOM**, `✕` dropping it |
 | `termtest.mjs` | 16/16 | The scripted-control HTTP routes (`/api/term/ls\|spawn\|send\|capture`): a scripted `spawn` reaching an already-open WebSocket client as a normal `State` broadcast — proving it shows up live in the browser without the browser doing anything — a taken `name` refused rather than duplicated, `send`/`capture` round-tripping real bytes through a live PowerShell, an unknown name answered with 404, **Remote commands** off refusing `spawn`/`send` with 403 while `ls`/`capture` keep working, and a killed terminal turning up as `alive: false` |
+| `deadterm.mjs` | 8/8 | A terminal killed from an independent connection while a tab's own WebSocket stays open (no reconnect): the surviving terminal becomes active on its own, never a stale blank pane left showing the one that died |
+| `filebrowser.mjs` | 19/19 | The file panel's Browser mode: toggling to and from the tree, the breadcrumb (root-first, clicking an ancestor jumps straight there, not just one level up), `..`/back/forward, opening a file landing in the same editor tab strip the tree uses |
+| `envtest.mjs` | 12/12 | `sessionhubd spawn --env`, through the actual CLI (`execFileSync`, not raw HTTP): a terminal sees its own `--env`, a sibling with none does not, the bare `--env NAME` form reads the calling shell, a bad name or an unset bare name is refused with **no terminal created either way** (`ls` count unchanged), the secret value never reaches the daemon log while the variable name does, and **Remote commands** off refuses `spawn --env` exactly like plain `spawn` |
 
 ## Cross-platform
 
@@ -765,6 +771,19 @@ platform-aware `Path::components()`.
     only Windows has been run.
   - `--verify`'s reliability against an agent whose TUI does not echo input the way
     it was typed (some `ink`-based front ends do not echo at all).
+- **`spawn --env` with two real accounts of the same agent.** `envtest.mjs`
+  proves isolation, validation, the log never carrying a secret, and the
+  gate — all with the plain `terminal` agent, one process reading its own
+  `$env:`/`%…%`. Not yet run: two real Claude Code processes with different
+  `CLAUDE_CONFIG_DIR` (and on macOS, `CLAUDE_CODE_OAUTH_TOKEN`, since the
+  Keychain credential does not separate on its own) actually running side by
+  side and each reporting the right account.
+- **`spawn --env --on MACHINE` against a genuinely different computer.**
+  Verified against two daemons on one machine (separate `--home`, paired over
+  `[[remotes]]`) — the capability check through `?via=`, the relay carrying
+  the body, and the remote terminal getting the right environment all work
+  there, but real network latency, a slower link, and a `--on` target that is
+  actually a different OS have not been exercised.
 
 ## Findings that changed the design
 

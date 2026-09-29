@@ -115,6 +115,149 @@ const BY_NAME = {
   '.gitmodules': 'git',
 };
 
+/// Folders, drives and Places for the file finder, drawn the way the machine
+/// they live on draws them: Windows 11's amber folder and colourful Places
+/// pictures, or macOS's (Big Sur and later) light-blue folder and blue line
+/// glyphs. A 32-unit grid, not 16 like the badges above: a folder is shown
+/// at 16px in a row and 88px in the Thumbnail grid, and has to hold up at
+/// both.
+///
+/// Places are standalone glyphs — a monitor, an arrow, a page — not a folder
+/// with an emblem: that is what both navigation panes show, and at sidebar
+/// size an emblem inside a folder is a smudge.
+///
+/// `shi-w-<kind>` / `shi-m-<kind>`: `folder`, `drive`, or `p-<place>`.
+const MAC_INK = '#1f7fe0';
+const macLine = (d) =>
+  `<path d="${d}" fill="none" stroke="${MAC_INK}" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round"/>`;
+
+/// `[windows, mac]` per place. Windows Home is its user folder — plain
+/// amber folder, as Explorer shows it — so it has no entry of its own there.
+const PLACE_GLYPHS = {
+  home: [
+    null,
+    macLine('M4.5 15.5 16 5.5l11.5 10M8 12.6V26.5h16V12.6M13.5 26.5v-6.5h5v6.5'),
+  ],
+  desktop: [
+    '<rect x="2.5" y="4.5" width="27" height="19" rx="2.2" fill="#1a6fc9"/>' +
+      '<rect x="4.5" y="6.5" width="23" height="15" rx="1" fill="url(#shg-ws)"/>' +
+      '<path d="M16 23.5v4M10.5 28h11" stroke="#1a6fc9" stroke-width="2.4" stroke-linecap="round"/>',
+    `<rect x="3.5" y="5" width="25" height="17.5" rx="2.6" fill="none" stroke="${MAC_INK}" stroke-width="2.3"/>` +
+      macLine('M16 22.5v4.5M10.5 27.5h11'),
+  ],
+  documents: [
+    '<path d="M6.5 2.5h12.5l6.5 6.5v20.5h-19z" fill="#fff" stroke="#9aa8b8" stroke-width="1.2" stroke-linejoin="round"/>' +
+      '<path d="M19 2.5V9h6.5z" fill="#dbe4ee" stroke="#9aa8b8" stroke-width="1.2" stroke-linejoin="round"/>' +
+      '<path d="M10.5 14h11M10.5 18.5h11M10.5 23h7.5" stroke="#1a6fc9" stroke-width="1.8" stroke-linecap="round"/>',
+    macLine('M7.5 3.5h10l7 7v18h-17zM17.5 3.5v7h7M12 17h8M12 21.5h8'),
+  ],
+  downloads: [
+    '<path d="M16 3.5v18M8 14l8 8 8-8" fill="none" stroke="#17a34a" stroke-width="3.6" stroke-linecap="round" stroke-linejoin="round"/>' +
+      '<path d="M5.5 28h21" stroke="#17a34a" stroke-width="3.2" stroke-linecap="round"/>',
+    `<circle cx="16" cy="16" r="12.2" fill="none" stroke="${MAC_INK}" stroke-width="2.3"/>` +
+      macLine('M16 9.5v13M10.5 17.5l5.5 5.5 5.5-5.5'),
+  ],
+  music: [
+    '<circle cx="16" cy="16" r="13.5" fill="url(#shg-wm)"/>' +
+      '<path d="M13.5 21.5V10.2l7.6-2v10.6" fill="none" stroke="#fff" stroke-width="2.1" stroke-linejoin="round"/>' +
+      '<circle cx="11.4" cy="21.6" r="2.7" fill="#fff"/><circle cx="19" cy="19" r="2.7" fill="#fff"/>',
+    macLine('M12 23.5V8l13-3.2v15.4') +
+      `<circle cx="8.8" cy="23.6" r="3.4" fill="${MAC_INK}"/><circle cx="21.8" cy="20.3" r="3.4" fill="${MAC_INK}"/>`,
+  ],
+  pictures: [
+    '<rect x="2.5" y="4.5" width="27" height="23" rx="3" fill="#1a6fc9"/>' +
+      '<path d="M2.5 23l8-8.5 5.8 5.8 4.2-4.2 9 9.2v.2a3 3 0 0 1-3 2H5.5a3 3 0 0 1-3-3z" fill="#8fd6ff"/>' +
+      '<circle cx="22" cy="11" r="2.8" fill="#ffd54a"/>',
+    `<rect x="3.5" y="5.5" width="25" height="21" rx="2.8" fill="none" stroke="${MAC_INK}" stroke-width="2.3"/>` +
+      macLine('M4.5 23.5l7-7 5.5 5.5 3.5-3.5 7 7') +
+      `<circle cx="21.5" cy="11.8" r="2.4" fill="${MAC_INK}"/>`,
+  ],
+  videos: [
+    '<rect x="2.5" y="5" width="27" height="22" rx="3" fill="url(#shg-wv)"/>' +
+      '<path d="M2.5 10.5h27M2.5 21.5h27" stroke="#fff" stroke-opacity=".35" stroke-width="1.2"/>' +
+      '<path d="M13 12.2v7.6l6.8-3.8z" fill="#fff"/>',
+    `<rect x="3.5" y="5.5" width="25" height="21" rx="2.8" fill="none" stroke="${MAC_INK}" stroke-width="2.3"/>` +
+      macLine('M10 5.5v21M22 5.5v21M3.5 12h6.5M3.5 20h6.5M22 12h6.5M22 20h6.5'),
+  ],
+};
+
+const WIN_FOLDER =
+  '<path d="M5 5.5h6.3c.5 0 1 .2 1.4.6L14.8 8H27a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7.5a2 2 0 0 1 2-2z" fill="#e3a008"/>' +
+  '<rect x="3" y="10.6" width="26" height="15.4" rx="2" fill="url(#shg-wf)"/>' +
+  '<path d="M5 10.6h22a2 2 0 0 1 2 2v.4H3v-.4a2 2 0 0 1 2-2z" fill="#ffe28a" opacity=".7"/>';
+
+const MAC_FOLDER =
+  '<path d="M5.2 5h6.2c.7 0 1.3.3 1.8.8L15 7.6h11.8A2.2 2.2 0 0 1 29 9.8v15a2.2 2.2 0 0 1-2.2 2.2H5.2A2.2 2.2 0 0 1 3 24.8V7.2A2.2 2.2 0 0 1 5.2 5z" fill="url(#shg-mb)"/>' +
+  '<rect x="3" y="10.2" width="26" height="16.8" rx="2.2" fill="url(#shg-mf)"/>' +
+  '<path d="M5.2 10.2h21.6a2.2 2.2 0 0 1 2.2 2.2v.2H3v-.2a2.2 2.2 0 0 1 2.2-2.2z" fill="#fff" opacity=".35"/>';
+
+const WIN_DRIVE =
+  '<rect x="3" y="9" width="26" height="15" rx="2.6" fill="url(#shg-wd)"/>' +
+  '<path d="M3 18.6h26v2.8a2.6 2.6 0 0 1-2.6 2.6H5.6A2.6 2.6 0 0 1 3 21.4z" fill="#8c96a3"/>' +
+  '<rect x="3.5" y="9.5" width="25" height="14" rx="2.2" fill="none" stroke="#fff" stroke-opacity=".5"/>' +
+  '<rect x="21.5" y="20.2" width="4.6" height="1.6" rx=".8" fill="#3ddc84"/>';
+
+const MAC_DRIVE =
+  '<rect x="3" y="9" width="26" height="15" rx="3.2" fill="url(#shg-md)"/>' +
+  '<rect x="3.5" y="9.5" width="25" height="14" rx="2.8" fill="none" stroke="#fff" stroke-opacity=".8"/>' +
+  '<path d="M3 19h26" stroke="#b9bcc4" stroke-width=".8"/>' +
+  '<circle cx="24.6" cy="21.4" r=".9" fill="#8e929b"/>';
+
+const GRADIENTS =
+  '<defs>' +
+  '<linearGradient id="shg-wf" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#ffd257"/><stop offset="1" stop-color="#fbbc2c"/></linearGradient>' +
+  '<linearGradient id="shg-mb" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#5bb7f6"/><stop offset="1" stop-color="#3d9ce8"/></linearGradient>' +
+  '<linearGradient id="shg-mf" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#a9dcfd"/><stop offset="1" stop-color="#7cc4f9"/></linearGradient>' +
+  '<linearGradient id="shg-wd" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#eef1f4"/><stop offset="1" stop-color="#c3cad3"/></linearGradient>' +
+  '<linearGradient id="shg-md" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#f6f6f8"/><stop offset="1" stop-color="#d2d3d8"/></linearGradient>' +
+  '<linearGradient id="shg-ws" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#6fd3ff"/><stop offset="1" stop-color="#2b9be6"/></linearGradient>' +
+  '<linearGradient id="shg-wm" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#ff8a4c"/><stop offset="1" stop-color="#e8502a"/></linearGradient>' +
+  '<linearGradient id="shg-wv" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#9f7aea"/><stop offset="1" stop-color="#7c4ddb"/></linearGradient>' +
+  '</defs>';
+
+const sym = (id, body) => `<symbol id="${id}" viewBox="0 0 32 32">${body}</symbol>`;
+
+const PLACE_SHAPES =
+  GRADIENTS +
+  sym('shi-w-folder', WIN_FOLDER) +
+  sym('shi-m-folder', MAC_FOLDER) +
+  sym('shi-w-drive', WIN_DRIVE) +
+  sym('shi-m-drive', MAC_DRIVE) +
+  Object.entries(PLACE_GLYPHS)
+    .map(([kind, [win, mac]]) =>
+      (win ? sym(`shi-w-p-${kind}`, win) : '') + sym(`shi-m-p-${kind}`, mac))
+    .join('');
+
+/// Place name → its kind. Case-insensitive; `Movies` is macOS's name for
+/// Videos. Anything unlisted is a plain folder.
+const PLACE_KIND = {
+  home: 'home',
+  desktop: 'desktop',
+  documents: 'documents',
+  downloads: 'downloads',
+  music: 'music',
+  pictures: 'pictures',
+  videos: 'videos',
+  movies: 'videos',
+};
+
+/// The symbol for a Places entry — its glyph, or the plain folder for one
+/// with none — in the style of `mac` or not.
+export function placeIconFor(name, mac) {
+  const kind = PLACE_KIND[name.toLowerCase()];
+  const glyphs = kind && PLACE_GLYPHS[kind];
+  if (glyphs && glyphs[mac ? 1 : 0]) return `shi-${mac ? 'm' : 'w'}-p-${kind}`;
+  return folderIconFor(mac);
+}
+
+export function driveIconFor(mac) {
+  return `shi-${mac ? 'm' : 'w'}-drive`;
+}
+
+export function folderIconFor(mac) {
+  return `shi-${mac ? 'm' : 'w'}-folder`;
+}
+
 let injected = false;
 
 /// Install the sprite once. Safe to call repeatedly.
@@ -130,6 +273,7 @@ export function installIcons() {
     '<svg xmlns="http://www.w3.org/2000/svg">' +
     BADGES.map((b) => badge(...b)).join('') +
     SHAPES +
+    PLACE_SHAPES +
     '</svg>';
   document.body.appendChild(holder);
   injected = true;

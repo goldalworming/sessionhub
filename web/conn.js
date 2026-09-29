@@ -132,6 +132,7 @@ export class Conn {
         dropped: 'onDropped',
         dir: 'onDir',
         tree: 'onTree',
+        shortcuts: 'onShortcuts',
         made: 'onMade',
         file: 'onFile',
         saved: 'onSaved',

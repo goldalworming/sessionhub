@@ -75,6 +75,16 @@ function el(tag, cls, text) {
   return n;
 }
 
+/// A project row's folder: open while the project is expanded. Outlined in
+/// the row's own colour, the same line style as the bookmark ribbon.
+function folderGlyph(open) {
+  const span = document.createElement('span');
+  span.innerHTML = open
+    ? '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M1.8 12.8V3.6c0-.4.3-.8.8-.8h3.3l1.4 1.5h5.1c.4 0 .8.4.8.8v1.4" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/><path d="M1.8 12.8 3.6 7.2c.1-.3.4-.5.7-.5h10c.4 0 .7.4.6.8l-1.6 4.8c-.1.3-.4.5-.7.5z" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/></svg>'
+    : '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M1.8 3.6c0-.4.3-.8.8-.8h3.3l1.4 1.5h6.1c.4 0 .8.4.8.8v7.1c0 .4-.4.8-.8.8H2.6c-.5 0-.8-.4-.8-.8z" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/></svg>';
+  return span.firstChild;
+}
+
 /// An agent's colour slot, by its position in the daemon's agent list — the
 /// same index agentRow already colours its dot by, so one name means one
 /// colour everywhere it appears. Unknown names (custom, or not yet loaded)
@@ -594,7 +604,22 @@ function projectNode(ctx, entry, liveSession, searching) {
   // The left arrow opens and closes, the name moves focus. That rule was already
   // chosen for the old sidebar and is not changed here — this is about arranging
   // by time, not about what happens when a row is clicked.
-  const twist = el('span', 'twist', expanded ? '▾' : '▸');
+  // A folder — open while the project is expanded, closed while it is not —
+  // or, when the project has an app icon of its own, that icon, which says
+  // which project this is faster than its name does.
+  const twist = el('span', 'twist picon' + (expanded ? ' open' : ''));
+  if (p.icon) {
+    // Straight in rather than swapped in on load: the sidebar redraws often,
+    // and the cached image draws at once, where a swap would flicker the
+    // folder in and out on every redraw. A broken one falls back to it.
+    const img = document.createElement('img');
+    img.alt = '';
+    img.src = ctx.iconUrl(p.icon);
+    img.onerror = () => img.replaceWith(folderGlyph(expanded));
+    twist.appendChild(img);
+  } else {
+    twist.appendChild(folderGlyph(expanded));
+  }
   twist.title = expanded ? 'Collapse' : 'Expand';
   twist.onclick = (e) => {
     e.stopPropagation();
@@ -630,29 +655,31 @@ function projectNode(ctx, entry, liveSession, searching) {
   }
 
   const marked = ctx.bookmarks.has(p.path);
-  const star = el('span', 'star' + (marked ? ' on' : ''));
-  star.innerHTML =
-    '<svg viewBox="0 0 16 16" aria-hidden="true">' +
-    `<path d="M4 2.5h8a1 1 0 0 1 1 1v10.2a.4.4 0 0 1-.62.33L8 11.1l-4.38 2.93A.4.4 0 0 1 3 13.7V3.5a1 1 0 0 1 1-1z"${
-      marked ? '' : ' fill="none" stroke="currentColor" stroke-width="1.3"'
-    }/></svg>`;
-  star.title = marked ? 'Remove from focus' : 'Mark as focus';
-  star.onclick = (e) => {
-    e.stopPropagation();
-    if (marked) ctx.bookmarks.delete(p.path);
-    else ctx.bookmarks.add(p.path);
-    ctx.saveBookmarks();
-    ctx.rerender();
+  const makeStar = (extra = '') => {
+    const star = el('span', 'star' + (marked ? ' on' : '') + extra);
+    star.innerHTML =
+      '<svg viewBox="0 0 16 16" aria-hidden="true">' +
+      `<path d="M4 2.5h8a1 1 0 0 1 1 1v10.2a.4.4 0 0 1-.62.33L8 11.1l-4.38 2.93A.4.4 0 0 1 3 13.7V3.5a1 1 0 0 1 1-1z"${
+        marked ? '' : ' fill="none" stroke="currentColor" stroke-width="1.3"'
+      }/></svg>`;
+    star.title = marked ? 'Remove from focus' : 'Mark as focus';
+    star.onclick = (e) => {
+      e.stopPropagation();
+      if (marked) ctx.bookmarks.delete(p.path);
+      else ctx.bookmarks.add(p.path);
+      ctx.saveBookmarks();
+      ctx.rerender();
+    };
+    return star;
   };
-  // Marked stays outside `.ractions` and so stays visible without hovering
-  // (the ribbon is the mark) — the same reason boot stays out of a saved
-  // terminal's. Unmarked has nothing to show at rest, so it joins ＋ in the
-  // slide-in group instead of reserving its own width on every other row:
-  // that reserved width was the gap sitting between an unmarked project's
-  // count and the row's edge.
+  // The star always rides in the slide-in group, beside ＋ — so a marked
+  // project can be unmarked while the group is up. It used to sit outside the
+  // group instead, and the group slid in right over it, hiding the one button
+  // that undoes the mark. A marked project also keeps a copy at rest — the
+  // ribbon is the mark — which the group simply covers while it is showing.
   const actions = el('span', 'ractions');
-  if (marked) row.appendChild(star);
-  else actions.appendChild(star);
+  if (marked) row.appendChild(makeStar(' rest'));
+  actions.appendChild(makeStar());
 
   const add = el('span', 'add', '+');
   add.title = 'New terminal in this project';

@@ -85,6 +85,11 @@ export class SidePanel {
       shell: on.shell,
       up: on.up,
       copy: on.copy,
+      // Opens the file-finder dialog (`filebrowser.js`) — a separate overlay
+      // for looking somewhere else on disk, not another mode this panel
+      // switches into. See FILE-EXPLORER-PLAN.md for why that changed from
+      // the toggle this button used to be.
+      toggle: on.browse,
     });
     this.editor = new Editor(this.body, {
       save: on.save,

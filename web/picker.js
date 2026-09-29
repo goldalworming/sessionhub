@@ -201,8 +201,17 @@ export class Picker {
     this.note.textContent = 'Loading…';
     this.retried = false;
     this.disarmMkdir();
+    const at = this.startAt;
+    this.startAt = null;
     // Empty means "start from home" — the daemon decides where that is.
-    this.on.browse(this.dir?.path || this.on.recall() || '');
+    this.on.browse(at || this.dir?.path || this.on.recall() || '');
+  }
+
+  /// Open already aimed at `path` — the folder is known (picked in the file
+  /// finder), so there is no walking down from home or the last folder first.
+  openAt(path) {
+    this.startAt = path;
+    this.show();
   }
 
   close() {

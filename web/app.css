@@ -312,6 +312,20 @@ html, body {
   cursor: pointer;
 }
 .project > .row > .twist:hover { background: color-mix(in srgb, var(--text) 14%, transparent); color: var(--text); }
+/* A project's fold control is a folder, or the project's own app icon. */
+.twist.picon {
+  width: 20px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.twist.picon svg { width: 15px; height: 15px; }
+.twist.picon img { width: 15px; height: 15px; object-fit: contain; border-radius: 3px; }
+/* A finger needs more than 20px to hit — the row is taller there anyway. */
+@media (pointer: coarse) {
+  .project > .row > .twist.picon { width: 30px; height: 30px; }
+  .twist.picon svg, .twist.picon img { width: 18px; height: 18px; }
+}
 
 .pname {
   overflow: hidden;
@@ -2616,7 +2630,8 @@ html, body {
   color: var(--muted);
 }
 .fhead .frefresh,
-.fhead .fpick {
+.fhead .fpick,
+.fhead .fbrowse {
   flex: 0 0 auto;
   font: inherit;
   font-size: 10px;
@@ -2629,7 +2644,9 @@ html, body {
   cursor: pointer;
 }
 .fhead .frefresh:hover,
-.fhead .fpick:hover { color: var(--text); background: color-mix(in srgb, var(--text) 10%, transparent); }
+.fhead .fpick:hover,
+.fhead .fbrowse:hover { color: var(--text); background: color-mix(in srgb, var(--text) 10%, transparent); }
+.fhead .fbrowse[hidden] { display: none; }
 
 .fmenu {
   position: absolute;
@@ -2719,6 +2736,288 @@ html, body {
 
 .fempty { padding: 12px 10px; color: var(--muted); line-height: 1.5; font-size: 12px; }
 .fempty[hidden] { display: none; }
+
+/* ------------------------------------------------------- file browser dialog */
+/* A file-finder modal — Places/Storage, breadcrumb navigation, a sortable
+   table — over whatever the tree (`#files`) is showing, not a replacement
+   for it (see FILE-EXPLORER-PLAN.md). Same overlay shape as `#picker`, just
+   wider: this one is a table, and a table needs the room `#picker`'s single
+   path field never did. Rows still reuse `.frow`/`.fico`/`.fname`/`.fscroll`
+   from the tree so the two feel like one family. */
+#browser {
+  position: fixed;
+  inset: 0;
+  z-index: 32;
+  background: var(--scrim);
+  display: flex;
+  justify-content: center;
+  align-items: flex-start;
+  padding: 8vh 16px;
+}
+#browser[hidden] { display: none; }
+
+/* A fixed height, like a real explorer window: sized by its content it
+   jumped every time the preview went from a short file to a long one. */
+.bbox {
+  width: min(1180px, 100%);
+  height: min(680px, 84vh);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+/* Two panes side by side, Explorer/Finder style — Places/Storage on the
+   left, the folder on the right, each with its own scroll so a long
+   shortcut list and a long folder listing never fight over one scrollbar. */
+.bsplit { display: flex; flex: 1 1 auto; min-height: 0; }
+.bside {
+  flex: 0 0 200px;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  border-right: 1px solid var(--border);
+}
+.bmain { flex: 1 1 auto; display: flex; flex-direction: column; min-height: 0; min-width: 0; }
+
+/* The preview pane — the file clicked, without leaving the dialog. Gone on a
+   narrow screen, where a click opens the file instead (see `bindEntry`). */
+.bprev {
+  flex: 0 0 300px;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  min-width: 0;
+  border-left: 1px solid var(--border);
+}
+@media (max-width: 900px) { .bprev { display: none; } }
+.bpbody {
+  flex: 1 1 auto;
+  min-height: 160px;
+  overflow: auto;
+  display: flex;
+  flex-direction: column;
+}
+.bpnote { margin: auto; padding: 16px; color: var(--muted); font-size: 12px; text-align: center; }
+.bpimg {
+  display: block;
+  max-width: 100%;
+  max-height: 100%;
+  margin: auto;
+  object-fit: contain;
+  padding: 10px;
+  box-sizing: border-box;
+}
+.bptext {
+  margin: 0;
+  padding: 10px;
+  font-family: var(--mono, ui-monospace, Consolas, monospace);
+  font-size: 11px;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: var(--text);
+}
+.bptext + .bpnote { margin: 0; padding: 8px 10px 12px; text-align: left; }
+.bpinfo { flex: 0 0 auto; padding: 10px; border-top: 1px solid var(--border); }
+.bpinfo[hidden] { display: none; }
+.bpname { font-size: 12px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.bpmeta { margin-top: 2px; font-size: 11px; color: var(--muted); }
+.bpacts { display: flex; gap: 6px; margin-top: 8px; }
+.bpacts .secbtn { flex: 1 1 0; }
+
+/* Downloads' date groups — Today, Yesterday, … — each header folds its
+   group. Full width in the icon grids too, so a group starts a new line. */
+.bgroup {
+  flex: 0 0 100%;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  height: 24px;
+  padding: 0 8px;
+  margin-top: 4px;
+  font-size: 12px;
+  color: var(--accent);
+  cursor: pointer;
+  user-select: none;
+}
+.bgroup:hover { background: color-mix(in srgb, var(--text) 6%, transparent); }
+.bgroup .btwist { width: 12px; font-size: 12px; }
+.bgroup .bgcount { color: var(--muted); font-size: 11px; }
+
+/* The file on preview, in the list or the grid. */
+.brow.sel, .btile.sel { background: color-mix(in srgb, var(--accent) 22%, transparent); }
+/* `.frows` is `position: absolute` for the tree's own virtualised scrolling
+   (paired with `.fspacer` faking the full scroll height) — this dialog has
+   no virtualisation and no spacer, so left as-is `.frows` collapses to zero
+   height and takes `.fscroll` down with it, even though every row is really
+   there in the DOM. Static flow here instead: `.fscroll`'s `overflow-y:auto`
+   already does the only thing this dialog actually needs.
+   `.fscroll`'s `contain: strict` includes `contain: size` — "size this
+   element without looking at its children" — a real perf win for the tree's
+   own huge virtualised lists (which size themselves via `.fspacer`, not
+   content), but exactly backwards here: with no spacer and no fixed height,
+   `.fscroll` has nothing left to size itself from and collapses to 0.
+   Dropping `size` (keeping layout/paint/style) lets it size from `.frows`'s
+   real content again, the same as any ordinary scrolling box. */
+.bbox .frows { position: static; }
+.bbox .fscroll { contain: layout paint style; }
+
+.bhead {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  height: var(--row);
+  padding: 0 4px 0 6px;
+  border-bottom: 1px solid var(--border);
+}
+.bhead .bnav {
+  flex: 0 0 auto;
+  font: inherit;
+  font-size: 11px;
+  line-height: 1;
+  color: var(--muted);
+  background: none;
+  border: none;
+  padding: 3px 6px;
+  border-radius: var(--radius);
+  cursor: pointer;
+}
+.bhead .bnav:hover:not(:disabled) { color: var(--text); background: color-mix(in srgb, var(--text) 10%, transparent); }
+.bhead .bnav:disabled { opacity: 0.35; cursor: default; }
+
+.bcrumb {
+  flex: 1 1 auto;
+  display: flex;
+  align-items: center;
+  overflow: hidden;
+  font-size: 11px;
+  white-space: nowrap;
+}
+.bseg { color: var(--muted); cursor: pointer; padding: 2px 3px; border-radius: var(--radius); overflow: hidden; text-overflow: ellipsis; }
+.bseg:hover { color: var(--text); background: color-mix(in srgb, var(--text) 10%, transparent); }
+.bseg.on { color: var(--text); cursor: default; flex-shrink: 0; }
+.bseg.on:hover { background: none; }
+.bsep { flex: 0 0 auto; color: var(--muted); padding: 0 1px; }
+
+/* A folder row looks exactly like the tree's; the difference is just the
+   trailing columns a flat listing has room for that a nested tree does not. */
+.brow { padding-right: 8px; gap: 6px; }
+.bcell {
+  flex: 0 0 auto;
+  color: var(--muted);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.bcol-type { width: 70px; }
+.bcol-date { width: 100px; }
+.bcol-size { width: 64px; text-align: right; }
+
+/* The header row above the folder's own entries — sortable, so it borrows
+   the row height but none of the hover/click styling a real entry has. */
+.bcols {
+  cursor: default;
+  border-bottom: 1px solid var(--border);
+  position: sticky;
+  top: 0;
+  background: var(--bg);
+  z-index: 1;
+}
+.bcols:hover { background: var(--bg); }
+.bcols .bcol {
+  flex: 0 0 auto;
+  font-size: 10px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--muted);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  overflow: hidden;
+  white-space: nowrap;
+}
+/* A label wider than its column (Date Modified is, at this width) fades
+   rather than spilling into the next one — same idea as a truncated name,
+   just for a header. */
+.bcols .bcol span.blabel {
+  overflow: hidden;
+  text-overflow: clip;
+  mask-image: linear-gradient(to right, #000 calc(100% - 8px), transparent);
+}
+.bcols .bcol-name { flex: 1 1 auto; padding-left: 21px; } /* lines up under the icon+name below */
+.bcols .bcol:hover { color: var(--text); }
+.bsortdir { font-size: 8px; }
+
+/* Places/Storage shortcuts, and the divider above the folder's own listing —
+   same row height and icon size as everything else here, just no columns. */
+.bsectitle {
+  padding: 6px 10px 2px;
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+/* A real photo, not the generic image icon — this dialog is as much for
+   "which of these was it" as "which file was it". Slightly bigger than the
+   plain icon it replaces and cropped to a square (`object-fit`), so a tall
+   or wide photo does not stretch the row.  */
+.bthumb { width: 18px; height: 18px; object-fit: cover; border-radius: 3px; background: var(--border); }
+.bshort.on { background: color-mix(in srgb, var(--accent) 22%, transparent); }
+
+/* `.frow` only ever had `padding-right` (the tree supplies its own left
+   inset per nesting depth) — this dialog never nests, so without a left
+   inset of its own every icon sat flush against the sidebar/pane edge. */
+.bbox .frow { padding-left: 8px; }
+.bbox .frow .fico { width: 16px; height: 16px; }
+
+/* List / Small / Thumbnail — pushed to the right of the breadcrumb, same
+   button shape as the back/forward/up controls next to them. */
+.bviewgroup { flex: 0 0 auto; display: flex; gap: 2px; }
+.bview {
+  font: inherit;
+  font-size: 12px;
+  line-height: 1;
+  color: var(--muted);
+  background: none;
+  border: none;
+  padding: 3px 6px;
+  border-radius: var(--radius);
+  cursor: pointer;
+}
+.bview:hover { color: var(--text); background: color-mix(in srgb, var(--text) 10%, transparent); }
+.bview.on { color: var(--text); background: color-mix(in srgb, var(--accent) 22%, transparent); }
+
+/* Small/Thumbnail mode: an icon grid instead of the detail table. Sizes are
+   deliberately different `.fico`/`.bthumb` overrides scoped to each grid —
+   the base 14px/18px sizes stay exactly as the tree and list mode need them. */
+.frows.bgrid { display: flex; flex-wrap: wrap; align-content: flex-start; gap: 10px; padding: 10px; }
+.btile {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  padding: 6px 4px;
+  border-radius: var(--radius);
+  cursor: pointer;
+  user-select: none;
+  text-align: center;
+}
+.btile:hover { background: color-mix(in srgb, var(--text) 6%, transparent); }
+.btile .fname { font-size: 11px; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.bgrid-small .btile { width: 72px; }
+.bgrid-small .btile .fico, .bgrid-small .btile .bthumb { width: 32px; height: 32px; }
+.bgrid-thumbnail .btile { width: 120px; }
+.bgrid-thumbnail .btile .fico, .bgrid-thumbnail .btile .bthumb { width: 88px; height: 88px; }
+.bgrid .btile .bthumb { border-radius: 5px; }
 
 /* --------------------------------------------------------------- editor */
 
@@ -3030,9 +3329,23 @@ html, body {
   .prow { height: 34px; }
   .session, .project > .row { height: 34px; }
 
-  /* Touch targets need more room than cursor targets. */
-  .add, .star, .fork { opacity: 1; width: 26px; height: 26px; line-height: 24px; }
   .tab .x { padding: 0 6px; }
+}
+
+/* No hover to reveal them, so row buttons are always shown — decided by the
+   device, not the width: a phone held sideways is wider than 720px and still
+   has no mouse, and there ＋ used to be invisible yet tappable. With the
+   buttons always up, the resting copy of a marked project's star would be a
+   duplicate. */
+@media (any-hover: none) {
+  .add, .star, .fork { opacity: 1; }
+  .project > .row > .star.rest { display: none; }
+}
+/* A finger needs a bigger target than a cursor. */
+@media (pointer: coarse) {
+  .add, .star, .fork { width: 30px; height: 30px; line-height: 28px; }
+  .add { font-size: 17px; }
+  .star svg { width: 14px; height: 14px; }
 }
 
 @media (max-width: 720px) and (orientation: landscape) {

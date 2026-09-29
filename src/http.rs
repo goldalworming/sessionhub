@@ -7,7 +7,7 @@
 //! `tungstenite` instances over the same socket are not safe — `read()` also
 //! writes (auto-pong), so their frames can interleave.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::io::{self, Read, Write};
 use std::net::{Ipv4Addr, Shutdown, SocketAddr, TcpListener, TcpStream, ToSocketAddrs};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -474,7 +474,15 @@ fn handle(
     // because both the local handler and the relay need it — and because the
     // bytes are sitting on the socket either way: leaving them there would
     // desynchronise anything that read from it next.
-    let put_body = if req.path == "/api/put" || req.path == "/api/term/send" {
+    // `/api/term/spawn`'s body is optional — only `--env` ever sends one —
+    // so a missing (or zero) Content-Length means "no env", not an error.
+    // Every existing caller of this route sends neither header nor body, and
+    // must keep working exactly as before.
+    let spawn_body_len = req.header("content-length").and_then(|v| v.trim().parse::<usize>().ok()).unwrap_or(0);
+    let put_body = if req.path == "/api/put"
+        || req.path == "/api/term/send"
+        || (req.path == "/api/term/spawn" && spawn_body_len > 0)
+    {
         match read_body(&mut sock, &req) {
             Ok(b) => b,
             Err(message) => {
@@ -499,11 +507,12 @@ fn handle(
         };
         return match req.path.as_str() {
             "/ws" => relay_ws(sock, req, r),
+            "/api/status" => relay_status(&mut sock, &r),
             "/api/file" => relay_file(&mut sock, &req, &r),
             "/api/exec" => relay_exec(&mut sock, &req, &r),
             "/api/put" => relay_put(&mut sock, &req, &r, put_body),
             "/api/term/ls" => relay_term_ls(&mut sock, &req, &r),
-            "/api/term/spawn" => relay_term_spawn(&mut sock, &req, &r),
+            "/api/term/spawn" => relay_term_spawn(&mut sock, &req, &r, put_body),
             "/api/term/send" => relay_term_send(&mut sock, &req, &r, put_body),
             "/api/term/capture" => relay_term_capture(&mut sock, &req, &r),
             other => respond(
@@ -524,7 +533,7 @@ fn handle(
         "/api/exec" => api_exec(&mut sock, &req),
         "/api/put" => api_put(&mut sock, &req, put_body),
         "/api/term/ls" => api_term_ls(&mut sock, &tx),
-        "/api/term/spawn" => api_term_spawn(&mut sock, &req, &tx),
+        "/api/term/spawn" => api_term_spawn(&mut sock, &req, &tx, put_body),
         "/api/term/send" => api_term_send(&mut sock, &req, &tx, put_body),
         "/api/term/capture" => api_term_capture(&mut sock, &req, &tx),
         "/api/signout" => api_signout(&mut sock),
@@ -594,7 +603,7 @@ fn relay_file(sock: &mut TcpStream, req: &Request, r: &crate::config::Remote) ->
         crate::remote::percent_encode(&path),
     );
     match crate::remote::http_get(&crate::remote::Peer::of(r), &url) {
-        Ok(body) => serve_file_bytes(sock, &path, &body),
+        Ok(body) => serve_file_bytes(sock, &path, &body, ""),
         Err(e) => respond(sock, 502, "text/plain; charset=utf-8", e.as_bytes()),
     }
 }
@@ -661,15 +670,15 @@ fn relay_put(
 /// files, so that is a real path from "generated a report" to "drove the
 /// terminal". `sandbox` without `allow-same-origin` puts the document in an
 /// opaque origin instead: its scripts run, its cookies do not exist.
-fn serve_file_bytes(sock: &mut TcpStream, path: &str, body: &[u8]) -> io::Result<()> {
+fn serve_file_bytes(sock: &mut TcpStream, path: &str, body: &[u8], cache: &str) -> io::Result<()> {
     let ctype = mime_of(path);
-    let extra = if ctype.starts_with("text/html") {
+    let csp = if ctype.starts_with("text/html") {
         "Content-Security-Policy: sandbox allow-scripts allow-modals allow-popups
 "
     } else {
         ""
     };
-    respond_with(sock, 200, ctype, body, extra)
+    respond_with(sock, 200, ctype, body, &format!("{csp}{cache}"))
 }
 
 /// Re-read the config from disk and adopt its token. Called by `token rotate`
@@ -715,7 +724,16 @@ fn api_file(sock: &mut TcpStream, req: &Request) -> io::Result<()> {
             return respond(sock, 500, "text/plain; charset=utf-8", b"500 cannot read\n");
         }
     };
-    serve_file_bytes(sock, &path.to_string_lossy(), &body)
+    // `v` names one version of the file (its modified time, put there by the
+    // page): that exact URL never changes content, so it is kept for good —
+    // the sidebar's project icons are fetched once, not on every load.
+    // `private`: it came with the login cookie.
+    let cache = if req.query_param("v").is_some() {
+        "Cache-Control: private, max-age=31536000, immutable\r\n"
+    } else {
+        ""
+    };
+    serve_file_bytes(sock, &path.to_string_lossy(), &body, cache)
 }
 
 /// Run a command here and answer with everything it said.
@@ -838,7 +856,12 @@ fn api_term_ls(sock: &mut TcpStream, tx: &Sender<Cmd>) -> io::Result<()> {
 /// Start a terminal the way the browser's own "New" button does, minus the
 /// viewport a script does not have. Shows up in every open browser tab the
 /// instant it exists, same as any other spawn — see `Cmd::TermSpawn`.
-fn api_term_spawn(sock: &mut TcpStream, req: &Request, tx: &Sender<Cmd>) -> io::Result<()> {
+fn api_term_spawn(
+    sock: &mut TcpStream,
+    req: &Request,
+    tx: &Sender<Cmd>,
+    body: Vec<u8>,
+) -> io::Result<()> {
     if !remote_commands_on() {
         return refuse_remote_commands(sock);
     }
@@ -850,16 +873,53 @@ fn api_term_spawn(sock: &mut TcpStream, req: &Request, tx: &Sender<Cmd>) -> io::
     };
     let resume = req.query_param("resume");
     let name = req.query_param("name");
+    // The only field this body ever carries. Never in the query string —
+    // env values are the whole reason this route accepts a body at all; a
+    // secret in a URL can end up in a log line or a proxy's own access log.
+    let env: BTreeMap<String, String> = if body.is_empty() {
+        BTreeMap::new()
+    } else {
+        #[derive(serde::Deserialize)]
+        struct SpawnBody {
+            #[serde(default)]
+            env: BTreeMap<String, String>,
+        }
+        match serde_json::from_slice::<SpawnBody>(&body) {
+            Ok(b) => b.env,
+            Err(e) => {
+                return respond(
+                    sock,
+                    400,
+                    "text/plain; charset=utf-8",
+                    format!("400 bad request body: {e}\n").as_bytes(),
+                );
+            }
+        }
+    };
+    let env_names = env.keys().cloned().collect::<Vec<_>>().join(",");
     let (reply, wait) = bounded(1);
     if tx
-        .send(Cmd::TermSpawn { project: project.clone(), agent: agent.clone(), resume, name, reply })
+        .send(Cmd::TermSpawn {
+            project: project.clone(),
+            agent: agent.clone(),
+            resume,
+            name,
+            env,
+            reply,
+        })
         .is_err()
     {
         return respond(sock, 500, "text/plain; charset=utf-8", b"actor is gone\n");
     }
     match wait.recv_timeout(Duration::from_secs(10)) {
         Ok(Ok(tid)) => {
-            info!(terminal = tid, %project, %agent, "spawned a terminal from a script");
+            // Names only, never values — see the module doc on why a secret
+            // must never reach a log line.
+            info!(
+                terminal = tid, %project, %agent,
+                %env_names,
+                "spawned a terminal from a script"
+            );
             let body = serde_json::json!({ "id": tid }).to_string();
             respond(sock, 200, "application/json", body.as_bytes())
         }
@@ -950,6 +1010,17 @@ fn api_term_capture(sock: &mut TcpStream, req: &Request, tx: &Sender<Cmd>) -> io
 }
 
 /// Forward a listing request to another machine.
+/// Forward a status check to another machine — used by `sessionhubd spawn
+/// --env --on NAME` to ask the machine that will actually create the
+/// terminal whether it understands `--env`, before sending it anything.
+fn relay_status(sock: &mut TcpStream, r: &crate::config::Remote) -> io::Result<()> {
+    let url = format!("/api/status?token={}", r.token);
+    match crate::remote::http_get(&crate::remote::Peer::of(r), &url) {
+        Ok(body) => respond(sock, 200, "application/json", &body),
+        Err(e) => respond(sock, 502, "text/plain; charset=utf-8", e.as_bytes()),
+    }
+}
+
 fn relay_term_ls(sock: &mut TcpStream, _req: &Request, r: &crate::config::Remote) -> io::Result<()> {
     let url = format!("/api/term/ls?token={}", r.token);
     match crate::remote::http_get(&crate::remote::Peer::of(r), &url) {
@@ -958,11 +1029,15 @@ fn relay_term_ls(sock: &mut TcpStream, _req: &Request, r: &crate::config::Remote
     }
 }
 
-/// Forward a spawn request to another machine.
+/// Forward a spawn request to another machine. `body` (empty unless `--env`
+/// was used) is forwarded exactly as received — the remote daemon is the one
+/// that parses and validates it, since it is the one that will actually run
+/// the process with it.
 fn relay_term_spawn(
     sock: &mut TcpStream,
     req: &Request,
     r: &crate::config::Remote,
+    body: Vec<u8>,
 ) -> io::Result<()> {
     let Some(project) = req.query_param("project") else {
         return respond(sock, 400, "text/plain; charset=utf-8", b"400 missing project\n");
@@ -982,7 +1057,7 @@ fn relay_term_spawn(
     if let Some(name) = req.query_param("name") {
         url.push_str(&format!("&name={}", crate::remote::percent_encode(&name)));
     }
-    match crate::remote::http_get_slow(&crate::remote::Peer::of(r), &url, Duration::from_secs(15)) {
+    match crate::remote::http_put(&crate::remote::Peer::of(r), &url, &body) {
         Ok(body) => respond(sock, 200, "application/json", &body),
         Err(e) => respond(sock, 502, "text/plain; charset=utf-8", e.as_bytes()),
     }
@@ -1077,6 +1152,11 @@ fn api_status(
         // which side needs updating.
         "protocol": crate::remote::PROTOCOL,
         "version": env!("CARGO_PKG_VERSION"),
+        // Whether `sessionhubd spawn --env` will be honoured here — checked by
+        // the CLI before it ever sends one, local or through `--on`, so a
+        // daemon too old to apply it is refused up front rather than starting
+        // a terminal silently missing the environment it was asked for.
+        "term_env": true,
     })
     .to_string();
     respond(sock, 200, "application/json", body.as_bytes())
