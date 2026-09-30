@@ -194,6 +194,32 @@ export class FileBrowser {
     this.el.hidden = true;
   }
 
+  /// The machine now showing. Its Places, drives and look (Finder or Explorer)
+  /// are not the last machine's, so all of it is dropped and asked for again on
+  /// the next open — kept, a Mac's sidebar and icons stayed on after switching
+  /// to a Windows machine, until a reload. Open at that moment (the dialog
+  /// covers the tabs, so rarely), it closes rather than show one machine's
+  /// folder beside the other's sidebar.
+  setScope(key) {
+    if (key === this.scope) return;
+    this.scope = key;
+    this.places = null;
+    this.drives = null;
+    this.mac = false;
+    this.shortcutsEl.textContent = '';
+    this.path = null;
+    this.pending = null;
+    this.parent = null;
+    this.crumbs = [];
+    this.entries = [];
+    this.back = [];
+    this.forward = [];
+    this.clearPreview();
+    this.rowsEl.textContent = '';
+    this.crumbEl.textContent = '';
+    if (this.open) this.close();
+  }
+
   /// Open a folder fresh — switching into Browser mode, or switching project.
   /// Clears history: this is a new place to start from, not a step within
   /// whatever trail was being followed before.

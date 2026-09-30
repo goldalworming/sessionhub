@@ -297,6 +297,9 @@ function syncScope() {
   // The picker walks the disk of the machine now showing, so it is scoped to
   // the machine alone — not to the project the Explorer happens to be on.
   if (picker) picker.setScope(current?.id || null);
+  // Likewise the file finder: its Places, drives and Finder-or-Explorer look
+  // belong to one machine.
+  if (fileBrowser) fileBrowser.setScope(current?.id || null);
 }
 
 /// The project the Explorer shows: the hand-picked one, then the active
