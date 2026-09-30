@@ -107,6 +107,13 @@ There is no CI. Nothing here needs a runner.
 
        sessionhubd bundle-web sessionhub-web-<web version>.shweb
 
+   It packs the frontend **built into the binary that runs it**, not `web/`
+   on disk — a release binary from an earlier commit packs that commit's
+   frontend under the new name, and the updater then offers an "update" that
+   installs the old interface. For a web-only release, run it from a debug
+   build (`target/debug`, which reads `web/` from disk) or a binary built
+   from this commit; the version it prints must be the one just raised.
+
 8. **Create the release**, then upload:
 
        python ../create_release.py v<version> <full commit sha> "<title>" <notes.md>
