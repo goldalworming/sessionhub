@@ -2782,6 +2782,14 @@ conn.on.onStatus = (kind, m) => {
     m.status = kind;
     machineBar.paint(current);
   }
+  // The paired machines are asked for each time the local daemon's socket
+  // opens, reconnects included. It used to be asked once, 300 ms after the page
+  // started connecting — and `send` drops anything sent before the socket is
+  // open, so wherever connecting took longer (a tablet through the tunnel) the
+  // machine tabs never appeared, however many times the page was reloaded.
+  // `kind` first: `local` is declared further down, and only exists by the time
+  // any socket can have opened.
+  if (kind === 'open' && m === local) local.conn.send({ t: 'remotes' });
   // A background machine going down must not hijack the banner: it is not what
   // the user is looking at, and the dot on its tab already says so.
   if (m && m !== current) return;
@@ -3320,9 +3328,8 @@ machineBar.paint(current);
 
 if (token) {
   local.started = true;
+  // The machine list is asked for as the socket opens (`onStatus`); after
+  // that the daemon resends it whenever it changes, so there is nothing to poll.
   local.conn.connect();
-  // The machine list is asked for once; after that it is resent whenever it
-  // changes, so there is nothing to poll.
-  setTimeout(() => local.conn.send({ t: 'remotes' }), 300);
 }
 renderTabs();
