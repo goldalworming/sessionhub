@@ -1,4 +1,4 @@
-You closed the laptop. Your agent didn't even notice.
+You closed the browser. Your agent didn't even notice.
 
 This is session hub. A daemon keeps every agent terminal alive, and your browser just plugs in.
 

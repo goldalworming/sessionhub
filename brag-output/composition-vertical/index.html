@@ -61,7 +61,14 @@
 
       /* Scene 1 */
       #s1-term { width: 1180px; }
-      #s1-lid { position: absolute; inset: 0; background: #050607; }
+      #s1-lid { position: absolute; inset: 0; background: #050607; opacity: 0; }
+      .win { background: #0b0d0f; border: 1px solid var(--border); border-radius: 14px; overflow: hidden; box-shadow: 0 30px 80px rgba(0, 0, 0, 0.55); }
+      .wbar { height: 60px; display: flex; align-items: flex-end; gap: 18px; padding: 0 16px; background: #1b1f23; }
+      .wtab { position: relative; display: flex; align-items: center; gap: 22px; padding: 12px 18px; margin-bottom: 0; background: var(--surface); border-radius: 9px 9px 0 0; font-size: 19px; color: var(--text); }
+      #s1-x { color: var(--muted); font-size: 16px; }
+      .wurl { flex: 1; align-self: center; height: 36px; border-radius: 18px; background: var(--bg); color: var(--muted); font-size: 18px; display: flex; align-items: center; padding: 0 18px; }
+      #s1-term .term { border: 0; border-radius: 0; box-shadow: none; }
+      #s1-ptr { position: absolute; right: -16px; top: 22px; width: 38px; height: 38px; opacity: 0; }
       #s1-line1 { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; font-size: 84px; font-weight: 600; letter-spacing: -0.02em; opacity: 0; }
       #s1-after { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 56px; opacity: 0; }
       #s1-mini { width: 760px; box-shadow: 0 0 90px rgba(76, 154, 138, 0.28), 0 30px 80px rgba(0, 0, 0, 0.6); }
@@ -177,21 +184,21 @@
       <!-- Scene 1 — Hook -->
       <section id="s1" class="clip" data-start="0" data-duration="3.75" data-track-index="1">
         <div class="scene center" id="s1-in">
-          <div class="term" id="s1-term">
-            <div class="bar"><i></i><i></i><i></i><span>claude · api-server</span></div>
-            <div class="body">
+          <div class="win" id="s1-term">
+            <div class="wbar"><div class="wtab">sessionhub<span id="s1-x">✕</span><svg id="s1-ptr" viewBox="0 0 24 24"><path d="M4 2 L4 20 L9 15.5 L12.5 22 L15.5 20.5 L12 14 L19 14 Z" fill="#ffffff" stroke="#0f1113" stroke-width="1.5" stroke-linejoin="round"/></svg></div><div class="wurl">127.0.0.1:7717</div></div>
+            <div class="term"><div class="body">
               <div class="ln s1l"><span class="a">●</span> Reading src/reconnect.rs</div>
               <div class="ln s1l dim">  └ 212 lines</div>
               <div class="ln s1l"><span class="a">●</span> Update(src/reconnect.rs)</div>
               <div class="ln s1l dim">  └ <span class="g">+18</span> <span class="y">−4</span></div>
               <div class="ln s1l"><span class="a">●</span> Bash(cargo test)</div>
-            </div>
+            </div></div>
           </div>
           <div id="s1-lid" data-layout-allow-occlusion></div>
-          <div id="s1-line1">You closed the laptop.</div>
+          <div id="s1-line1">You closed the browser.</div>
           <div id="s1-after">
             <div class="term" id="s1-mini">
-              <div class="bar"><i></i><i></i><i></i><span>claude · api-server</span></div>
+              <div class="bar"><i></i><i></i><i></i><span>claude · api-server · still running in sessionhubd</span></div>
               <div class="body">
                 <div class="ln s1m dim">  └ test result: ok</div>
                 <div class="ln s1m"><span class="a">●</span> Writing the changelog entry</div>
@@ -308,10 +315,11 @@
       </section>
 
       <!-- Audio -->
-      <audio id="vo" src="assets/voiceover.wav" data-start="0.5" data-duration="18.7" data-track-index="7" data-volume="1"></audio>
+      <audio id="vo" src="assets/voiceover.wav" data-start="0.5" data-duration="18.8" data-track-index="7" data-volume="1"></audio>
       <audio id="bg-music" src="assets/music/happy-beats-business-moves-vol-12-by-ende-dot-app.mp3" data-start="0" data-duration="21.5" data-track-index="10" data-volume="1"
-        data-automation='{"version":1,"lanes":[{"target":"volume","points":[{"t":0,"v":0},{"t":0.5,"v":0.13},{"t":19.1,"v":0.13},{"t":19.6,"v":0.32},{"t":20.5,"v":0.32},{"t":21.5,"v":0}]}]}'></audio>
-      <audio id="sfx-lid" src="assets/sfx/impact/impactSoft_medium_001.ogg" data-start="0.62" data-duration="1" data-track-index="11" data-volume="0.6"></audio>
+        data-automation='{"version":1,"lanes":[{"target":"volume","points":[{"t":0,"v":0},{"t":0.5,"v":0.13},{"t":19.35,"v":0.13},{"t":19.85,"v":0.32},{"t":20.5,"v":0.32},{"t":21.5,"v":0}]}]}'></audio>
+      <audio id="sfx-close-click" src="assets/sfx/interface/click_003.ogg" data-start="0.46" data-duration="0.05" data-track-index="18" data-volume="0.65"></audio>
+      <audio id="sfx-lid" src="assets/sfx/impact/impactSoft_medium_001.ogg" data-start="0.55" data-duration="0.2" data-track-index="11" data-volume="0.45"></audio>
       <audio id="sfx-word" src="assets/sfx/interface/drop_001.ogg" data-start="3.6" data-duration="1" data-track-index="12" data-volume="0.55"></audio>
       <audio id="sfx-switch" src="assets/sfx/ui/switch7.ogg" data-start="9.27" data-duration="1" data-track-index="13" data-volume="0.55"></audio>
       <audio id="sfx-tap" src="assets/sfx/interface/click_003.ogg" data-start="11.95" data-duration="1" data-track-index="14" data-volume="0.65"></audio>
@@ -338,8 +346,12 @@
       // ── Scene 1 — Hook ──
       tl.set("#s1-in", { opacity: 1 }, 0);
       typeLines(".s1l", 0.0, 0.08);
-      tl.fromTo("#s1-lid", { yPercent: -100 }, { yPercent: 0, duration: 0.35, ease: "power2.in" }, 0.35);
-      tl.set("#s1-term", { opacity: 0 }, 0.7);
+      // cursor moves to the tab's ✕ and closes the browser tab
+      tl.fromTo("#s1-ptr", { opacity: 0, x: 220, y: 170 }, { opacity: 1, x: 0, y: 0, duration: 0.4, ease: "power2.out" }, 0.05);
+      tl.fromTo("#s1-ptr", { scale: 1 }, { scale: 0.82, duration: 0.06, yoyo: true, repeat: 1 }, 0.46);
+      tl.set("#s1-x", { color: "#ffffff" }, 0.46);
+      tl.fromTo("#s1-term", { opacity: 1, scale: 1 }, { opacity: 0, scale: 0.94, duration: 0.22, ease: "power2.in" }, 0.52);
+      tl.fromTo("#s1-lid", { opacity: 0 }, { opacity: 1, duration: 0.22, ease: "none" }, 0.52);
       tl.fromTo("#s1-line1", { opacity: 0, y: 16 }, { opacity: 1, y: 0, duration: 0.3, ease: E }, 0.72);
       tl.to("#s1-line1", { opacity: 0, duration: 0.2 }, 1.85);
       tl.fromTo("#s1-after", { opacity: 0 }, { opacity: 1, duration: 0.3 }, 1.95);

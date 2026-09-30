@@ -1,13 +1,13 @@
 # Brag Plan: sessionhub
 
 ## What is this app?
-A daemon that keeps coding-agent terminals (Claude Code, Codex CLI, opencode, Oh My Pi) alive and serves them to a browser, so you can close the laptop, switch computers, or check from a phone while the agent keeps running.
+A daemon that keeps coding-agent terminals (Claude Code, Codex CLI, opencode, Oh My Pi) alive and serves them to a browser, so you can close the browser, switch computers, or check from a phone while the agent keeps running.
 
 ## The angle
-The laptop lid closes and nothing stops. The joke is the agent's indifference: it keeps streaming output while its human walks away. sessionhub is shown as what it literally is: the agent's own raw terminal in a three-pane browser UI, then the same session on a phone. No chat layer, no dashboard fluff.
+The browser tab closes and nothing stops. The joke is the agent's indifference: it keeps streaming output in the daemon while its human walks away. (The hook is about closing the browser, not the laptop: sessionhub does not keep a sleeping machine awake, so the claim is only true for the browser.) sessionhub is shown as what it literally is: the agent's own raw terminal in a three-pane browser UI, then the same session on a phone. No chat layer, no dashboard fluff.
 
 ## Hook (first 2-3 seconds)
-A dark terminal mid-task (agent reading files, printing bullets). A laptop-lid shadow sweeps down and the frame goes black on "You closed the laptop." A beat later the terminal is still scrolling in a small glowing window: "Your agent didn't even notice."
+The agent terminal mid-task inside a browser tab at 127.0.0.1:7717. A cursor clicks the tab's ✕, the window closes and the frame goes black on "You closed the browser." A beat later the terminal is still scrolling in a small glowing window: "Your agent didn't even notice."
 
 ## Key moments (the middle)
 - Wordmark reveal: the sessionhub icon + "sessionhub", then the README line "keeps coding-agent terminals alive in a daemon".
@@ -25,7 +25,7 @@ A dark terminal mid-task (agent reading files, printing bullets). A laptop-lid s
 
 ## Tone
 - Preset: polished
-- Creative direction: quiet late-night dev film where the laptop closes and the terminal doesn't
+- Creative direction: quiet late-night dev film where the browser closes and the terminal doesn't
 - Interpretation: dark, calm, confident; few scenes with generous holds, soft crossfades and slides, one dry joke in the hook, restrained SFX.
 
 ## Format: landscape — 1920x1080
@@ -44,22 +44,22 @@ A dark terminal mid-task (agent reading files, printing bullets). A laptop-lid s
 Session and project names in the recreated UI are fictional stand-ins (api-server, docs-site, etc.), not the names from the real screenshot.
 
 ## Share copy (draft)
-I built sessionhub: close the laptop, and your coding agent keeps running. Raw terminal in the browser, resumable from any machine or your phone. One binary.
+I built sessionhub: close the browser, and your coding agent keeps running. Raw terminal in the browser, resumable from any machine or your phone. One binary.
 
 ## Audio direction
 - Role: cinematic support, restrained, under narration
 - Music: happy-beats-business-moves-vol-12 (steady and clean; fits polished)
-- Music treatment: fade in over 0.6s, ducked to 0.13 under the voiceover, lifts back to 0.32 after the last line, fades out over the final second
+- Music treatment: fade in over 0.6s, ducked to 0.13 under the voiceover (0.5–19.3s), lifts back to 0.32 after the last line, fades out over the final second
 - Music cue guidance: bundled preset `assets/music/cues/happy-beats-business-moves-vol-12-by-ende-dot-app.music-cues.json`, ~110 BPM. Strong cues to target: 9.29s (machine switch), 13.11s (first fact card), 18.56s (outro command lands). Fact cards on every other beat: 13.11 / 14.20 / 15.29. Sidebar rows may ride consecutive beats 5.34 / 6.00 / 6.56 / 7.09 since they stay on screen afterwards.
 - Audio-reactive treatment: subtle; music bass makes the accent glow behind the wordmark and the terminal window breathe. No waveform/equalizer visuals.
 - SFX posture: sparse, low-HF-risk files
-- Audio-coupled moments: lid close (soft impact), wordmark (soft drop), machine switch (switch), phone Enter tap (click), first and last fact card (drop), outro land (soft bell)
+- Audio-coupled moments: tab close (click + soft impact), wordmark (soft drop), machine switch (switch), phone Enter tap (click), first and last fact card (drop), outro land (soft bell)
 - Restraint rule: nothing competes with the narration; no SFX on every sidebar row.
 
 ## Voiceover script
-(Kokoro, voice af_heart, starts at 0.5s, 18.6s long)
+(Kokoro, voice af_heart, starts at 0.5s, 18.8s long)
 
-> You closed the laptop. Your agent didn't even notice.
+> You closed the browser. Your agent didn't even notice.
 >
 > This is session hub. A daemon keeps every agent terminal alive, and your browser just plugs in.
 >
@@ -72,10 +72,10 @@ I built sessionhub: close the laptop, and your coding agent keeps running. Raw t
 ## Storyboard
 
 ### Scene 1 — Hook — 0.0–3.5s (3.5s)
-Terminal window streaming agent output (fictional task). At 0.5 a lid-shadow wipes down, screen goes black; "You closed the laptop." fades in (held to 1.9). At 2.0 a small terminal window glows back in, still printing lines; "Your agent didn't even notice." under it, held to 3.4.
+Browser window with the agent terminal streaming (fictional task). At 0.46 the cursor clicks the tab's ✕, the window closes to black; "You closed the browser." fades in (held to 1.9). At 2.0 a small terminal window glows back in, still printing lines; "Your agent didn't even notice." under it, held to 3.4.
 Sequential/interaction: terminal lines type in one by one.
-Audio intent: quiet start, soft thud on the lid close.
-Audio-coupled idea: lid close → soft impact.
+Audio intent: quiet start, click and a soft thud on the close.
+Audio-coupled idea: tab close → click + soft impact.
 Transition mood: soft → Scene 2
 
 ### Scene 2 — Reveal — 3.5–5.1s (1.6s)
