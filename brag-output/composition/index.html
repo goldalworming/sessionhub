@@ -1,0 +1,399 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=1920, height=1080" />
+    <title>sessionhub — brag</title>
+    <script src="assets/vendor/gsap.min.js"></script>
+    <script src="assets/audio-data.js"></script>
+    <style>
+      @font-face { font-family: "Inter"; font-weight: 400; src: url("assets/fonts/inter-latin-400-normal.woff2") format("woff2"); }
+      @font-face { font-family: "Inter"; font-weight: 500; src: url("assets/fonts/inter-latin-500-normal.woff2") format("woff2"); }
+      @font-face { font-family: "Inter"; font-weight: 600; src: url("assets/fonts/inter-latin-600-normal.woff2") format("woff2"); }
+      @font-face { font-family: "Inter"; font-weight: 700; src: url("assets/fonts/inter-latin-700-normal.woff2") format("woff2"); }
+      @font-face { font-family: "JetBrains Mono"; font-weight: 400; src: url("assets/fonts/jetbrains-mono-latin-400-normal.woff2") format("woff2"); }
+      @font-face { font-family: "JetBrains Mono"; font-weight: 700; src: url("assets/fonts/jetbrains-mono-latin-700-normal.woff2") format("woff2"); }
+
+      :root {
+        --bg: #0f1113;
+        --surface: #16191c;
+        --border: #24282c;
+        --text: #d6d9dc;
+        --muted: #8c959d;
+        --accent: #4c9a8a;
+        --accent-hi: #6cc2b0;
+        --green: #98c379;
+        --blue: #61afef;
+        --yellow: #e5c07b;
+        --ui: "Inter", system-ui, sans-serif;
+        --mono: "JetBrains Mono", monospace;
+      }
+      * { box-sizing: border-box; }
+      body { margin: 0; background: var(--bg); color: var(--text); font-family: var(--ui); }
+      #root { position: relative; width: 100%; height: 100%; overflow: hidden; background: var(--bg); }
+
+      /* Ambient accent glow: the one audio-reactive element. */
+      #glow-wrap { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; pointer-events: none; }
+      #glow {
+        width: 1500px; height: 1000px; border-radius: 50%;
+        background: radial-gradient(closest-side, rgba(76, 154, 138, 0.30), rgba(76, 154, 138, 0.08) 55%, rgba(76, 154, 138, 0) 100%);
+        opacity: 0.4;
+      }
+
+      .clip { position: absolute; inset: 0; }
+      .scene { position: absolute; inset: 0; width: 100%; height: 100%; opacity: 0; }
+      .center { display: flex; flex-direction: column; align-items: center; justify-content: center; }
+
+      /* Terminal window */
+      .term {
+        background: var(--surface); border: 1px solid var(--border); border-radius: 14px;
+        box-shadow: 0 30px 80px rgba(0, 0, 0, 0.55); overflow: hidden;
+        font-family: var(--mono); color: var(--text);
+      }
+      .term .bar { height: 48px; display: flex; align-items: center; gap: 10px; padding: 0 20px; border-bottom: 1px solid var(--border); font-size: 18px; color: var(--muted); }
+      .term .bar i { display: block; width: 13px; height: 13px; border-radius: 50%; background: #2c3136; }
+      .term .bar span { margin-left: 12px; }
+      .term .body { padding: 28px 34px; font-size: 26px; line-height: 1.6; }
+      .ln { opacity: 0; white-space: pre; }
+      .dim { color: var(--muted); }
+      .g { color: var(--green); } .b { color: var(--blue); } .y { color: var(--yellow); } .a { color: var(--accent-hi); }
+      .cursor { display: inline-block; width: 0.6em; height: 1.1em; background: var(--accent-hi); vertical-align: -0.18em; }
+
+      /* Scene 1 */
+      #s1-term { width: 1180px; }
+      #s1-lid { position: absolute; inset: 0; background: #050607; }
+      #s1-line1 { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; font-size: 84px; font-weight: 600; letter-spacing: -0.02em; opacity: 0; }
+      #s1-after { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 56px; opacity: 0; }
+      #s1-mini { width: 760px; box-shadow: 0 0 90px rgba(76, 154, 138, 0.28), 0 30px 80px rgba(0, 0, 0, 0.6); }
+      #s1-mini .body { font-size: 22px; padding: 22px 28px; }
+      #s1-line2 { font-size: 64px; font-weight: 600; letter-spacing: -0.02em; opacity: 0; }
+
+      /* Scene 2 */
+      #s2-row { display: flex; align-items: center; gap: 44px; }
+      #s2-icon { width: 170px; height: 170px; border-radius: 38px; opacity: 0; }
+      #s2-word { font-size: 164px; font-weight: 600; letter-spacing: -0.04em; opacity: 0; }
+      #s2-sub { margin-top: 36px; font-size: 44px; color: var(--muted); opacity: 0; }
+
+      /* Scene 3 — the app */
+      #s3-app {
+        position: absolute; left: 120px; top: 70px; width: 1680px; height: 800px;
+        display: flex; background: var(--bg); border: 1px solid var(--border); border-radius: 14px; overflow: hidden;
+        box-shadow: 0 40px 100px rgba(0, 0, 0, 0.6); opacity: 0;
+      }
+      .side { width: 400px; background: var(--surface); border-right: 1px solid var(--border); padding: 18px 0; }
+      .search { margin: 0 18px 22px; height: 44px; border: 1px solid var(--border); border-radius: 6px; display: flex; align-items: center; padding: 0 14px; color: var(--muted); font-size: 18px; }
+      .sec { padding: 0 20px 10px; font-size: 15px; letter-spacing: 0.12em; color: var(--muted); font-weight: 600; }
+      .row { display: flex; gap: 14px; padding: 12px 20px; opacity: 0; }
+      .row.sel { background: rgba(76, 154, 138, 0.14); }
+      .row .t { width: 58px; flex: 0 0 auto; font-family: var(--mono); font-size: 16px; color: var(--muted); padding-top: 3px; display: flex; align-items: center; gap: 7px; }
+      .row .t i { display: block; width: 9px; height: 9px; border-radius: 50%; border: 2px solid var(--accent-hi); }
+      .row .n { font-size: 20px; color: var(--text); }
+      .row .p { font-size: 15px; color: var(--muted); margin-top: 3px; }
+      .mainp { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+      .tabs { height: 50px; display: flex; align-items: stretch; border-bottom: 1px solid var(--border); font-size: 17px; color: var(--muted); }
+      .tabs div { display: flex; align-items: center; padding: 0 22px; border-right: 1px solid var(--border); }
+      .tabs .on { color: var(--text); background: var(--surface); box-shadow: inset 0 -2px 0 var(--accent-hi); }
+      .mainp .body { flex: 1; padding: 28px 34px; font-family: var(--mono); font-size: 22px; line-height: 1.65; }
+      .explorer { width: 360px; border-left: 1px solid var(--border); padding: 18px 0; font-size: 18px; }
+      .explorer .f { padding: 7px 24px; color: var(--text); }
+      .explorer .f.d { color: var(--muted); }
+      #s3-cap { position: absolute; left: 0; right: 0; bottom: 70px; text-align: center; font-size: 46px; font-weight: 500; opacity: 0; }
+
+      /* Scene 4 — anywhere */
+      #s4-desk { position: absolute; left: 150px; top: 150px; width: 1060px; opacity: 0; }
+      #s4-machines { display: flex; gap: 0; margin-bottom: 20px; font-size: 24px; position: relative; width: 460px; height: 58px; border: 1px solid var(--border); border-radius: 10px; background: var(--surface); }
+      #s4-hl { position: absolute; left: 5px; top: 5px; width: 220px; height: 46px; border-radius: 7px; background: rgba(76, 154, 138, 0.22); box-shadow: inset 0 0 0 1px var(--accent); }
+      .mach { position: relative; width: 230px; display: flex; align-items: center; justify-content: center; color: var(--text); }
+      #s4-desk .term .body { font-size: 24px; min-height: 470px; }
+      #s4-phone {
+        position: absolute; left: 1330px; top: 90px; width: 440px; height: 900px; border-radius: 56px;
+        background: #050607; border: 3px solid #2c3136; padding: 18px; opacity: 0;
+        box-shadow: 0 40px 100px rgba(0, 0, 0, 0.7), 0 0 80px rgba(76, 154, 138, 0.18);
+      }
+      .screen { width: 100%; height: 100%; border-radius: 40px; background: var(--surface); overflow: hidden; display: flex; flex-direction: column; }
+      .screen .top { height: 64px; display: flex; align-items: flex-end; justify-content: center; padding-bottom: 10px; font-size: 16px; color: var(--muted); border-bottom: 1px solid var(--border); }
+      .screen .body { flex: 1; padding: 18px 18px; font-family: var(--mono); font-size: 17px; line-height: 1.6; }
+      .keys { display: flex; flex-wrap: wrap; gap: 8px; padding: 14px 12px 26px; border-top: 1px solid var(--border); }
+      .key { position: relative; min-width: 54px; height: 50px; padding: 0 10px; border-radius: 8px; background: #22262a; display: flex; align-items: center; justify-content: center; font-size: 19px; color: var(--text); }
+      #s4-enter-hl { position: absolute; inset: 0; border-radius: 8px; background: var(--accent); opacity: 0; }
+      #s4-enter-lbl { position: relative; }
+      #s4-ripple { position: absolute; left: 50%; top: 50%; width: 90px; height: 90px; margin: -45px 0 0 -45px; border-radius: 50%; border: 3px solid var(--accent-hi); opacity: 0; }
+      #s4-cap { position: absolute; left: 150px; bottom: 90px; font-size: 48px; font-weight: 500; }
+      #s4-cap span { opacity: 0; }
+
+      /* Scene 5 — facts */
+      #s5-cards { display: flex; gap: 44px; }
+      .card { width: 520px; height: 330px; padding: 48px 44px; background: var(--surface); border: 1px solid var(--border); border-radius: 18px; opacity: 0; display: flex; flex-direction: column; justify-content: flex-start; }
+      .card .k { font-family: var(--mono); font-size: 20px; color: var(--accent-hi); margin-bottom: 26px; }
+      .card h3 { margin: 0 0 20px; font-size: 58px; font-weight: 600; letter-spacing: -0.02em; }
+      .card p { margin: 0; font-size: 28px; line-height: 1.4; color: var(--muted); }
+
+      /* Scene 6 — outro */
+      #s6-l1 { font-size: 58px; color: var(--muted); font-weight: 500; opacity: 0; }
+      #s6-l2 { margin-top: 18px; font-size: 96px; font-weight: 600; letter-spacing: -0.03em; opacity: 0; display: flex; align-items: center; gap: 22px; }
+      #s6-cur { width: 44px; height: 84px; background: var(--accent-hi); display: block; }
+      #s6-brand { margin-top: 80px; display: flex; align-items: center; gap: 40px; opacity: 0; }
+      #s6-brand img { width: 92px; height: 92px; border-radius: 22px; }
+      #s6-brand .w { font-size: 72px; font-weight: 600; letter-spacing: -0.03em; }
+      #s6-pill { font-family: var(--mono); font-size: 32px; padding: 18px 30px; border-radius: 12px; background: var(--surface); border: 1px solid var(--border); }
+      #s6-pill .a { margin-right: 14px; }
+    </style>
+  </head>
+  <body>
+    <div id="root" data-composition-id="main" data-start="0" data-width="1920" data-height="1080" data-duration="21.5">
+      <div id="glow-wrap"><div id="glow"></div></div>
+
+      <!-- Scene 1 — Hook -->
+      <section id="s1" class="clip" data-start="0" data-duration="3.75" data-track-index="1">
+        <div class="scene center" id="s1-in">
+          <div class="term" id="s1-term">
+            <div class="bar"><i></i><i></i><i></i><span>claude · api-server</span></div>
+            <div class="body">
+              <div class="ln s1l"><span class="a">●</span> Reading src/reconnect.rs</div>
+              <div class="ln s1l dim">  └ 212 lines</div>
+              <div class="ln s1l"><span class="a">●</span> Update(src/reconnect.rs)</div>
+              <div class="ln s1l dim">  └ <span class="g">+18</span> <span class="y">−4</span></div>
+              <div class="ln s1l"><span class="a">●</span> Bash(cargo test)</div>
+            </div>
+          </div>
+          <div id="s1-lid" data-layout-allow-occlusion></div>
+          <div id="s1-line1">You closed the laptop.</div>
+          <div id="s1-after">
+            <div class="term" id="s1-mini">
+              <div class="bar"><i></i><i></i><i></i><span>claude · api-server</span></div>
+              <div class="body">
+                <div class="ln s1m dim">  └ test result: ok</div>
+                <div class="ln s1m"><span class="a">●</span> Writing the changelog entry</div>
+                <div class="ln s1m"><span class="a">●</span> Bash(git commit)</div>
+              </div>
+            </div>
+            <div id="s1-line2">Your agent didn’t even notice.</div>
+          </div>
+        </div>
+      </section>
+
+      <!-- Scene 2 — Reveal -->
+      <section id="s2" class="clip" data-start="3.45" data-duration="1.95" data-track-index="2">
+        <div class="scene center" id="s2-in">
+          <div id="s2-row">
+            <img id="s2-icon" src="assets/icon.png" alt="" />
+            <div id="s2-word">sessionhub</div>
+          </div>
+          <div id="s2-sub">keeps coding-agent terminals alive in a daemon</div>
+        </div>
+      </section>
+
+      <!-- Scene 3 — the app -->
+      <section id="s3" class="clip" data-start="5.05" data-duration="4.5" data-track-index="3">
+        <div class="scene" id="s3-in">
+          <div id="s3-app">
+            <div class="side">
+              <div class="search">Search projects and sessions…</div>
+              <div class="sec">LIVE &amp; TODAY</div>
+              <div class="row sel s3r"><div class="t"><i></i>Live</div><div><div class="n">fix the flaky reconnect test</div><div class="p">api-server · claude</div></div></div>
+              <div class="row s3r"><div class="t"><i></i>Live</div><div><div class="n">migrate settings to toml</div><div class="p">docs-site · codex</div></div></div>
+              <div class="row s3r"><div class="t">15:31</div><div><div class="n">add dark mode to the editor</div><div class="p">web-app · opencode</div></div></div>
+              <div class="row s3r"><div class="t">09:12</div><div><div class="n">draft the release notes</div><div class="p">blog · claude</div></div></div>
+            </div>
+            <div class="mainp">
+              <div class="tabs"><div class="on">api-server · claude</div><div>docs-site · codex</div></div>
+              <div class="body">
+                <div class="ln s3l"><span class="a">●</span> Bash(cargo test)</div>
+                <div class="ln s3l dim">  └ test result: ok</div>
+                <div class="ln s3l"><span class="a">●</span> Writing the changelog entry</div>
+                <div class="ln s3l dim">  └ CHANGELOG.md <span class="g">+6</span></div>
+                <div class="ln s3l"><span class="a">●</span> Bash(git commit)</div>
+                <div class="ln s3l dim">  └ 1 file changed</div>
+              </div>
+            </div>
+            <div class="explorer">
+              <div class="sec">EXPLORER</div>
+              <div class="f d">› src</div>
+              <div class="f d">› tests</div>
+              <div class="f d">› web</div>
+              <div class="f">Cargo.toml</div>
+              <div class="f">CHANGELOG.md</div>
+              <div class="f">README.md</div>
+            </div>
+          </div>
+          <div id="s3-cap">A daemon owns the terminals. The browser connects.</div>
+        </div>
+      </section>
+
+      <!-- Scene 4 — anywhere -->
+      <section id="s4" class="clip" data-start="9.1" data-duration="4.0" data-track-index="4">
+        <div class="scene" id="s4-in">
+          <div id="s4-desk">
+            <div id="s4-machines">
+              <div id="s4-hl"></div>
+              <div class="mach">This machine</div>
+              <div class="mach">mac</div>
+            </div>
+            <div class="term">
+              <div class="bar"><i></i><i></i><i></i><span>claude · api-server</span></div>
+              <div class="body">
+                <div class="ln s4l"><span class="a">●</span> Bash(git commit)</div>
+                <div class="ln s4l dim">  └ 1 file changed</div>
+                <div class="ln s4l"><span class="a">●</span> Push to origin?</div>
+                <div class="ln s4l"><span class="a">❯</span> 1. Yes</div>
+                <div class="ln s4l dim">  2. No</div>
+              </div>
+            </div>
+          </div>
+          <div id="s4-phone">
+            <div class="screen">
+              <div class="top">api-server · claude</div>
+              <div class="body">
+                <div class="ln s4p" style="opacity:1"><span class="a">●</span> Push to origin?</div>
+                <div class="ln s4p" style="opacity:1"><span class="a">❯</span> 1. Yes</div>
+                <div class="ln s4p dim" style="opacity:1">  2. No</div>
+                <div class="ln" id="s4-new"><span class="a">●</span> Bash(git push)</div>
+                <div class="ln dim" id="s4-new2">  └ main → main</div>
+              </div>
+              <div class="keys">
+                <div class="key">Esc</div><div class="key">⇧Tab</div><div class="key">Ctrl</div>
+                <div class="key">←</div><div class="key">↑</div><div class="key">↓</div><div class="key">→</div>
+                <div class="key" id="s4-enter"><div id="s4-enter-hl"></div><span id="s4-enter-lbl">⏎</span><div id="s4-ripple"></div></div>
+              </div>
+            </div>
+          </div>
+          <div id="s4-cap"><span id="s4-c1">From another machine.</span> <span id="s4-c2">Or your phone.</span></div>
+        </div>
+      </section>
+
+      <!-- Scene 5 — facts -->
+      <section id="s5" class="clip" data-start="12.8" data-duration="3.95" data-track-index="5">
+        <div class="scene center" id="s5-in">
+          <div id="s5-cards">
+            <div class="card" id="c1"><div class="k">01</div><h3>Raw terminal</h3><p>Raw PTY passthrough with no prompt injection</p></div>
+            <div class="card" id="c2"><div class="k">02</div><h3>No chat layer</h3><p>The main interface is the agent’s own terminal</p></div>
+            <div class="card" id="c3"><div class="k">03</div><h3>One binary</h3><p>One binary with no frontend build step</p></div>
+          </div>
+        </div>
+      </section>
+
+      <!-- Scene 6 — outro -->
+      <section id="s6" class="clip" data-start="16.45" data-duration="5.05" data-track-index="6">
+        <div class="scene center" id="s6-in">
+          <div id="s6-l1">Close the browser.</div>
+          <div id="s6-l2"><span>The agent keeps running.</span><span id="s6-cur"></span></div>
+          <div id="s6-brand">
+            <img src="assets/icon.png" alt="" />
+            <div class="w">sessionhub</div>
+            <div id="s6-pill"><span class="a">$</span>sessionhubd start</div>
+          </div>
+        </div>
+      </section>
+
+      <!-- Audio -->
+      <audio id="vo" src="assets/voiceover.wav" data-start="0.5" data-duration="18.7" data-track-index="7" data-volume="1"></audio>
+      <audio id="bg-music" src="assets/music/happy-beats-business-moves-vol-12-by-ende-dot-app.mp3" data-start="0" data-duration="21.5" data-track-index="10" data-volume="1"
+        data-automation='{"version":1,"lanes":[{"target":"volume","points":[{"t":0,"v":0},{"t":0.5,"v":0.13},{"t":19.1,"v":0.13},{"t":19.6,"v":0.32},{"t":20.5,"v":0.32},{"t":21.5,"v":0}]}]}'></audio>
+      <audio id="sfx-lid" src="assets/sfx/impact/impactSoft_medium_001.ogg" data-start="0.62" data-duration="1" data-track-index="11" data-volume="0.6"></audio>
+      <audio id="sfx-word" src="assets/sfx/interface/drop_001.ogg" data-start="3.6" data-duration="1" data-track-index="12" data-volume="0.55"></audio>
+      <audio id="sfx-switch" src="assets/sfx/ui/switch7.ogg" data-start="9.27" data-duration="1" data-track-index="13" data-volume="0.55"></audio>
+      <audio id="sfx-tap" src="assets/sfx/interface/click_003.ogg" data-start="11.95" data-duration="1" data-track-index="14" data-volume="0.65"></audio>
+      <audio id="sfx-c1" src="assets/sfx/interface/drop_001.ogg" data-start="13.09" data-duration="1" data-track-index="15" data-volume="0.5"></audio>
+      <audio id="sfx-c3" src="assets/sfx/interface/drop_002.ogg" data-start="14.18" data-duration="1" data-track-index="16" data-volume="0.5"></audio>
+      <audio id="sfx-end" src="assets/sfx/impact/impactBell_heavy_000.ogg" data-start="18.54" data-duration="2.5" data-track-index="17" data-volume="0.45"></audio>
+    </div>
+
+    <script>
+      const tl = gsap.timeline({ paused: true });
+      const E = "power3.out";
+
+      // Scene fades (inner wrappers; the .clip sections themselves are never tweened).
+      function scene(id, tin, tout) {
+        tl.fromTo(id, { opacity: 0 }, { opacity: 1, duration: 0.3, ease: "none" }, tin);
+        if (tout != null) tl.to(id, { opacity: 0, duration: 0.3, ease: "none" }, tout);
+      }
+      function typeLines(sel, start, gap) {
+        gsap.utils.toArray(sel).forEach((el, i) => {
+          tl.fromTo(el, { opacity: 0 }, { opacity: 1, duration: 0.06, ease: "none" }, start + i * gap);
+        });
+      }
+
+      // ── Scene 1 — Hook ──
+      tl.set("#s1-in", { opacity: 1 }, 0);
+      typeLines(".s1l", 0.0, 0.08);
+      tl.fromTo("#s1-lid", { yPercent: -100 }, { yPercent: 0, duration: 0.35, ease: "power2.in" }, 0.35);
+      tl.set("#s1-term", { opacity: 0 }, 0.7);
+      tl.fromTo("#s1-line1", { opacity: 0, y: 16 }, { opacity: 1, y: 0, duration: 0.3, ease: E }, 0.72);
+      tl.to("#s1-line1", { opacity: 0, duration: 0.2 }, 1.85);
+      tl.fromTo("#s1-after", { opacity: 0 }, { opacity: 1, duration: 0.3 }, 1.95);
+      tl.fromTo("#s1-mini", { scale: 0.92 }, { scale: 1, duration: 0.6, ease: E }, 1.95);
+      typeLines(".s1m", 2.05, 0.35);
+      tl.fromTo("#s1-line2", { opacity: 0, y: 16 }, { opacity: 1, y: 0, duration: 0.35, ease: E }, 2.0);
+      tl.to("#s1-in", { opacity: 0, duration: 0.3, ease: "none" }, 3.45);
+
+      // ── Scene 2 — Reveal ──
+      scene("#s2-in", 3.45, 5.05);
+      tl.fromTo("#s2-icon", { opacity: 0, scale: 0.8 }, { opacity: 1, scale: 1, duration: 0.5, ease: "back.out(1.6)" }, 3.55);
+      tl.fromTo("#s2-word", { opacity: 0, x: -30 }, { opacity: 1, x: 0, duration: 0.5, ease: E }, 3.65);
+      tl.fromTo("#s2-sub", { opacity: 0, y: 14 }, { opacity: 1, y: 0, duration: 0.4, ease: E }, 3.9);
+
+      // ── Scene 3 — the app ──
+      scene("#s3-in", 5.05, 8.9);
+      tl.fromTo("#s3-app", { opacity: 0, y: 40 }, { opacity: 1, y: 0, duration: 0.6, ease: E }, 5.1);
+      // beat-grid: rows at 5.34, 6.00, 6.56, 7.09 (short labels; they stay on screen after landing)
+      [5.34, 6.0, 6.56, 7.09].forEach((t, i) => {
+        tl.fromTo(gsap.utils.toArray(".s3r")[i], { opacity: 0, x: -24 }, { opacity: 1, x: 0, duration: 0.35, ease: E }, t);
+      });
+      typeLines(".s3l", 5.6, 0.5);
+      tl.fromTo("#s3-cap", { opacity: 0, y: 14 }, { opacity: 1, y: 0, duration: 0.4, ease: E }, 5.6);
+
+      // ── Scene 4 — anywhere ──
+      scene("#s4-in", 9.2, 12.8);
+      tl.fromTo("#s4-desk", { opacity: 0, y: 30 }, { opacity: 1, y: 0, duration: 0.45, ease: E }, 9.2);
+      tl.set(".s4l", { opacity: 1 }, 9.2);
+      // beat-locked: 9.29s — machine switch
+      tl.fromTo("#s4-hl", { x: 0 }, { x: 228, duration: 0.35, ease: "power2.inOut" }, 9.29);
+      tl.fromTo("#s4-c1", { opacity: 0 }, { opacity: 1, duration: 0.3 }, 9.35);
+      tl.to("#s4-desk", { opacity: 0.45, duration: 0.5 }, 10.7);
+      tl.fromTo("#s4-phone", { opacity: 0, x: 120 }, { opacity: 1, x: 0, duration: 0.6, ease: E }, 10.65);
+      tl.fromTo("#s4-c2", { opacity: 0 }, { opacity: 1, duration: 0.3 }, 10.95);
+      // simulated tap on ⏎
+      tl.fromTo("#s4-ripple", { opacity: 0.9, scale: 0.4 }, { opacity: 0, scale: 1.4, duration: 0.5, ease: "power2.out" }, 11.95);
+      tl.fromTo("#s4-enter-hl", { opacity: 0 }, { opacity: 1, duration: 0.06 }, 11.95);
+      tl.to("#s4-enter-hl", { opacity: 0, duration: 0.3 }, 12.1);
+      tl.fromTo("#s4-new", { opacity: 0 }, { opacity: 1, duration: 0.06 }, 12.08);
+      tl.fromTo("#s4-new2", { opacity: 0 }, { opacity: 1, duration: 0.06 }, 12.4);
+
+      // ── Scene 5 — facts ──
+      scene("#s5-in", 12.8, 16.45);
+      // beat-locked: 13.11s — first card; beat-grid: cards at 13.11, 13.64, 14.20, then the set holds
+      [["#c1", 13.11], ["#c2", 13.64], ["#c3", 14.2]].forEach(([id, t]) => {
+        tl.fromTo(id, { opacity: 0, y: 40 }, { opacity: 1, y: 0, duration: 0.45, ease: E }, t);
+      });
+
+      // ── Scene 6 — outro ──
+      scene("#s6-in", 16.45, null);
+      tl.fromTo("#s6-l1", { opacity: 0, y: 14 }, { opacity: 1, y: 0, duration: 0.4, ease: E }, 16.6);
+      tl.fromTo("#s6-l2", { opacity: 0, y: 18 }, { opacity: 1, y: 0, duration: 0.45, ease: E }, 17.8);
+      // cursor blink: finite, deterministic
+      for (let t = 18.3; t < 21.4; t += 1.0) {
+        tl.set("#s6-cur", { opacity: 0 }, t);
+        tl.set("#s6-cur", { opacity: 1 }, t + 0.5);
+      }
+      // beat-locked: 18.56s — brand + command land
+      tl.fromTo("#s6-brand", { opacity: 0, y: 30 }, { opacity: 1, y: 0, duration: 0.5, ease: E }, 18.56);
+      tl.to("#s6-in", { opacity: 0, duration: 0.5, ease: "none" }, 21.0);
+
+      // ── Audio-reactive: music bass breathes the accent glow ──
+      const AD = window.AUDIO_DATA;
+      const glow = document.getElementById("glow");
+      for (let f = 0; f < AD.totalFrames; f++) {
+        tl.call(
+          ((fr) => () => {
+            const bass = (fr.bands[0] + fr.bands[1]) / 2;
+            gsap.set(glow, { opacity: 0.3 + 0.4 * bass, scale: 1 + 0.08 * bass });
+          })(AD.frames[f]),
+          [],
+          f / AD.fps,
+        );
+      }
+
+      window.__timelines["main"] = tl;
+    </script>
+  </body>
+</html>

@@ -1,0 +1,9 @@
+You closed the laptop. Your agent didn't even notice.
+
+This is session hub. A daemon keeps every agent terminal alive, and your browser just plugs in.
+
+Resume it from another machine. Or check in from your phone.
+
+Raw terminal. No chat layer. One binary.
+
+Close the browser. The agent keeps running.

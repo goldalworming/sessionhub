@@ -1,0 +1,2 @@
+Introducing sessionhub: close the laptop, and your coding agent keeps running.
+It keeps Claude Code, Codex, and opencode terminals alive in a daemon and hands the raw terminal to your browser, on any machine or your phone. One binary.
