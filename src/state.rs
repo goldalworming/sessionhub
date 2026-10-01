@@ -215,6 +215,15 @@ struct Client {
     /// A copy of the receiving end, used only to drop the oldest chunk when the
     /// queue is full. Never used to read ordinary messages.
     rx: Receiver<Out>,
+    /// A chunk was dropped and the client has not been told yet (see
+    /// `send_to`). Only the actor touches it.
+    lost: std::cell::Cell<bool>,
+}
+
+impl Client {
+    fn new(tx: Sender<Out>, rx: Receiver<Out>) -> Self {
+        Client { tx, rx, lost: std::cell::Cell::new(false) }
+    }
 }
 
 impl Terminal {
@@ -348,7 +357,7 @@ pub fn run(cfg: Config, rx: Receiver<Cmd>, tx: Sender<Cmd>, registry_cfg: Sender
     for cmd in rx.iter() {
         match cmd {
             Cmd::ClientUp { id, tx, rx } => {
-                clients.insert(id, Client { tx, rx });
+                clients.insert(id, Client::new(tx, rx));
                 info!(client = id, "client connected");
                 crate::telemetry::track("client_open", serde_json::json!({ "client": id, "clients": clients.len() }));
                 send_state(&cfg, &projects, &agent_names, scanned, &clients, &terminals, &dismissed, Some(id));
@@ -3347,13 +3356,25 @@ fn json(msg: &ServerMsg) -> Out {
 /// Send to one client. A full queue means that client has fallen behind: drop
 /// the oldest chunk and try again. What matters is the last screen, not the
 /// full history — and the PTY reader must never stall.
+/// Sent once a client has missed output, so it can draw its screens again.
+pub const RESYNC: &str = r#"{"t":"resync"}"#;
+
 fn send_to(clients: &HashMap<ClientId, Client>, id: ClientId, out: Out) {
     let Some(c) = clients.get(&id) else { return };
     match c.tx.try_send(out) {
-        Ok(()) => {}
+        Ok(()) => {
+            // A chunk was dropped earlier: say so, now that there is room. A
+            // missing piece of a terminal's output leaves its screen wrong for
+            // good — lost letters, status lines left behind — and only the
+            // client can put that right, by asking for the screen again.
+            if c.lost.get() && c.tx.try_send(Out::Text(RESYNC.to_string())).is_ok() {
+                c.lost.set(false);
+            }
+        }
         Err(TrySendError::Full(out)) => {
             let _ = c.rx.try_recv();
             let _ = c.tx.try_send(out);
+            c.lost.set(true);
         }
         Err(TrySendError::Disconnected(_)) => {}
     }
@@ -3367,7 +3388,7 @@ mod tests {
     fn client_pair() -> (HashMap<ClientId, Client>, Receiver<Out>) {
         let (tx, rx) = bounded(CLIENT_QUEUE);
         let mut m = HashMap::new();
-        m.insert(1u64, Client { tx, rx: rx.clone() });
+        m.insert(1u64, Client::new(tx, rx.clone()));
         (m, rx)
     }
 
@@ -3567,6 +3588,28 @@ mod tests {
     }
 
     #[test]
+    fn a_client_that_missed_output_is_told_once_there_is_room() {
+        let (clients, rx) = client_pair();
+        for i in 0..=CLIENT_QUEUE {
+            send_to(&clients, 1, Out::Binary(vec![i as u8]));
+        }
+        // Still full: nowhere to put the notice yet, and nothing said early.
+        let drained: Vec<Out> = rx.try_iter().collect();
+        assert!(drained.iter().all(|o| matches!(o, Out::Binary(_))), "no notice while the queue was full");
+
+        // Room again: the next chunk goes out, the notice right behind it.
+        send_to(&clients, 1, Out::Binary(vec![b'Y']));
+        let next: Vec<Out> = rx.try_iter().collect();
+        assert!(matches!(&next[0], Out::Binary(b) if b == &vec![b'Y']));
+        assert!(matches!(&next[1], Out::Text(t) if t == RESYNC), "told it missed something");
+
+        // Once told, not again.
+        send_to(&clients, 1, Out::Binary(vec![b'Z']));
+        let after: Vec<Out> = rx.try_iter().collect();
+        assert_eq!(after.len(), 1, "the notice is not repeated");
+    }
+
+    #[test]
     fn send_to_unknown_client_is_ignored() {
         let (clients, _rx) = client_pair();
         send_to(&clients, 99, Out::Binary(vec![1]));
@@ -3578,7 +3621,7 @@ mod tests {
         drop(rx);
         let mut clients = HashMap::new();
         let (_tx2, rx2) = bounded(4);
-        clients.insert(1u64, Client { tx, rx: rx2 });
+        clients.insert(1u64, Client::new(tx, rx2));
         send_to(&clients, 1, Out::Binary(vec![1]));
     }
 
