@@ -323,7 +323,7 @@ html, body {
 .twist.picon img { width: 15px; height: 15px; object-fit: contain; border-radius: 3px; }
 /* A finger needs more than 20px to hit — the row is taller there anyway. */
 @media (pointer: coarse) {
-  .project > .row > .twist.picon { width: 30px; height: 30px; }
+  .project > .row > .twist.picon { width: 26px; height: 30px; }
   .twist.picon svg, .twist.picon img { width: 18px; height: 18px; }
 }
 
@@ -697,6 +697,21 @@ html, body {
 .bcount { font-family: var(--mono); flex: 0 0 auto; }
 
 .session { padding-left: 22px; }
+
+/* A project's own rows step in under it, one level at a time: the project's
+   icon against the left edge, the day groups and the saved-terminal fold
+   under its name, the sessions under those. They used to start level with the
+   icon, so "today" read as a sibling of the project rather than part of it.
+   Kept shallow — a narrow sidebar has little room — but `--pin` still past
+   the project icon's left edge (4px), and `--pin2` a step further. */
+.project { --pin: 12px; --pin2: 16px; }
+.project > .row { padding-left: 4px; }
+.project > .bhead,
+.project > .zsvc.pgroup { padding-left: var(--pin); }
+.project > .session,
+.project > .session.zsub { padding-left: var(--pin2); }
+/* The wider touch icon moves the name; the rows under it follow. */
+@media (pointer: coarse) { .project { --pin: 14px; --pin2: 18px; } }
 
 /* ------------------------------------------------------------ rename */
 
@@ -2870,7 +2885,7 @@ html, body {
 .bbox .frows { position: static; }
 .bbox .fscroll { contain: layout paint style; }
 
-.bhead {
+#browser .bhead {
   flex: 0 0 auto;
   display: flex;
   align-items: center;
@@ -2879,7 +2894,7 @@ html, body {
   padding: 0 4px 0 6px;
   border-bottom: 1px solid var(--border);
 }
-.bhead .bnav {
+#browser .bhead .bnav {
   flex: 0 0 auto;
   font: inherit;
   font-size: 11px;
@@ -2891,8 +2906,8 @@ html, body {
   border-radius: var(--radius);
   cursor: pointer;
 }
-.bhead .bnav:hover:not(:disabled) { color: var(--text); background: color-mix(in srgb, var(--text) 10%, transparent); }
-.bhead .bnav:disabled { opacity: 0.35; cursor: default; }
+#browser .bhead .bnav:hover:not(:disabled) { color: var(--text); background: color-mix(in srgb, var(--text) 10%, transparent); }
+#browser .bhead .bnav:disabled { opacity: 0.35; cursor: default; }
 
 .bcrumb {
   flex: 1 1 auto;
