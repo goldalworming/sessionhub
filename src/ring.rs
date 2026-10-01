@@ -8,11 +8,60 @@ use std::collections::VecDeque;
 pub struct Ring {
     buf: VecDeque<u8>,
     cap: usize,
+    /// Every byte ever pushed, kept or not: the stream position just past the
+    /// newest byte. A client that counts what it received names a position in
+    /// the same terms, which is what lets it resume rather than replay.
+    total: u64,
+}
+
+/// How much of what a resuming client already has is compared before it is
+/// believed (see `resume`).
+pub const RESUME_TAIL: u64 = 256;
+
+/// FNV-1a, 32 bit — the same few lines in the page, so both ends can name a
+/// stretch of output without sending it.
+pub fn fnv1a(bytes: impl IntoIterator<Item = u8>) -> u32 {
+    let mut h: u32 = 0x811c_9dc5;
+    for b in bytes {
+        h ^= b as u32;
+        h = h.wrapping_mul(0x0100_0193);
+    }
+    h
 }
 
 impl Ring {
     pub fn new(cap: usize) -> Ring {
-        Ring { buf: VecDeque::new(), cap }
+        Ring { buf: VecDeque::new(), cap, total: 0 }
+    }
+
+    /// The stream position just past the newest byte.
+    pub fn end(&self) -> u64 {
+        self.total
+    }
+
+    /// What came after `since`, for a client that already has everything up to
+    /// it — `None` when it must have the whole buffer replayed instead.
+    ///
+    /// The client's word is not taken for it: `tail` is its hash of the
+    /// `RESUME_TAIL` bytes it holds just before `since`, and they must match
+    /// what is here. A client that missed a chunk on the way (a full queue
+    /// drops the oldest) counts fewer bytes than were sent, so its position
+    /// points at other bytes than it holds — and a resume from there would
+    /// write the stream onto its screen out of step for good.
+    pub fn resume(&self, since: u64, tail: u32) -> Option<Vec<u8>> {
+        if since > self.total {
+            return None;
+        }
+        let n = since.min(RESUME_TAIL);
+        let start = self.total - self.buf.len() as u64;
+        if since - n < start {
+            return None;
+        }
+        let from = (since - start) as usize;
+        if fnv1a(self.buf.range(from - n as usize..from).copied()) != tail {
+            return None;
+        }
+        Some(self.buf.range(from..).copied().collect())
     }
 
     /// Store a chunk of output. Past capacity, the oldest bytes are dropped.
@@ -20,6 +69,7 @@ impl Ring {
         if self.cap == 0 {
             return;
         }
+        self.total += data.len() as u64;
         // A chunk larger than the whole buffer: its tail is all that fits.
         let data = if data.len() > self.cap { &data[data.len() - self.cap..] } else { data };
 
@@ -105,6 +155,44 @@ mod tests {
         let r = Ring::new(2 * 1024 * 1024);
         assert!(r.is_empty());
         assert!(r.snapshot().is_empty());
+    }
+
+    #[test]
+    fn a_client_that_has_everything_up_to_a_point_gets_the_rest() {
+        let mut r = Ring::new(1024);
+        r.push(b"hello ");
+        let since = r.end();
+        let tail = fnv1a(b"hello ".iter().copied());
+        r.push(b"world");
+        assert_eq!(r.resume(since, tail).as_deref(), Some(&b"world"[..]));
+        assert_eq!(r.resume(r.end(), fnv1a(b"hello world".iter().copied())).as_deref(), Some(&b""[..]));
+    }
+
+    #[test]
+    fn a_resume_whose_bytes_do_not_match_is_refused() {
+        let mut r = Ring::new(1024);
+        r.push(b"abcdefgh");
+        // Claims 4 bytes, but holds "abce" — it missed one, and counts short.
+        assert!(r.resume(4, fnv1a(b"abce".iter().copied())).is_none());
+        assert!(r.resume(4, fnv1a(b"abcd".iter().copied())).is_some());
+    }
+
+    #[test]
+    fn a_resume_from_before_what_is_kept_is_refused() {
+        let stream: Vec<u8> = (0..600u32).map(|i| (i % 251) as u8).collect();
+        let mut r = Ring::new(300);
+        r.push(&stream); // only the last 300 kept: positions 300..600
+        assert_eq!(r.end(), 600);
+        let tail_at = |since: usize| fnv1a(stream[since - RESUME_TAIL as usize..since].iter().copied());
+        assert!(r.resume(400, tail_at(400)).is_none(), "the tail it vouches with is already gone");
+        assert!(r.resume(700, 0).is_none(), "beyond the end — another terminal, or a restart");
+        assert_eq!(r.resume(580, tail_at(580)).as_deref(), Some(&stream[580..]));
+    }
+
+    #[test]
+    fn the_hash_matches_the_page() {
+        // web/app.js computes the same thing; a pinned value keeps them in step.
+        assert_eq!(fnv1a(b"sessionhub".iter().copied()), 0x3c24_ca7e);
     }
 
     #[test]

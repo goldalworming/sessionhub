@@ -587,6 +587,7 @@ function openView(id, focus = true) {
   // The screen is cleared first: the server will resend the ring buffer, and
   // without a reset its contents would be drawn twice after a reconnect.
   entry.term.reset();
+  entry.pos = null;
   entry.awaitingReplay = true;
   conn.send({ t: 'attach', id, cols: size.cols, rows: size.rows });
   if (focus) show(id);
@@ -621,7 +622,7 @@ function show(id) {
       dropHeld(entry);
       requestReplay(id, entry);
     } else if (entry.held) {
-      for (const chunk of entry.held) entry.term.write(chunk);
+      for (const chunk of entry.held) feed(entry, chunk);
       dropHeld(entry);
     }
     entry.term.focus();
@@ -1937,6 +1938,31 @@ function paintAllActivity(m) {
   }
 }
 
+/// The Explorer follows what agents write, without being asked and without
+/// watching the disk: a terminal of the project it shows finishing a run is
+/// when new files are most likely there, so it looks again then — and, while
+/// one is still running, at most every `TREE_BUSY_MS`. Nothing at all while
+/// everything is quiet, the panel is closed, or the page is not on screen; and
+/// a look that finds the same files redraws nothing (`FileTree.update`).
+const TREE_BUSY_MS = 10000;
+let treeLookedAt = 0;
+let treeTimer = null;
+function nudgeTree(m, id, wait = 1500) {
+  if (m !== current || !sidePanel || treeTimer) return;
+  const view = sidePanel.tree.el;
+  if (view.hidden || view.offsetParent === null || document.visibilityState !== 'visible') return;
+  if (id !== undefined) {
+    const t = state.terminals.find((x) => x.id === id);
+    const root = explorerRoot();
+    if (!t || !root || !samePath(t.project, root.path)) return;
+  }
+  treeTimer = setTimeout(() => {
+    treeTimer = null;
+    treeLookedAt = performance.now();
+    sidePanel.tree.refreshQuietly();
+  }, wait);
+}
+
 /// The clock side of the heuristic: output marks the entry busy the moment it
 /// arrives (in `onOutput`); this sweep is what notices the silence afterwards.
 setInterval(() => {
@@ -1960,6 +1986,7 @@ setInterval(() => {
         entry.streaming = streaming;
         paintActivity(m, id, entry);
       }
+      if (streaming && now - treeLookedAt > TREE_BUSY_MS) nudgeTree(m, id, 0);
       if (now - entry.lastOut < IDLE_MS) continue;
       // The run is over. Whether anyone should hear about it is a different
       // question from whether it happened.
@@ -1968,6 +1995,7 @@ setInterval(() => {
       entry.busySince = undefined;
       entry.runBytes = 0;
       entry.streaming = false;
+      nudgeTree(m, id);
       // The agent has stopped, but what it started has not. Announcing it now
       // would be the one thing worse than saying nothing: it is exactly the
       // moment you would walk away. The announcement waits for the tree to go
@@ -2807,7 +2835,10 @@ conn.on.onStatus = (kind, m) => {
   };
   if (m && kind === 'lost' && was !== 'lost') {
     m.lostAt = performance.now();
-    tele.track('conn_lost', { remote: !!m.via });
+    // Why, and whether the page was even on screen: a phone dropping its
+    // socket while asleep is not the same problem as a link dying under
+    // someone typing.
+    tele.track('conn_lost', { remote: !!m.via, why: m.conn.lostWhy || '', hidden: document.hidden });
   }
   if (m && kind === 'open' && m.lostAt) {
     tele.track('conn_back', { remote: !!m.via, ms: Math.round(performance.now() - m.lostAt) });
@@ -2915,14 +2946,78 @@ function dropHeld(entry) {
 /// reconnect, or when a terminal that went stale while hidden (see `onOutput`)
 /// comes back on screen. Either way the local screen is behind, and a full
 /// replay is simpler and cheaper than tracking exactly what was missed.
-function requestReplay(id, entry, via = conn) {
-  // Whatever was held belongs to the screen being thrown away.
+/// How many of the last bytes on a screen are kept to vouch for its position
+/// when resuming — `ring::RESUME_TAIL` on the daemon.
+const RESUME_TAIL = 256;
+
+/// Write terminal output onto its screen, and keep count: `pos` is the stream
+/// position the screen holds everything up to, `tail` its last bytes. The two
+/// are what let a reconnect ask for only what it missed (`requestReplay`).
+function feed(entry, data) {
+  entry.term.write(data);
+  if (entry.pos == null) return;
+  entry.pos += data.byteLength;
+  const t = entry.tail || new Uint8Array(0);
+  if (data.byteLength >= RESUME_TAIL) {
+    entry.tail = data.slice(data.byteLength - RESUME_TAIL);
+  } else {
+    const keep = Math.min(t.length, RESUME_TAIL - data.byteLength);
+    const next = new Uint8Array(keep + data.byteLength);
+    next.set(t.subarray(t.length - keep));
+    next.set(data, keep);
+    entry.tail = next;
+  }
+}
+
+/// FNV-1a, 32 bit — the same as `ring::fnv1a` on the daemon.
+function fnv1a(bytes) {
+  let h = 0x811c9dc5;
+  for (const b of bytes) {
+    h ^= b;
+    h = Math.imul(h, 0x01000193) >>> 0;
+  }
+  return h;
+}
+
+/// The daemon says where the bytes of an attach start (sent before them). The
+/// position asked to resume from means the screen simply goes on; anything
+/// else is a full replay, and the screen starts over from there.
+conn.on.onReplay = (msg, m) => {
+  const entry = m.terms.get(msg.id);
+  if (!entry) return;
+  if (entry.pos === msg.from) return;
   dropHeld(entry);
   entry.term.reset();
+  entry.pos = msg.from;
+  entry.tail = new Uint8Array(0);
+};
+
+/// Bring a screen up to date from the daemon: after a reconnect, when a
+/// terminal that went stale while hidden comes back on screen, or after output
+/// was dropped on its way here.
+///
+/// It resumes when it can — the daemon sends only what this screen has not
+/// seen — which is what a phone waking up mostly needs: a few lines, where a
+/// replay was 2 MB through the tunnel and a reset, every time. It falls back to
+/// the whole ring buffer when the daemon is too old to resume, the screen's
+/// position is not known, or the daemon cannot vouch for it.
+function requestReplay(id, entry, m = current) {
+  // What was held is not on the screen; a resume fetches it again, a replay
+  // starts over without it.
+  dropHeld(entry);
   entry.awaitingReplay = true;
   const size = entry.lastSize || { cols: 80, rows: 24 };
-  // The server resends the ring buffer, so the screen comes back whole by itself.
-  via.send({ t: 'attach', id, cols: size.cols, rows: size.rows });
+  const msg = { t: 'attach', id, cols: size.cols, rows: size.rows };
+  const tail = entry.tail;
+  if (m.canResume && entry.pos != null && tail && tail.length === Math.min(entry.pos, RESUME_TAIL)) {
+    msg.since = entry.pos;
+    msg.tail = fnv1a(tail);
+  } else {
+    // The server resends the ring buffer, so the screen comes back whole by itself.
+    entry.term.reset();
+    entry.pos = null;
+  }
+  m.conn.send(msg);
 }
 
 function reattachAll() {
@@ -3020,6 +3115,8 @@ function revealNewProject() {
 }
 
 conn.on.onAttached = (msg, m) => {
+  // A daemon that reports where the stream is can also resume from there.
+  if (msg.end !== undefined) m.canResume = true;
   if (m !== current) return;
   const asked = showNextAttach === m && !terms.has(msg.id);
   if (asked) showNextAttach = null;
@@ -3066,7 +3163,7 @@ conn.on.onOutput = (id, data, m) => {
         }
       }
     } else {
-      entry.term.write(data);
+      feed(entry, data);
       if (entry.openedAt && !entry.firstOut) {
         entry.firstOut = true;
         tele.track('first_output', { ms: Math.round(performance.now() - entry.openedAt) });
@@ -3094,7 +3191,11 @@ conn.on.onOutput = (id, data, m) => {
 /// replayed when next shown; the ones on screen once their output goes quiet,
 /// rather than piling a whole ring buffer onto a link that is already behind.
 conn.on.onResync = (msg, m) => {
+  tele.track('resync', { remote: !!m.via });
   for (const [id, entry] of m.terms) {
+    // A screen with a piece missing is not at the position it counted to:
+    // only a full replay puts it right, never a resume from there.
+    entry.pos = null;
     if (entry.host.hidden) {
       dropHeld(entry);
       entry.stale = true;
@@ -3107,7 +3208,7 @@ conn.on.onResync = (msg, m) => {
         return;
       }
       entry.resyncTimer = null;
-      if (m.terms.has(id)) requestReplay(id, entry, m.conn);
+      if (m.terms.has(id)) requestReplay(id, entry, m);
     };
     entry.resyncTimer = setTimeout(settle, RESYNC_QUIET_MS);
   }
@@ -3390,6 +3491,9 @@ machineBar.paint(current);
 /// until a minute-long timeout, or until the tab is closed and opened again.
 function probeLinks() {
   for (const m of machines) if (m.started) m.conn.probe();
+  // Coming back from another window is also when files written meanwhile —
+  // by an editor, a build — should show; once, and not on every focus flicker.
+  if (performance.now() - treeLookedAt > 5000) nudgeTree(current, undefined, 300);
 }
 document.addEventListener('visibilitychange', () => {
   if (document.visibilityState === 'visible') probeLinks();

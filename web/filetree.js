@@ -181,6 +181,18 @@ export class FileTree {
     this.rebuild();
   }
 
+  /// Ask again for every folder on show, without the "Loading…" a refresh by
+  /// hand shows — this one happens on its own (an agent just wrote files), and
+  /// a tree blinking under someone reading it is worse than a second's delay.
+  /// What is already listed stays until the answer comes; an answer that
+  /// changes nothing redraws nothing (`update`).
+  refreshQuietly() {
+    for (const path of this.expanded) {
+      const state = this.dirs.get(path);
+      if (state && !state.loading) this.onList(path);
+    }
+  }
+
   request(path) {
     const state = this.dirs.get(path);
     if (state?.loading) return;
@@ -191,6 +203,9 @@ export class FileTree {
   /// The daemon's answer for one folder.
   update(msg) {
     this.canMake = msg.can_make === true;
+    const had = this.dirs.get(msg.path);
+    const names = (list) => list.map((e) => `${e.is_dir ? 'd' : 'f'}${e.name}`).join('\0');
+    const same = had && !had.loading && !had.failed && names(had.entries) === names(msg.entries || []);
     this.dirs.set(msg.path, {
       entries: msg.entries || [],
       loading: false,
@@ -201,7 +216,9 @@ export class FileTree {
       parent: msg.parent || null,
       name: msg.name || '',
     });
-    this.rebuild();
+    // The same files as before — the usual answer to `refreshQuietly` — need
+    // no new rows; rebuilding would only cost a repaint for nothing.
+    if (!same) this.rebuild();
   }
 
   /// Something was created. The folder is asked for again rather than the new

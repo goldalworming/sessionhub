@@ -73,6 +73,10 @@ export class Conn {
     this.answers = false;
     /// The pending probe (see `probe`), so only one runs at a time.
     this.probing = null;
+    /// Why the link was last declared lost, for the telemetry: 'closed' (the
+    /// socket ended), 'silent' (nothing heard for SILENT_MS), 'probe' (a probe
+    /// went unanswered) or 'dial' (the handshake never completed).
+    this.lostWhy = null;
     // handlers: onState, onAttached, onSize, onExit, onError, onMem,
     //           onOutput(id, bytes), onStatus(kind) — all of them take
     //           `owner` as their last argument.
@@ -94,6 +98,7 @@ export class Conn {
     clearTimeout(this.dial);
     this.dial = setTimeout(() => {
       if (ws.readyState !== WebSocket.CONNECTING) return;
+      this.lostWhy = 'dial';
       try {
         ws.close();
       } catch {
@@ -108,6 +113,7 @@ export class Conn {
       // Re-proved per connection: the machine on the other end may have changed
       // version between one socket and the next.
       this.answers = false;
+      this.lostWhy = null;
       this.startBeat();
       this.emit('onStatus', 'open');
     };
@@ -155,6 +161,7 @@ export class Conn {
         cloudflare: 'onCloudflare',
         update: 'onUpdate',
         resync: 'onResync',
+        replay: 'onReplay',
       };
       const fn = map[msg.t];
       if (fn) this.emit(fn, msg);
@@ -164,6 +171,7 @@ export class Conn {
       clearTimeout(this.dial);
       this.stopBeat();
       if (this.closedByUs) return;
+      this.lostWhy ||= 'closed';
       this.emit('onStatus', 'lost');
       // Backoff from 0.5 s to 8 s. The user has to do nothing.
       this.timer = setTimeout(() => this.connect(), this.delay);
@@ -184,6 +192,7 @@ export class Conn {
     this.beat = setInterval(() => {
       if (!this.ready) return;
       if (this.answers && Date.now() - this.lastSeen > SILENT_MS) {
+        this.lostWhy = 'silent';
         this.emit('onStatus', 'lost');
         try {
           this.ws.close();
@@ -222,6 +231,7 @@ export class Conn {
     this.probing = setTimeout(() => {
       this.probing = null;
       if (this.ready && this.lastSeen < asked) {
+        this.lostWhy = 'probe';
         this.emit('onStatus', 'lost');
         this.retry();
       }

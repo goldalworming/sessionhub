@@ -121,16 +121,13 @@ impl Pty {
                 match reader.read(&mut chunk) {
                     Ok(0) | Err(_) => break,
                     Ok(n) => {
-                        let (clean, queries) = filter.feed(&chunk[..n]);
-                        // ConPTY sends a DSR (ESC[6n) at start and WAITS for an
-                        // answer before drawing anything. The daemon has to
-                        // answer it itself: a terminal with no client attached
-                        // must keep running, and that is the heart of this
-                        // product. The query is also not forwarded, so xterm.js
-                        // does not answer too and the child receive two replies.
-                        for _ in 0..queries {
+                        let (clean, replies) = filter.feed(&chunk[..n]);
+                        // Answered here, at once — see `ANSWERED`. A terminal
+                        // with no client attached must keep running, and that
+                        // is the heart of this product.
+                        for reply in replies {
                             if let Ok(mut w) = responder.lock() {
-                                let _ = w.write_all(b"\x1b[1;1R");
+                                let _ = w.write_all(reply);
                                 let _ = w.flush();
                             }
                         }
@@ -509,43 +506,54 @@ fn build_command(resolved: &Path, args: &[String]) -> CommandBuilder {
     cmd
 }
 
-const DSR: &[u8] = b"\x1b[6n";
+/// Terminal queries the daemon answers itself, and what it answers.
+///
+/// A program that asks waits for the reply before going on. Left to the browser,
+/// the reply has to travel daemon → socket → xterm.js → socket → daemon, and
+/// only once a page has attached at all — a terminal nobody is watching never
+/// gets one. ConPTY's own `ESC[6n` at start draws nothing until it is answered;
+/// Claude Code asks `ESC[c` (primary device attributes) ~100 ms into starting
+/// and was measured ready in 1.05 s answered at once, 1.7 s answered by the
+/// browser, 3.9 s not answered. The replies are what xterm.js itself would say.
+/// Stripped from the output, so the browser never answers a second time — and
+/// never again from a replay, where an old query would be answered into
+/// whatever the program is doing now.
+const ANSWERED: &[(&[u8], &[u8])] = &[
+    (b"\x1b[6n", b"\x1b[1;1R"),
+    (b"\x1b[c", b"\x1b[?1;2c"),
+    (b"\x1b[0c", b"\x1b[?1;2c"),
+];
 
-/// Strips `ESC[6n` out of the output stream, surviving a sequence split across
-/// chunks.
+/// Strips the queries in `ANSWERED` out of the output stream, surviving one
+/// split across chunks.
 #[derive(Default)]
 struct DsrFilter {
-    matched: usize,
+    /// Bytes that may yet turn out to be the start of a query.
+    held: Vec<u8>,
 }
 
 impl DsrFilter {
-    /// Returns (output without DSR, number of DSRs found).
-    fn feed(&mut self, data: &[u8]) -> (Vec<u8>, usize) {
-        let mut out = Vec::with_capacity(data.len());
-        let mut found = 0;
+    /// Returns (output without the queries, the reply for each one found, in order).
+    fn feed(&mut self, data: &[u8]) -> (Vec<u8>, Vec<&'static [u8]>) {
+        let mut out = Vec::with_capacity(data.len() + self.held.len());
+        let mut replies = Vec::new();
         for &b in data {
-            if b == DSR[self.matched] {
-                self.matched += 1;
-                if self.matched == DSR.len() {
-                    found += 1;
-                    self.matched = 0;
+            self.held.push(b);
+            loop {
+                if let Some((_, reply)) = ANSWERED.iter().find(|(q, _)| *q == self.held.as_slice()) {
+                    replies.push(*reply);
+                    self.held.clear();
+                    break;
                 }
-                continue;
-            }
-            // No match: emit the prefix held back, then re-test this byte from
-            // the start. `ESC[6n` has no prefix that is also a suffix, so one
-            // re-test is enough.
-            if self.matched > 0 {
-                out.extend_from_slice(&DSR[..self.matched]);
-                self.matched = 0;
-                if b == DSR[0] {
-                    self.matched = 1;
-                    continue;
+                if self.held.is_empty() || ANSWERED.iter().any(|(q, _)| q.starts_with(&self.held)) {
+                    break;
                 }
+                // Not a query after all: its first byte is ordinary output, and
+                // the rest is tried again from the top — it may start one.
+                out.push(self.held.remove(0));
             }
-            out.push(b);
         }
-        (out, found)
+        (out, replies)
     }
 }
 
@@ -560,7 +568,7 @@ mod tests {
         for c in chunks {
             let (o, k) = f.feed(c);
             out.extend_from_slice(&o);
-            n += k;
+            n += k.len();
         }
         (out, n)
     }
@@ -606,10 +614,35 @@ mod tests {
         let mut f = DsrFilter::default();
         let (out, n) = f.feed(b"x\x1b[6");
         assert_eq!(out, b"x", "prefix belum boleh dikeluarkan");
-        assert_eq!(n, 0);
+        assert!(n.is_empty());
         let (out, n) = f.feed(b"n");
         assert!(out.is_empty());
+        assert_eq!(n.len(), 1);
+    }
+
+    #[test]
+    fn answers_primary_device_attributes_like_xterm_js() {
+        let mut f = DsrFilter::default();
+        let (out, replies) = f.feed(b"a\x1b[cb\x1b[0c");
+        assert_eq!(out, b"ab", "neither form of the query reaches the browser");
+        assert_eq!(replies, vec![&b"\x1b[?1;2c"[..], &b"\x1b[?1;2c"[..]]);
+    }
+
+    #[test]
+    fn device_attributes_split_across_chunks_are_still_caught() {
+        let (out, n) = feed_all(&[b"x\x1b", b"[", b"c"]);
+        assert_eq!(out, b"x");
         assert_eq!(n, 1);
+    }
+
+    #[test]
+    fn other_csi_sequences_that_share_a_prefix_pass_untouched() {
+        // `ESC[0m` starts like `ESC[0c`, `ESC[6;1H` like `ESC[6n`; `ESC[>c`
+        // (secondary attributes) is not one answered here.
+        let input: &[u8] = b"\x1b[0m\x1b[6;1H\x1b[?1u\x1b[>c";
+        let (out, n) = feed_all(&[input]);
+        assert_eq!(out, input);
+        assert_eq!(n, 0);
     }
 
     #[test]

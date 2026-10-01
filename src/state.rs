@@ -5,7 +5,7 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crossbeam_channel::{Receiver, Sender, TrySendError};
 use tracing::{info, warn};
@@ -254,6 +254,8 @@ struct Terminal {
     started_ms: u64,
     /// Attached clients and the size each one asks for.
     viewers: HashMap<ClientId, (u16, u16)>,
+    /// When a viewer that left lets the terminal grow back (see `GROW_GRACE`).
+    grow_at: Option<Instant>,
     ring: Ring,
     /// Released as soon as the child ends; dropping it closes the ConPTY so the
     /// reader thread finishes too. The terminal entry itself stays, with
@@ -368,8 +370,9 @@ pub fn run(cfg: Config, rx: Receiver<Cmd>, tx: Sender<Cmd>, registry_cfg: Sender
 
             Cmd::ClientDown { id } => {
                 clients.remove(&id);
+                let now = Instant::now();
                 for t in terminals.values_mut() {
-                    if t.viewers.remove(&id).is_some() && renegotiate(t) {
+                    if t.viewers.remove(&id).is_some() && renegotiate_after_leave(t, now) {
                         broadcast_size(&clients, t);
                     }
                 }
@@ -402,7 +405,7 @@ pub fn run(cfg: Config, rx: Receiver<Cmd>, tx: Sender<Cmd>, registry_cfg: Sender
                                 }),
                             );
                             send_state(&cfg, &projects, &agent_names, scanned, &clients, &terminals, &dismissed, None);
-                            send_to(&clients, id, json(&ServerMsg::Attached { id: tid, cols, rows }));
+                            send_to(&clients, id, json(&ServerMsg::Attached { id: tid, cols, rows, end: 0 }));
                         }
                         Err((code, message)) => {
                             warn!(%project, %agent, %message, "spawn failed");
@@ -424,7 +427,7 @@ pub fn run(cfg: Config, rx: Receiver<Cmd>, tx: Sender<Cmd>, registry_cfg: Sender
                             next_run += 1;
                             info!(terminal = tid, %project, %agent, %session_id, "session forked");
                             send_state(&cfg, &projects, &agent_names, scanned, &clients, &terminals, &dismissed, None);
-                            send_to(&clients, id, json(&ServerMsg::Attached { id: tid, cols, rows }));
+                            send_to(&clients, id, json(&ServerMsg::Attached { id: tid, cols, rows, end: 0 }));
                         }
                         Err((code, message)) => {
                             warn!(%project, %agent, %message, "fork failed");
@@ -433,30 +436,54 @@ pub fn run(cfg: Config, rx: Receiver<Cmd>, tx: Sender<Cmd>, registry_cfg: Sender
                     }
                 }
 
-                ClientMsg::Attach { id: tid, cols, rows } => {
+                ClientMsg::Attach { id: tid, cols, rows, since, tail } => {
                     let (cols, rows) = sane_size(cols, rows);
                     match terminals.get_mut(&tid) {
                         Some(t) => {
                             t.viewers.insert(id, (cols, rows));
                             let resized = renegotiate(t);
 
+                            // A client that already has the screen up to `since`
+                            // gets only what came after, when the ring can vouch
+                            // for that position (`Ring::resume`); otherwise the
+                            // whole buffer, as for anyone. Either way it is told
+                            // first where the bytes start, so it knows whether to
+                            // clear its screen before they arrive — and, for a
+                            // plain attach, the position it is counting from. A
+                            // page too old to know `replay` ignores it.
+                            let resumed = match (since, tail) {
+                                (Some(s), Some(h)) => t.ring.resume(s, h),
+                                _ => None,
+                            };
+                            let (bytes, from) = match resumed {
+                                Some(rest) => (rest, since.unwrap_or(0)),
+                                None => (t.ring.snapshot(), t.ring.end() - t.ring.len() as u64),
+                            };
+                            send_to(&clients, id, json(&ServerMsg::Replay { id: tid, from }));
+
                             // The order is binding: the ring buffer first, then
                             // `attached`, then the live stream. Without it, opening
                             // from another device shows a blank screen until new
                             // output arrives — which is the main use case.
-                            if !t.ring.is_empty() {
-                                let snap = t.ring.snapshot();
-                                send_to(&clients, id, Out::Binary(encode_frame(tid, &snap)));
+                            let sent = bytes.len();
+                            if !bytes.is_empty() {
+                                send_to(&clients, id, Out::Binary(encode_frame(tid, &bytes)));
                             }
                             send_to(
                                 &clients,
                                 id,
-                                json(&ServerMsg::Attached { id: tid, cols: t.cols, rows: t.rows }),
+                                json(&ServerMsg::Attached {
+                                    id: tid,
+                                    cols: t.cols,
+                                    rows: t.rows,
+                                    end: t.ring.end(),
+                                }),
                             );
                             info!(
                                 terminal = tid,
                                 client = id,
-                                replay = t.ring.len(),
+                                replay = sent,
+                                resumed = since.is_some() && from == since.unwrap_or(0),
                                 "client attached"
                             );
                             if resized {
@@ -476,7 +503,7 @@ pub fn run(cfg: Config, rx: Receiver<Cmd>, tx: Sender<Cmd>, registry_cfg: Sender
 
                 ClientMsg::Detach { id: tid } => {
                     if let Some(t) = terminals.get_mut(&tid) {
-                        if t.viewers.remove(&id).is_some() && renegotiate(t) {
+                        if t.viewers.remove(&id).is_some() && renegotiate_after_leave(t, Instant::now()) {
                             broadcast_size(&clients, t);
                         }
                     }
@@ -1779,7 +1806,7 @@ pub fn run(cfg: Config, rx: Receiver<Cmd>, tx: Sender<Cmd>, registry_cfg: Sender
                             next_run += 1;
                             info!(terminal = tid, %name, "running the agent's updater");
                             send_state(&cfg, &projects, &agent_names, scanned, &clients, &terminals, &dismissed, None);
-                            send_to(&clients, id, json(&ServerMsg::Attached { id: tid, cols, rows }));
+                            send_to(&clients, id, json(&ServerMsg::Attached { id: tid, cols, rows, end: 0 }));
                         }
                         Err((code, message)) => {
                             warn!(%name, %message, "could not run the agent's updater");
@@ -2310,6 +2337,8 @@ pub fn run(cfg: Config, rx: Receiver<Cmd>, tx: Sender<Cmd>, registry_cfg: Sender
                         if let Some(t) = terminals.get_mut(&tid) {
                             t.viewers.insert(id, (cols, rows));
                             let resized = renegotiate(t);
+                            let from = t.ring.end() - t.ring.len() as u64;
+                            send_to(&clients, id, json(&ServerMsg::Replay { id: tid, from }));
                             if !t.ring.is_empty() {
                                 let snap = t.ring.snapshot();
                                 send_to(&clients, id, Out::Binary(encode_frame(tid, &snap)));
@@ -2318,7 +2347,7 @@ pub fn run(cfg: Config, rx: Receiver<Cmd>, tx: Sender<Cmd>, registry_cfg: Sender
                             send_to(
                                 &clients,
                                 id,
-                                json(&ServerMsg::Attached { id: tid, cols: c, rows: r }),
+                                json(&ServerMsg::Attached { id: tid, cols: c, rows: r, end: t.ring.end() }),
                             );
                             if resized {
                                 let t = &terminals[&tid];
@@ -2352,7 +2381,7 @@ pub fn run(cfg: Config, rx: Receiver<Cmd>, tx: Sender<Cmd>, registry_cfg: Sender
                             send_state(
                                 &cfg, &projects, &agent_names, scanned, &clients, &terminals, &dismissed, None,
                             );
-                            send_to(&clients, id, json(&ServerMsg::Attached { id: tid, cols, rows }));
+                            send_to(&clients, id, json(&ServerMsg::Attached { id: tid, cols, rows, end: 0 }));
                         }
                         Err((code, message)) => {
                             warn!(name = %saved.name, %message, "opening saved terminal failed");
@@ -2485,6 +2514,14 @@ pub fn run(cfg: Config, rx: Receiver<Cmd>, tx: Sender<Cmd>, registry_cfg: Sender
 
             Cmd::Load { cpu_percent, ram_used, ram_total } => {
                 start_background_sample(&terminals, &tx);
+                // This reading every couple of seconds is also the clock that
+                // lets a terminal grow back once a viewer has stayed away.
+                let now = Instant::now();
+                for t in terminals.values_mut() {
+                    if t.grow_at.is_some_and(|at| at <= now) && renegotiate(t) {
+                        broadcast_size(&clients, t);
+                    }
+                }
                 let msg = ServerMsg::Load { cpu_percent, ram_used, ram_total };
                 // Kept as well as sent: a client that connects between readings
                 // would otherwise show nothing for its first couple of seconds.
@@ -2848,6 +2885,7 @@ fn build_terminal(
             .map(|d| d.as_millis() as u64)
             .unwrap_or(0),
         viewers: HashMap::new(),
+        grow_at: None,
         ring: Ring::new(RING_CAP),
         pty: Some(pty),
         // Both are set by the caller when this terminal is a saved one; an
@@ -3133,8 +3171,19 @@ fn effective_size(viewers: &HashMap<ClientId, (u16, u16)>) -> Option<(u16, u16)>
     Some(it.fold(first, |(c, r), (c2, r2)| (c.min(c2), r.min(r2))))
 }
 
+/// How long a terminal keeps the size of a viewer that has gone before growing
+/// back to the ones still there.
+///
+/// The terminal is as small as its smallest viewer. A phone that sleeps for a
+/// moment — or loses its link for one, the common case — used to let it grow
+/// to the desktop's width and then shrink again on its return, twice a minute
+/// some evenings, each time redrawn by the agent at a new size. Those redraws
+/// are what the ring buffer keeps and a replay shows as lost letters.
+const GROW_GRACE: Duration = Duration::from_secs(30);
+
 /// Recompute the effective size and apply it to the PTY. `true` when it changed.
 fn renegotiate(t: &mut Terminal) -> bool {
+    t.grow_at = None;
     // With no client attached, the last size is kept — the terminal is still
     // alive and must not shrink to nothing.
     let Some((cols, rows)) = effective_size(&t.viewers) else { return false };
@@ -3150,6 +3199,19 @@ fn renegotiate(t: &mut Terminal) -> bool {
     t.cols = cols;
     t.rows = rows;
     true
+}
+
+/// After a viewer left: shrinking (never the case — a viewer gone can only
+/// leave room) or staying applies at once; growing waits `GROW_GRACE`, and
+/// happens then only if no viewer came back or resized meanwhile (`renegotiate`
+/// clears the wait). `true` when the size changed now.
+fn renegotiate_after_leave(t: &mut Terminal, now: Instant) -> bool {
+    let Some((cols, rows)) = effective_size(&t.viewers) else { return false };
+    if cols > t.cols || rows > t.rows {
+        t.grow_at.get_or_insert(now + GROW_GRACE);
+        return false;
+    }
+    renegotiate(t)
 }
 
 /// A client can report 0 while its layout is still settling; that must never
@@ -3444,6 +3506,7 @@ mod tests {
             session_id: None,
             started_ms: 0,
             viewers: viewers(entries),
+            grow_at: None,
             ring: Ring::new(RING_CAP),
             pty: None,
             name: None,
@@ -3654,6 +3717,31 @@ mod tests {
         let mut t = terminal_with(&[(1, 80, 24)], 80, 24);
         assert!(!renegotiate(&mut t));
         assert_eq!((t.cols, t.rows), (80, 24));
+    }
+
+    #[test]
+    fn a_viewer_leaving_does_not_grow_the_terminal_at_once() {
+        // The phone (66 columns) has just gone; the desktop (166) is left.
+        let mut t = terminal_with(&[(1, 166, 44)], 66, 44);
+        let now = Instant::now();
+        assert!(!renegotiate_after_leave(&mut t, now), "no resize yet");
+        assert_eq!((t.cols, t.rows), (66, 44));
+        assert_eq!(t.grow_at, Some(now + GROW_GRACE), "it grows back after the grace");
+
+        // A second departure in the meantime does not push the moment back.
+        assert!(!renegotiate_after_leave(&mut t, now + Duration::from_secs(10)));
+        assert_eq!(t.grow_at, Some(now + GROW_GRACE));
+
+        // The phone coming back, or anyone resizing, settles it there and then.
+        renegotiate(&mut t);
+        assert_eq!(t.grow_at, None);
+    }
+
+    #[test]
+    fn a_viewer_leaving_that_changes_nothing_sets_no_wait() {
+        let mut t = terminal_with(&[(1, 66, 44)], 66, 44);
+        assert!(!renegotiate_after_leave(&mut t, Instant::now()));
+        assert_eq!(t.grow_at, None);
     }
 
     #[test]

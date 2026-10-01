@@ -33,6 +33,14 @@ pub enum ClientMsg {
         id: u32,
         cols: u16,
         rows: u16,
+        /// The stream position the client already has everything up to, and
+        /// its FNV-1a hash of the `ring::RESUME_TAIL` bytes before it. With
+        /// both, the daemon sends only what came after — when it can vouch
+        /// for them — and says which it did with `Replay`.
+        #[serde(default)]
+        since: Option<u64>,
+        #[serde(default)]
+        tail: Option<u32>,
     },
     Detach {
         id: u32,
@@ -355,6 +363,17 @@ pub enum ServerMsg {
         id: u32,
         cols: u16,
         rows: u16,
+        /// The stream position just past the last byte sent so far. Its
+        /// presence is also how a page learns this daemon can resume.
+        end: u64,
+    },
+    /// Sent before the bytes of an attach that asked to resume: `from` is the
+    /// stream position they start at. Equal to the `since` asked for, they
+    /// continue the screen; anything else is a full replay, and the page
+    /// clears its screen first.
+    Replay {
+        id: u32,
+        from: u64,
     },
     Size {
         id: u32,
@@ -967,7 +986,7 @@ mod tests {
         }
 
         let m: ClientMsg = serde_json::from_str(r#"{"t":"attach","id":3,"cols":80,"rows":24}"#).unwrap();
-        assert!(matches!(m, ClientMsg::Attach { id: 3, cols: 80, rows: 24 }));
+        assert!(matches!(m, ClientMsg::Attach { id: 3, cols: 80, rows: 24, since: None, tail: None }));
     }
 
     #[test]
@@ -981,8 +1000,8 @@ mod tests {
 
     #[test]
     fn serializes_server_messages_with_tag() {
-        let s = serde_json::to_string(&ServerMsg::Attached { id: 3, cols: 120, rows: 32 }).unwrap();
-        assert_eq!(s, r#"{"t":"attached","id":3,"cols":120,"rows":32}"#);
+        let s = serde_json::to_string(&ServerMsg::Attached { id: 3, cols: 120, rows: 32, end: 7 }).unwrap();
+        assert_eq!(s, r#"{"t":"attached","id":3,"cols":120,"rows":32,"end":7}"#);
 
         let s = serde_json::to_string(&ServerMsg::Error {
             code: "spawn_failed".into(),

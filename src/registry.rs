@@ -82,7 +82,7 @@ const SWEEP_MAX: Duration = Duration::from_secs(900);
 
 const TITLE_MAX: usize = 60;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct SessionRow {
     pub agent: String,
     pub session_id: String,
@@ -105,6 +105,8 @@ pub fn spawn(cfg: Config, tx: Sender<Cmd>) -> Sender<Config> {
     std::thread::spawn(move || {
         let mut cfg = cfg;
         let mut cache = Cache::default();
+        load_cache(&mut cache);
+        let mut saved_at = Instant::now();
         let mut last: Option<Vec<ProjectInfo>> = None;
         // The first round looks at everything; after that only what changed.
         let mut scan = Scan::Full;
@@ -144,6 +146,12 @@ pub fn spawn(cfg: Config, tx: Sender<Cmd>) -> Sender<Config> {
             let started = Instant::now();
             let projects = scan_all(&cfg, &mut cache, &scan);
             let ms = started.elapsed().as_millis() as u64;
+            // The first changed scan is kept at once — it is what the next start
+            // reads instead of the disk; after that, at most every `SAVE_EVERY`.
+            if cache.dirty && (last.is_none() || saved_at.elapsed() >= SAVE_EVERY) {
+                save_cache(&mut cache);
+                saved_at = Instant::now();
+            }
 
             // Send only when the contents changed; a periodic scan that finds
             // nothing need not wake the actor or fill the log.
@@ -312,7 +320,58 @@ pub struct Cache {
     /// path -> (mtime_ms, size, parse result)
     files: HashMap<PathBuf, (u64, u64, Option<SessionRow>)>,
     opencode: Option<Opencode>,
+    /// `files` changed since it was last saved (see `save_cache`).
+    dirty: bool,
 }
+
+/// Where `Cache::files` is kept between runs.
+///
+/// A start used to re-read the head of every session file — 263 of them here,
+/// a gigabyte in all — from a disk that had not read them since boot, and the
+/// sidebar sat empty for 5 seconds (21 at worst) until it was done. Kept, the
+/// first scan only stats each file and reads the ones that changed meanwhile:
+/// the same mtime-and-size rule as always, and nothing trusted beyond it.
+fn cache_path() -> PathBuf {
+    config::dir().join("registry-cache.json")
+}
+
+/// One file's entry as kept on disk.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct Kept {
+    path: PathBuf,
+    mtime: u64,
+    len: u64,
+    row: Option<SessionRow>,
+}
+
+fn load_cache(cache: &mut Cache) {
+    let Ok(text) = std::fs::read_to_string(cache_path()) else { return };
+    // Unreadable is the same as absent: the scan reads everything, as before.
+    let Ok(kept) = serde_json::from_str::<Vec<Kept>>(&text) else { return };
+    for k in kept {
+        cache.files.insert(k.path, (k.mtime, k.len, k.row));
+    }
+}
+
+/// Written beside, then renamed over: a daemon stopped mid-write leaves the
+/// last good file, never half of one.
+fn save_cache(cache: &mut Cache) {
+    let kept: Vec<Kept> = cache
+        .files
+        .iter()
+        .map(|(p, (mtime, len, row))| Kept { path: p.clone(), mtime: *mtime, len: *len, row: row.clone() })
+        .collect();
+    let Ok(text) = serde_json::to_string(&kept) else { return };
+    let path = cache_path();
+    let tmp = path.with_extension("json.tmp");
+    if std::fs::write(&tmp, text).is_ok() && std::fs::rename(&tmp, &path).is_ok() {
+        cache.dirty = false;
+    }
+}
+
+/// How often, at most, a changed cache is written: an agent at work changes a
+/// session file every few seconds, and a file this size need not follow each.
+const SAVE_EVERY: Duration = Duration::from_secs(30);
 
 /// The last answer about opencode's sessions, and when to ask again.
 struct Opencode {
@@ -543,7 +602,9 @@ fn scan_all(cfg: &Config, cache: &mut Cache, scan: &Scan) -> Vec<ProjectInfo> {
                     seen.insert(path);
                 }
             }
+            let before = cache.files.len();
             cache.files.retain(|p, _| seen.contains(p));
+            cache.dirty |= cache.files.len() != before;
         }
         Scan::Only(paths) => {
             // Only what the watcher named. An agent writes to one file per
@@ -558,7 +619,9 @@ fn scan_all(cfg: &Config, cache: &mut Cache, scan: &Scan) -> Vec<ProjectInfo> {
                 if path.is_file() {
                     parse_file(path, agent, cache);
                 } else {
-                    cache.files.remove(path);
+                    if cache.files.remove(path).is_some() {
+                        cache.dirty = true;
+                    }
                 }
             }
         }
@@ -664,6 +727,7 @@ fn parse_file(path: &Path, agent: &str, cache: &mut Cache) -> Option<SessionRow>
     });
 
     cache.files.insert(path.to_path_buf(), (mtime, len, parsed.clone()));
+    cache.dirty = true;
     parsed
 }
 
