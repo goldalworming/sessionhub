@@ -613,12 +613,16 @@ function show(id) {
   const entry = terms.get(id);
   if (entry) {
     entry.term.options.cursorBlink = true;
-    // Output was skipped while this was hidden (see `onOutput`) — the screen
-    // is behind, so ask the daemon for a fresh replay instead of one line at
-    // a time from wherever it left off.
+    // Output that came while this was hidden (see `onOutput`): written now, in
+    // order, as if it had been all along — or, when there was too much to keep,
+    // or the link was lost meanwhile, a fresh replay from the daemon.
     if (entry.stale) {
       entry.stale = false;
+      dropHeld(entry);
       requestReplay(id, entry);
+    } else if (entry.held) {
+      for (const chunk of entry.held) entry.term.write(chunk);
+      dropHeld(entry);
     }
     entry.term.focus();
     if (grid) for (const tid of terms.keys()) pushSize(tid);
@@ -2897,16 +2901,28 @@ function pruneDeadTerminals() {
   }
 }
 
+/// How much output a hidden terminal keeps for when it is shown again (see
+/// `onOutput`). Past this, writing it all at once would cost about what a
+/// replay does, so the replay is asked for instead.
+const HELD_MAX = 1024 * 1024;
+
+function dropHeld(entry) {
+  entry.held = null;
+  entry.heldBytes = 0;
+}
+
 /// Ask the daemon to resend a terminal's ring buffer from scratch: after a
 /// reconnect, or when a terminal that went stale while hidden (see `onOutput`)
 /// comes back on screen. Either way the local screen is behind, and a full
 /// replay is simpler and cheaper than tracking exactly what was missed.
-function requestReplay(id, entry) {
+function requestReplay(id, entry, via = conn) {
+  // Whatever was held belongs to the screen being thrown away.
+  dropHeld(entry);
   entry.term.reset();
   entry.awaitingReplay = true;
   const size = entry.lastSize || { cols: 80, rows: 24 };
   // The server resends the ring buffer, so the screen comes back whole by itself.
-  conn.send({ t: 'attach', id, cols: size.cols, rows: size.rows });
+  via.send({ t: 'attach', id, cols: size.cols, rows: size.rows });
 }
 
 function reattachAll() {
@@ -2916,7 +2932,9 @@ function reattachAll() {
       // Nothing on screen for it right now, same as any other hidden terminal
       // (see `onOutput`) — `show()` asks for the replay whenever it actually
       // comes back on screen, instead of paying for one now that would just
-      // be thrown away unread.
+      // be thrown away unread. What it held before the link dropped is no
+      // longer a stream that continues anywhere.
+      dropHeld(entry);
       entry.stale = true;
       continue;
     }
@@ -3028,13 +3046,25 @@ conn.on.onOutput = (id, data, m) => {
   const entry = m.terms.get(id);
   if (entry) {
     // Nobody is looking at this terminal's host right now — skip the parse
-    // and paint, which is most of the cost of a busy terminal, and let `show`
-    // ask for a full replay instead when it comes back on screen. A terminal
+    // and paint, which is most of the cost of a busy terminal, and keep the
+    // bytes for `show` to write when it comes back on screen. Kept, not
+    // replayed: a replay redraws the whole history at today's size, though an
+    // agent drew it at whatever size it had then — after a few resizes (one
+    // more device looking) that came back as lost letters and stale status
+    // lines. Written on in order, the stream simply continues. Only past
+    // `HELD_MAX` is it let go and the replay asked for after all. A terminal
     // whose host is not hidden — the one on screen now, and, for a background
     // machine, whichever of its terminals was on screen when last visited —
     // is still written live, so coming back never shows a frozen screen.
     if (entry.host.hidden) {
-      entry.stale = true;
+      if (!entry.stale) {
+        (entry.held ||= []).push(data);
+        entry.heldBytes = (entry.heldBytes || 0) + (data.byteLength ?? data.length);
+        if (entry.heldBytes > HELD_MAX) {
+          dropHeld(entry);
+          entry.stale = true;
+        }
+      }
     } else {
       entry.term.write(data);
       if (entry.openedAt && !entry.firstOut) {
@@ -3058,6 +3088,33 @@ conn.on.onOutput = (id, data, m) => {
     }
   }
 };
+
+/// The daemon had to drop output on its way here — the link could not keep up
+/// — so every screen of that machine may be missing a piece. Hidden ones are
+/// replayed when next shown; the ones on screen once their output goes quiet,
+/// rather than piling a whole ring buffer onto a link that is already behind.
+conn.on.onResync = (msg, m) => {
+  for (const [id, entry] of m.terms) {
+    if (entry.host.hidden) {
+      dropHeld(entry);
+      entry.stale = true;
+      continue;
+    }
+    clearTimeout(entry.resyncTimer);
+    const settle = () => {
+      if (performance.now() - (entry.lastOut || 0) < RESYNC_QUIET_MS) {
+        entry.resyncTimer = setTimeout(settle, RESYNC_QUIET_MS);
+        return;
+      }
+      entry.resyncTimer = null;
+      if (m.terms.has(id)) requestReplay(id, entry, m.conn);
+    };
+    entry.resyncTimer = setTimeout(settle, RESYNC_QUIET_MS);
+  }
+};
+
+/// How long a terminal's output has to pause before a resync replays it.
+const RESYNC_QUIET_MS = 800;
 
 conn.on.onExit = (msg, m) => {
   const entry = m.terms.get(msg.id);
@@ -3325,6 +3382,21 @@ const local = makeMachine({ id: 'local', label: 'This machine', via: '' });
 useMachine(local);
 el.terms.appendChild(local.host);
 machineBar.paint(current);
+
+/// Coming back to the page — the tab shown again, the device awake again, the
+/// network back — is when a socket that still says "open" has most often died
+/// underneath. Each machine's link is asked at once (`Conn.probe`), so a dead
+/// one reconnects in seconds instead of leaving every key pressed unanswered
+/// until a minute-long timeout, or until the tab is closed and opened again.
+function probeLinks() {
+  for (const m of machines) if (m.started) m.conn.probe();
+}
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible') probeLinks();
+});
+window.addEventListener('online', probeLinks);
+window.addEventListener('pageshow', (e) => e.persisted && probeLinks());
+window.addEventListener('focus', probeLinks);
 
 if (token) {
   local.started = true;

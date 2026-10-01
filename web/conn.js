@@ -32,6 +32,16 @@ const SILENT_MS = 50000;
 /// makes `onclose` run, and with it the same reconnect as for any other loss.
 const DIAL_MS = 15000;
 
+/// How long a probe waits for any sign of life before calling the link dead.
+///
+/// A socket can sit `OPEN` over a line that died — a tablet woke from sleep, the
+/// network changed, the tunnel blinked — and `SILENT_MS` alone took up to a
+/// minute to notice, while every key pressed went nowhere. A probe asks the
+/// moment there is reason to doubt (back in view, back online, typed with no
+/// answer). Generous rather than tight: a big replay arriving over a slow link
+/// is one frame that takes seconds, and a false alarm reconnects for nothing.
+const PROBE_MS = 10000;
+
 export class Conn {
   /// `via` is the name of another paired machine; empty means this machine.
   /// `owner` is carried into every handler, so one set of handlers can serve
@@ -61,6 +71,8 @@ export class Conn {
     /// not been updated yet, over the relay, where the version is not ours to
     /// choose. So the timeout arms itself only once a pong has been seen.
     this.answers = false;
+    /// The pending probe (see `probe`), so only one runs at a time.
+    this.probing = null;
     // handlers: onState, onAttached, onSize, onExit, onError, onMem,
     //           onOutput(id, bytes), onStatus(kind) — all of them take
     //           `owner` as their last argument.
@@ -142,6 +154,7 @@ export class Conn {
         token_rotated: 'onTokenRotated',
         cloudflare: 'onCloudflare',
         update: 'onUpdate',
+        resync: 'onResync',
       };
       const fn = map[msg.t];
       if (fn) this.emit(fn, msg);
@@ -186,6 +199,34 @@ export class Conn {
   stopBeat() {
     clearInterval(this.beat);
     this.beat = null;
+    clearTimeout(this.probing);
+    this.probing = null;
+  }
+
+  /// Is this link really alive? Asked when there is reason to doubt it: the page
+  /// came back into view or back online, or keys were sent into a link that has
+  /// said nothing for a while.
+  ///
+  /// Waiting out a backoff, it reconnects now. Open, it pings, and with nothing
+  /// at all back within `PROBE_MS` it is treated as the dead line it is. Only for
+  /// a peer known to answer pings — silence from one that never does proves
+  /// nothing, the same rule `startBeat` follows.
+  probe() {
+    if (this.closedByUs) return;
+    if (!this.ready) {
+      if (this.timer) this.retry();
+      return;
+    }
+    if (!this.answers || this.probing) return;
+    const asked = Date.now();
+    this.probing = setTimeout(() => {
+      this.probing = null;
+      if (this.ready && this.lastSeen < asked) {
+        this.emit('onStatus', 'lost');
+        this.retry();
+      }
+    }, PROBE_MS);
+    this.send({ t: 'ping' });
   }
 
   /// Connect again right now, by hand.
@@ -244,6 +285,10 @@ export class Conn {
 
   /// Keyboard input: the terminal id as 4 little-endian bytes, then raw bytes.
   sendInput(id, text) {
+    // Typing into a link that has gone quiet is exactly when a dead one shows:
+    // the keys go nowhere and nothing comes back. Probe it rather than leave
+    // the screen silent until the minute-long timeout notices.
+    if (Date.now() - this.lastSeen > 5000) this.probe();
     if (!this.ready) return;
     const body = new TextEncoder().encode(text);
     const frame = new Uint8Array(4 + body.length);
