@@ -4,6 +4,8 @@
 // machine's. Because only one is shown at a time, terminal ids never need a
 // prefix per machine.
 
+import { dragOrder } from './dragorder.js';
+
 const STATUS = {
   open: { dot: 'ok', text: 'connected' },
   connecting: { dot: 'wait', text: 'connecting… click to retry' },
@@ -37,6 +39,16 @@ export class MachineBar {
     root.prepend(this.el);
     this.strip = this.el.querySelector('.mstrip');
     this.el.querySelector('.madd').onclick = () => this.openDialog();
+    // Paired machines can be dragged into another order (`on.reorder(ids)`);
+    // this machine stays first, where it always is.
+    dragOrder(this.strip, {
+      selector: '.mtab',
+      key: (el) => el.dataset.machine,
+      fixed: '[data-machine="local"]',
+      axis: 'x',
+      enabled: () => !!this.on.canReorder?.(),
+      onDrop: (ids) => this.on.reorder(ids),
+    });
 
     this.dlg = document.createElement('div');
     this.dlg.id = 'pairdlg';

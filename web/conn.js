@@ -136,6 +136,10 @@ export class Conn {
         // Arriving is the whole message; what it proves is that this peer
         // answers at all, which is what lets the timeout below arm.
         this.answers = true;
+        // And how long the round trip took — the network's share of a slow
+        // echo, for the typing telemetry.
+        if (this.pingAt) this.rtt = Math.round(performance.now() - this.pingAt);
+        this.pingAt = 0;
         return;
       }
       const map = {
@@ -201,6 +205,7 @@ export class Conn {
         }
         return;
       }
+      this.pingAt = performance.now();
       this.send({ t: 'ping' });
     }, PING_MS);
   }
@@ -236,6 +241,7 @@ export class Conn {
         this.retry();
       }
     }, PROBE_MS);
+    this.pingAt = performance.now();
     this.send({ t: 'ping' });
   }
 

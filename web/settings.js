@@ -9,6 +9,8 @@
 // command cannot be found" reads at a glance instead of hiding in one sentence
 // at the foot of the panel.
 
+import { dragOrder } from './dragorder.js';
+
 const mb = (n) => (n < 1024 * 1024 ? `${Math.round(n / 1024)} KB` : `${(n / 1048576).toFixed(1)} MB`);
 
 const split = (s) => s.split(/\s+/).filter(Boolean);
@@ -85,6 +87,8 @@ export class Settings {
     /// `onLanAddr(addr)` chooses which address network access uses; '' = all.
     /// Set after construction — the argument list here is long enough.
     this.onLanAddr = () => {};
+    /// `onReorderRemotes(names)` stores a new order for the paired machines.
+    this.onReorderRemotes = () => {};
     this.onRemoteCommands = onRemoteCommands || (() => {});
     this.onRotateToken = onRotateToken || (() => {});
     this.onInstallSkill = onInstallSkill || (() => {});
@@ -181,10 +185,11 @@ export class Settings {
   /// `canMove` is whether that daemon understands being told a new address. An
   /// older one drops the message without answering, so the address is left as
   /// plain text there rather than as a field that swallows what is typed.
-  setRemotes(list, canMove, canRename) {
+  setRemotes(list, canMove, canRename, canOrder) {
     this.remotes = list || [];
     this.canMove = canMove === true;
     this.canRename = canRename === true;
+    this.canOrder = canOrder === true;
     if (this.open) this.paint();
   }
 
@@ -1178,12 +1183,23 @@ export class Settings {
 
     const list = document.createElement('div');
     list.className = 'alist';
+    const canDrag = this.canOrder && this.remotes.length > 1;
     for (const r of this.remotes) {
       const row = document.createElement('div');
       row.className = 'agent';
+      row.dataset.name = r.name;
 
       const head = document.createElement('div');
       head.className = 'ahead';
+      // The row's name and address are already click targets, so a drag
+      // starts only from here.
+      if (canDrag) {
+        const grip = document.createElement('span');
+        grip.className = 'agrip';
+        grip.textContent = '⠿';
+        grip.title = 'Drag to reorder — the machine tabs follow';
+        head.appendChild(grip);
+      }
       const dot = document.createElement('span');
       dot.className = 'adot ok';
       head.appendChild(dot);
@@ -1216,6 +1232,15 @@ export class Settings {
 
       row.appendChild(head);
       list.appendChild(row);
+    }
+    if (canDrag) {
+      dragOrder(list, {
+        selector: '.agent',
+        key: (el) => el.dataset.name,
+        handle: '.agrip',
+        axis: 'y',
+        onDrop: (names) => this.onReorderRemotes(names),
+      });
     }
     pane.appendChild(list);
 

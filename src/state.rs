@@ -1559,6 +1559,33 @@ pub fn run(cfg: Config, rx: Receiver<Cmd>, tx: Sender<Cmd>, registry_cfg: Sender
                     send_to(&clients, id, json(&remotes_msg(&cfg)));
                 }
 
+                ClientMsg::SetRemoteOrder { names } => {
+                    let fresh = reordered(&cfg.remotes, &names);
+                    let changed = fresh.iter().map(|r| &r.name).ne(cfg.remotes.iter().map(|r| &r.name));
+                    if changed {
+                        cfg.remotes = fresh;
+                        if let Err(e) = crate::config::save(&cfg) {
+                            warn!(error = %e, "could not save config");
+                            send_to(
+                                &clients,
+                                id,
+                                json(&ServerMsg::Error {
+                                    code: "config_write_failed".into(),
+                                    message: format!("Could not write config.toml: {e}"),
+                                }),
+                            );
+                            continue;
+                        }
+                        info!("paired machines reordered");
+                    }
+                    // Every device, not only the one that dragged: the tabs on
+                    // the phone should not stay in the old order until reload.
+                    let text = json(&remotes_msg(&cfg));
+                    for cid in clients.keys().copied().collect::<Vec<_>>() {
+                        send_to(&clients, cid, text.clone());
+                    }
+                }
+
                 ClientMsg::Forget { name } => {
                     let before = cfg.remotes.len();
                     cfg.remotes.retain(|r| r.name != name);
@@ -2938,7 +2965,30 @@ fn remotes_msg(cfg: &Config) -> ServerMsg {
             .collect(),
         can_move: true,
         can_rename: true,
+        can_order: true,
     }
+}
+
+/// `remotes` in the order `names` gives, each machine once; any it does not
+/// name (paired from another device meanwhile, say) follow in the order they
+/// had. Unknown and repeated names are ignored, so nothing is ever lost or
+/// doubled by a list sent from a page that was out of date.
+fn reordered(remotes: &[crate::config::Remote], names: &[String]) -> Vec<crate::config::Remote> {
+    let mut out: Vec<crate::config::Remote> = Vec::with_capacity(remotes.len());
+    for n in names {
+        if out.iter().any(|r| &r.name == n) {
+            continue;
+        }
+        if let Some(r) = remotes.iter().find(|r| &r.name == n) {
+            out.push(r.clone());
+        }
+    }
+    for r in remotes {
+        if !out.iter().any(|o| o.name == r.name) {
+            out.push(r.clone());
+        }
+    }
+    out
 }
 
 /// Parse the link, prove the machine answers, and only then return an entry
@@ -3717,6 +3767,24 @@ mod tests {
         let mut t = terminal_with(&[(1, 80, 24)], 80, 24);
         assert!(!renegotiate(&mut t));
         assert_eq!((t.cols, t.rows), (80, 24));
+    }
+
+    #[test]
+    fn machines_take_the_order_given_and_lose_nothing() {
+        let r = |n: &str| {
+            serde_json::from_str::<crate::config::Remote>(&format!(r#"{{"name":"{n}","addr":"x:1","token":"t"}}"#))
+                .unwrap()
+        };
+        let have = vec![r("dell"), r("mac"), r("nuc")];
+        let names = |v: &[crate::config::Remote]| v.iter().map(|x| x.name.clone()).collect::<Vec<_>>().join(",");
+        let s = |v: &[&str]| v.iter().map(|x| x.to_string()).collect::<Vec<_>>();
+
+        assert_eq!(names(&reordered(&have, &s(&["mac", "dell", "nuc"]))), "mac,dell,nuc");
+        // A page that did not know about "nuc" yet: it keeps its place after.
+        assert_eq!(names(&reordered(&have, &s(&["nuc", "mac"]))), "nuc,mac,dell");
+        // Unknown and repeated names change nothing and lose nothing.
+        assert_eq!(names(&reordered(&have, &s(&["ghost", "mac", "mac"]))), "mac,dell,nuc");
+        assert_eq!(names(&reordered(&have, &[])), "dell,mac,nuc");
     }
 
     #[test]

@@ -258,6 +258,12 @@ pub enum ClientMsg {
         name: String,
         to: String,
     },
+    /// The paired machines in the order wanted — for their tabs and the list
+    /// in Settings, on every device, since it is kept in the config. Names it
+    /// leaves out keep their place after the ones it gives.
+    SetRemoteOrder {
+        names: Vec<String>,
+    },
     /// Forget a machine. This is the only thing that deletes its token.
     Forget {
         name: String,
@@ -475,6 +481,8 @@ pub enum ServerMsg {
         can_move: bool,
         /// The same, for `set_remote_name`.
         can_rename: bool,
+        /// The same, for `set_remote_order`.
+        can_order: bool,
     },
     /// One folder's contents, for the folder picker in the "New project" panel.
     Dir(DirList),

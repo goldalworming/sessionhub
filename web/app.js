@@ -548,6 +548,7 @@ function makeTerminal(id) {
   // milliseconds of opening and would pass for a keystroke.
   term.onKey(() => {
     const e = terms.get(id);
+    if (e) startEchoProbe(e);
     if (!e || !e.openedAt || e.firstIn) return;
     // The number behind "it is drawn but does not take a keystroke yet": how
     // long after opening the first key was pressed. Not whether the agent
@@ -1938,6 +1939,102 @@ function paintAllActivity(m) {
   }
 }
 
+/// How long a keystroke takes to show — split into where the time went, so a
+/// slow echo can be told apart from a slow network or a page too busy to draw:
+/// `echo`, key pressed → its output arrives (network both ways, the daemon, the
+/// agent); `paint`, arrives → drawn (this page); `rtt`, the link's own ping;
+/// `long_ms`, time the page spent in tasks long enough to stall input.
+///
+/// One probe at a time per terminal, and none while it is streaming: output
+/// that was coming anyway would pass for a fast echo. Reported as one summary a
+/// minute while typing (`typing`), and at once only for a keystroke that took
+/// over `SLOW_ECHO_MS` (`slow_echo`) — never an event per key.
+const SLOW_ECHO_MS = 1000;
+const typing = { samples: [], longMs: 0, longN: 0, slowAt: 0 };
+try {
+  new PerformanceObserver((list) => {
+    for (const t of list.getEntries()) {
+      typing.longMs += t.duration;
+      typing.longN += 1;
+    }
+  }).observe({ type: 'longtask' });
+} catch {
+  // Chromium only; elsewhere the summary just says nothing about long tasks.
+}
+
+function startEchoProbe(entry) {
+  const now = performance.now();
+  // Only for a key pressed when everything typed before it has been answered
+  // and the screen has been still for a moment: otherwise the next output to
+  // arrive may belong to an earlier key (typing ahead of a slow echo) or to an
+  // agent streaming anyway (a spinner draws every ~100 ms) — and pass for a
+  // fast echo. Not "the terminal is busy": the echoes of typing itself are
+  // what makes it look busy.
+  const answered = (entry.lastKeyAt || 0) <= (entry.lastOut || 0);
+  const still = now - (entry.lastOut || 0) >= ECHO_STILL_MS;
+  // A probe that never got an echo (an arrow key on a still screen) expires.
+  const stale = entry.keyAt && now - entry.keyAt >= 5000;
+  if (stale) entry.keyAt = 0;
+  if (!entry.keyAt && (answered || stale) && still) entry.keyAt = now;
+  entry.lastKeyAt = now;
+}
+const ECHO_STILL_MS = 150;
+
+function endEchoProbe(m, entry) {
+  const key = entry.keyAt;
+  entry.keyAt = 0;
+  const arrive = performance.now();
+  // After xterm has parsed what arrived, and the next frame has drawn it.
+  entry.term.write('', () =>
+    requestAnimationFrame(() => {
+      const echo = arrive - key;
+      const paint = performance.now() - arrive;
+      const rtt = m.conn.rtt ?? -1;
+      typing.samples.push({ echo, paint, rtt, remote: !!m.via });
+      if (typing.samples.length > 600) typing.samples.shift();
+      if (echo + paint >= SLOW_ECHO_MS && performance.now() - typing.slowAt > 30000) {
+        typing.slowAt = performance.now();
+        tele.track('slow_echo', {
+          ms: Math.round(echo + paint),
+          echo: Math.round(echo),
+          paint: Math.round(paint),
+          rtt,
+          remote: !!m.via,
+          long_ms: Math.round(typing.longMs),
+        });
+      }
+    }),
+  );
+}
+
+setInterval(() => {
+  const s = typing.samples;
+  const longMs = typing.longMs;
+  const longN = typing.longN;
+  typing.samples = [];
+  typing.longMs = 0;
+  typing.longN = 0;
+  if (s.length < 5) return;
+  const q = (list, p) => {
+    if (!list.length) return -1;
+    const a = [...list].sort((x, y) => x - y);
+    return Math.round(a[Math.min(a.length - 1, Math.floor(a.length * p))]);
+  };
+  const echo = s.map((x) => x.echo);
+  tele.track('typing', {
+    n: s.length,
+    echo_p50: q(echo, 0.5),
+    echo_p90: q(echo, 0.9),
+    echo_max: q(echo, 1),
+    paint_p90: q(s.map((x) => x.paint), 0.9),
+    rtt_p50: q(s.map((x) => x.rtt).filter((x) => x >= 0), 0.5),
+    slow: s.filter((x) => x.echo + x.paint >= 300).length,
+    long_ms: Math.round(longMs),
+    long_n: longN,
+    remote_n: s.filter((x) => x.remote).length,
+  });
+}, 60000);
+
 /// The Explorer follows what agents write, without being asked and without
 /// watching the disk: a terminal of the project it shows finishing a run is
 /// when new files are most likely there, so it looks again then — and, while
@@ -3164,6 +3261,7 @@ conn.on.onOutput = (id, data, m) => {
       }
     } else {
       feed(entry, data);
+      if (entry.keyAt && !entry.awaitingReplay) endEchoProbe(m, entry);
       if (entry.openedAt && !entry.firstOut) {
         entry.firstOut = true;
         tele.track('first_output', { ms: Math.round(performance.now() - entry.openedAt) });
@@ -3375,6 +3473,9 @@ const machineBar = new MachineBar(document.getElementById('main'), {
   // the machine list is its own, and remotes are not chained.
   pair: (link) => local.conn.send({ t: 'pair', link, name: '' }),
   forget: (m) => forgetMachine(m),
+  canReorder: () => canOrderRemotes,
+  // The tab strip names machines by id; the daemon by name.
+  reorder: (ids) => reorderRemotes(ids.map((id) => machines.find((x) => x.id === id)?.via).filter(Boolean)),
 });
 
 /// Switch machines: swap the data references, then redraw from the new machine's
@@ -3456,9 +3557,27 @@ conn.on.onRemotes = (msg, m) => {
   for (const gone of machines.filter((x) => x.via && !want.some((r) => r.name === x.via))) {
     dropMachine(gone);
   }
+  // The tabs follow the daemon's order (`set_remote_order`); this machine first.
+  const rank = (x) => (x.via ? want.findIndex((r) => r.name === x.via) + 1 : 0);
+  machines.sort((a, b) => rank(a) - rank(b));
+  canOrderRemotes = msg.can_order === true;
   machineBar.paint(current);
-  settings.setRemotes(want, msg.can_move === true, msg.can_rename === true);
+  settings.setRemotes(want, msg.can_move === true, msg.can_rename === true, canOrderRemotes);
 };
+
+/// Whether the local daemon keeps an order for the paired machines.
+let canOrderRemotes = false;
+
+/// A new order for the paired machines, from dragging their tabs or their rows
+/// in Settings. Applied here at once, and kept by the local daemon, which sends
+/// it to every other device it serves.
+function reorderRemotes(names) {
+  const rank = (x) => (x.via ? names.indexOf(x.via) + 1 : 0);
+  machines.sort((a, b) => rank(a) - rank(b));
+  machineBar.paint(current);
+  local.conn.send({ t: 'set_remote_order', names });
+}
+settings.onReorderRemotes = reorderRemotes;
 
 /// Drop a machine along with everything it displays.
 function dropMachine(m) {

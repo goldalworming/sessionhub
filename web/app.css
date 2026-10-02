@@ -2386,6 +2386,30 @@ html, body {
 
 .mtab:hover { color: var(--text); background: color-mix(in srgb, var(--text) 6%, transparent); }
 .mtab.on { color: var(--text); background: var(--bg); box-shadow: inset 0 -2px 0 var(--accent); }
+
+/* A machine tab or Settings row being dragged into a new place (dragorder.js). */
+.mtab.dragging,
+.agent.dragging {
+  opacity: 0.75;
+  background: color-mix(in srgb, var(--accent) 18%, var(--bg));
+  cursor: grabbing;
+  position: relative;
+  z-index: 1;
+}
+/* The handle a Settings row is dragged by — `touch-action: none` so a finger
+   on it drags at once instead of scrolling the panel. */
+.agrip {
+  flex: 0 0 auto;
+  width: 16px;
+  margin-right: 2px;
+  color: var(--muted);
+  cursor: grab;
+  touch-action: none;
+  user-select: none;
+  text-align: center;
+}
+.agrip:hover { color: var(--text); }
+@media (pointer: coarse) { .agrip { width: 26px; font-size: 16px; } }
 .mname { overflow: hidden; text-overflow: ellipsis; }
 
 /* Status dot: green connected, yellow retrying, red down. The colours are
