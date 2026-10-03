@@ -1814,6 +1814,7 @@ pub fn run(cfg: Config, rx: Receiver<Cmd>, tx: Sender<Cmd>, registry_cfg: Sender
                     info!("restarting into the new build");
                     let tx = tx.clone();
                     std::thread::spawn(move || {
+                        crate::update::wait_for_swapper();
                         let _ = tx.send(Cmd::Shutdown);
                         std::thread::sleep(std::time::Duration::from_millis(400));
                         crate::daemon::remove_pid_file();

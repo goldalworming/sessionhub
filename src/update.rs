@@ -331,6 +331,8 @@ fn write_and_launch_swapper(exe: &Path, staged: &Path, tag: &str) -> Result<(), 
     if cfg!(windows) {
         let script = dir.join("sessionhub-swap.ps1");
         let report = dir.join("sessionhub-swap.log");
+        let awake = awake_marker(dir);
+        let _ = std::fs::remove_file(&awake);
         // Windows locks the image of a running executable, and the daemon is not
         // the only process running this one: `ensure_tray` starts `sessionhubd
         // tray` as a second process from the same file. Waiting for the daemon's
@@ -352,6 +354,7 @@ fn write_and_launch_swapper(exe: &Path, staged: &Path, tag: &str) -> Result<(), 
             report: &report.display().to_string(),
             tag,
             home: &home.display().to_string(),
+            awake: &awake.display().to_string(),
         });
         std::fs::write(&script, text).map_err(|e| format!("cannot write the updater: {e}"))?;
         crate::pty::quiet_command("powershell.exe")
@@ -405,14 +408,52 @@ pub struct WindowsSwap<'a> {
     pub report: &'a str,
     pub tag: &'a str,
     pub home: &'a str,
+    /// Written once the script holds the machine awake (`wait_for_swapper`).
+    pub awake: &'a str,
+}
+
+/// Where the swapper says it is holding the machine awake.
+fn awake_marker(dir: &Path) -> std::path::PathBuf {
+    dir.join("sessionhub-swap.awake")
+}
+
+/// Before the terminals go: wait, briefly, for the swapper to hold the machine
+/// awake. One of those terminals may be what was keeping it awake — a
+/// `SetThreadExecutionState` script — and killing it let a laptop that was only
+/// being used from a phone drop into standby that same second, freezing the
+/// swapper until someone pressed a key: the update "did not come back". Gives
+/// up after ten seconds rather than never updating.
+pub fn wait_for_swapper() {
+    if !cfg!(windows) {
+        return;
+    }
+    let Some(dir) = std::env::current_exe().ok().and_then(|e| e.parent().map(Path::to_path_buf)) else {
+        return;
+    };
+    let marker = awake_marker(&dir);
+    for _ in 0..100 {
+        if marker.exists() {
+            let _ = std::fs::remove_file(&marker);
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    warn!("the updater did not say it holds the machine awake; restarting anyway");
 }
 
 /// The handoff script, as text — kept apart from writing and running it so the
 /// thing that has gone wrong twice can be read, and tested, on its own.
 pub fn windows_swap_script(s: WindowsSwap<'_>) -> String {
-    let WindowsSwap { pid, exe, staged, backup, report, tag, home } = s;
+    let WindowsSwap { pid, exe, staged, backup, report, tag, home, awake } = s;
     format!(
             "$ErrorActionPreference = 'SilentlyContinue'\r\n\
+             # Hold the machine awake through the handoff (see `wait_for_swapper`):\r\n\
+             # ES_CONTINUOUS | ES_SYSTEM_REQUIRED, for as long as this script runs.\r\n\
+             try {{\r\n\
+             \x20 Add-Type -Name Awake -Namespace SessionhubSwap -MemberDefinition '[DllImport(\"kernel32.dll\")] public static extern uint SetThreadExecutionState(uint f);'\r\n\
+             \x20 [SessionhubSwap.Awake]::SetThreadExecutionState([uint32]2147483649) | Out-Null\r\n\
+             }} catch {{ }}\r\n\
+             Set-Content -LiteralPath '{awake}' -Value 'held'\r\n\
              for ($i = 0; $i -lt 120; $i++) {{\r\n\
              \x20 if (-not (Get-Process -Id {pid} -ErrorAction SilentlyContinue)) {{ break }}\r\n\
              \x20 Start-Sleep -Milliseconds 500\r\n\
@@ -465,6 +506,10 @@ pub fn windows_swap_script(s: WindowsSwap<'_>) -> String {
              \x20 Set-Content -LiteralPath '{report}' -Value $note -Encoding utf8\r\n\
              }}\r\n\
              Start-Process -FilePath '{exe}' -ArgumentList 'start','--home','{home}' -WindowStyle Hidden\r\n\
+             # Still awake while the new daemon comes up and starts its saved\r\n\
+             # terminals again — the one that keeps the machine awake among them.\r\n\
+             Start-Sleep -Seconds 30\r\n\
+             Remove-Item -LiteralPath '{awake}' -Force\r\n\
              Remove-Item -LiteralPath $PSCommandPath -Force\r\n",
     )
 }
@@ -665,6 +710,7 @@ mod swap_tests {
             report: r"C:\app\sessionhub-swap.log",
             tag: "v0.0.19",
             home: r"C:\Users\x",
+            awake: r"C:\app\sessionhub-swap.awake",
         })
     }
 
@@ -705,6 +751,20 @@ mod swap_tests {
     }
 
     #[test]
+    fn it_holds_the_machine_awake_before_the_daemon_lets_go() {
+        // The daemon kills its terminals only once the marker is there, and one
+        // of them may be what kept the machine out of standby.
+        let s = script();
+        let hold = s.find("SetThreadExecutionState([uint32]2147483649)").expect("never held awake");
+        let mark = s.find(r"Set-Content -LiteralPath 'C:\app\sessionhub-swap.awake'").expect("never says so");
+        let wait = s.find("Get-Process -Id 4242").unwrap();
+        assert!(hold < mark && mark < wait, "the marker must follow the hold, and come before the wait");
+        let start = s.find("Start-Process -FilePath").unwrap();
+        let sleep = s.find("Start-Sleep -Seconds 30").expect("lets go as soon as it starts");
+        assert!(start < sleep, "held until after the new daemon is started");
+    }
+
+    #[test]
     fn it_always_starts_something_again() {
         let s = script();
         assert!(s.contains(r"Start-Process -FilePath 'C:\app\sessionhubd.exe'"));
@@ -730,6 +790,7 @@ mod swap_dump {
             report: &format!(r"{dir}\sessionhub-swap.log"),
             tag: "v0.0.19",
             home: &format!(r"{dir}\home"),
+            awake: &format!(r"{dir}\sessionhub-swap.awake"),
         });
         std::fs::write(format!(r"{dir}\swap.ps1"), text).unwrap();
     }
