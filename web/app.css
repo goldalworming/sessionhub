@@ -1399,7 +1399,9 @@ html, body {
 
 /* --- grid mode ----------------------------------------------------------- */
 
-#terms.grid .mhost {
+/* Not a machine that is out of view: this rule outranks `.mhost[hidden]`, and
+   a hidden machine's grid, drawn on top, blanked the visible one's panels. */
+#terms.grid .mhost:not([hidden]) {
   display: grid;
   grid-template-columns: repeat(var(--cols, 2), 1fr);
   gap: 1px;
