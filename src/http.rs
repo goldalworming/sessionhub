@@ -459,11 +459,12 @@ fn handle(
         // one line of text. The status stays 401 — only the shape of the answer
         // changes, and only for page requests.
         if wants_html(&req) {
-            return respond(
+            return respond_with(
                 &mut sock,
                 401,
                 "text/html; charset=utf-8",
                 signin_page(&req.path).as_bytes(),
+                FRAME_ANCESTORS,
             );
         }
         return respond(&mut sock, 401, "text/plain; charset=utf-8", b"401 invalid token\n");
@@ -1376,9 +1377,9 @@ fn serve_static(
         let html = stamp_index(&String::from_utf8_lossy(&data), &asset_version());
         let caching = caching_for(rel, false);
         let extra = if set_cookie {
-            format!("{caching}{}", cookie_header(token))
+            format!("{caching}{FRAME_ANCESTORS}{}", cookie_header(token))
         } else {
-            caching.to_string()
+            format!("{caching}{FRAME_ANCESTORS}")
         };
         return respond_with(sock, 200, mime_of(rel), html.as_bytes(), &extra);
     }
@@ -1458,6 +1459,14 @@ fn cookie_header(token: &str) -> String {
 /// `vendor/` is excluded: it holds xterm and Monaco, which only change when
 /// their version does, and Monaco alone is nearly 5 MB. Re-fetching it on every
 /// load makes the first open feel heavy for no reason.
+/// Who may put the app in an iframe: itself, and other tools on this machine
+/// (`http://127.0.0.1:*`, `http://localhost:*` — abwork shows a terminal in
+/// one, `?t=<name>&embed=1`). Nothing else: until this the page sent no such
+/// header, and any site at all could frame it. The token is still what lets
+/// anyone in; a framing page cannot read or script what it frames.
+const FRAME_ANCESTORS: &str =
+    "Content-Security-Policy: frame-ancestors 'self' http://127.0.0.1:* http://localhost:*\r\n";
+
 fn caching_for(rel: &str, versioned: bool) -> &'static str {
     // A `?v=<hash>` URL names one exact content: when the content changes, the
     // page asks under a new URL. So these may be cached hard — that is what

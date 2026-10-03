@@ -3396,3 +3396,19 @@ html, body {
      that is left. */
   .session, .project > .row, .prow { height: 28px; }
 }
+
+/* ------------------------------------------------------------- embed mode */
+/* `?t=<terminal>&embed=1`: that terminal alone, for another local tool's
+   iframe (see deeplink.js) — no sidebar, no machine or tab strip, no file
+   panel. The terminal fills whatever size the iframe has, and still takes
+   input; the key bar stays for a touch screen. */
+html.embed #sidebar,
+html.embed #splitter,
+html.embed #backdrop,
+html.embed #mbar,
+html.embed #tabs,
+html.embed #fsplit,
+html.embed #side {
+  display: none !important;
+}
+html.embed #empty { padding: 24px; text-align: center; }

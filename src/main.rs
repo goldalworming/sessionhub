@@ -91,6 +91,7 @@ fn main() -> ExitCode {
         "push" => cmd_push(&argv),
         "pull" => cmd_pull(&argv),
         "ls" => cmd_ls(&argv),
+        "url" => cmd_url(&argv),
         "spawn" => cmd_spawn(&argv),
         "send" => cmd_send(&argv),
         "capture" => cmd_capture(&argv),
@@ -147,6 +148,9 @@ fn print_help() {
          \x20                                 what is on screen, as plain text\n\
          sessionhubd wait <id-or-name> [--idle SECONDS] [--timeout SECONDS]\n\
          \x20                                 until quiet, or the process ends\n\
+         sessionhubd url <id-or-name> [--embed]\n\
+         \x20                                 the web UI's address for it; --embed shows\n\
+         \x20                                 that terminal alone, for an iframe\n\
          \n\
          sessionhubd tray                   show the tray icon; `start` does this too\n\
          sessionhubd tunnel                 expose it externally through cloudflared\n\
@@ -1005,6 +1009,84 @@ fn wrap_paste(text: &[u8]) -> Vec<u8> {
     out
 }
 
+/// `sessionhubd url <id-or-name> [--embed] [--on MACHINE]`: the address that
+/// opens one terminal in the web UI (`/?t=…`), for another tool to link to or
+/// put in an iframe without guessing the port. Checked against the live list
+/// first, by the same rule `send` and the page use, so a link is only printed
+/// for a terminal it would actually open. No token in it: the browser signs in
+/// with the cookie it already has.
+fn cmd_url(argv: &[String]) -> ExitCode {
+    let rest = positional(argv);
+    let Some(target) = rest.first() else {
+        eprintln!("Usage: sessionhubd url <id-or-name> [--embed] [--on MACHINE]");
+        return ExitCode::from(2);
+    };
+    let Some((port, token)) = local_daemon() else { return ExitCode::FAILURE };
+    let on = flag_value(argv, "--on").filter(|m| !m.trim().is_empty());
+    let mut ask = format!("/api/term/ls?token={}", remote::percent_encode(&token));
+    if let Some(m) = &on {
+        ask.push_str(&format!("&via={}", remote::percent_encode(m)));
+    }
+    let (status, body) = match daemon::ask(port, "GET", &ask, &[], Duration::from_secs(10)) {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("{e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    if let Some(msg) = old_daemon_message(status, &body) {
+        eprintln!("{msg}");
+        return ExitCode::FAILURE;
+    }
+    if status != 200 {
+        eprintln!("{}", String::from_utf8_lossy(&body).trim());
+        return ExitCode::FAILURE;
+    }
+    let Ok(list) = serde_json::from_slice::<Vec<serde_json::Value>>(&body) else {
+        eprintln!("sessionhub sent something this version cannot read.");
+        return ExitCode::FAILURE;
+    };
+    if let Err(e) = check_url_target(&list, target) {
+        eprintln!("{e}");
+        return ExitCode::FAILURE;
+    }
+    println!("{}", terminal_url(port, target, on.as_deref(), has_flag(argv, "--embed")));
+    ExitCode::SUCCESS
+}
+
+/// Whether `target` names exactly one live terminal in `list` — `web/deeplink.js`
+/// applies the same rule when the link is opened.
+fn check_url_target(list: &[serde_json::Value], target: &str) -> Result<(), String> {
+    let alive = |t: &serde_json::Value| t.get("alive").and_then(|v| v.as_bool()).unwrap_or(false);
+    if let Ok(id) = target.parse::<u64>() {
+        return match list.iter().find(|t| t.get("id").and_then(|v| v.as_u64()) == Some(id)) {
+            None => Err(format!("There is no terminal {id}.")),
+            Some(t) if !alive(t) => Err(format!("Terminal {id} has exited.")),
+            Some(_) => Ok(()),
+        };
+    }
+    let named: Vec<&serde_json::Value> =
+        list.iter().filter(|t| t.get("name").and_then(|v| v.as_str()) == Some(target)).collect();
+    match named.iter().filter(|t| alive(t)).count() {
+        1 => Ok(()),
+        0 if named.is_empty() => Err(format!("There is no live terminal named '{target}'.")),
+        0 => Err(format!("The terminal '{target}' has exited.")),
+        _ => Err(format!("More than one live terminal is named '{target}' — use its id instead.")),
+    }
+}
+
+/// The web UI's address for one terminal on this daemon's port.
+fn terminal_url(port: u16, target: &str, machine: Option<&str>, embed: bool) -> String {
+    let mut url = format!("http://127.0.0.1:{port}/?t={}", remote::percent_encode(target));
+    if let Some(m) = machine {
+        url.push_str(&format!("&m={}", remote::percent_encode(m)));
+    }
+    if embed {
+        url.push_str("&embed=1");
+    }
+    url
+}
+
 fn cmd_ls(argv: &[String]) -> ExitCode {
     let Some((port, token)) = local_daemon() else { return ExitCode::FAILURE };
     let mut target = format!("/api/term/ls?token={}", remote::percent_encode(&token));
@@ -1807,6 +1889,32 @@ mod tests {
         assert_eq!(target_query("42"), "id=42");
         assert_eq!(target_query("builder"), "name=builder");
         assert_eq!(target_query("bui lder"), "name=bui%20lder");
+    }
+
+    #[test]
+    fn url_names_the_terminal_and_never_the_token() {
+        assert_eq!(terminal_url(7717, "abwork-chat-claude", None, false), "http://127.0.0.1:7717/?t=abwork-chat-claude");
+        assert_eq!(terminal_url(7717, "18", None, true), "http://127.0.0.1:7717/?t=18&embed=1");
+        assert_eq!(terminal_url(7800, "ab r6", Some("mac"), true), "http://127.0.0.1:7800/?t=ab%20r6&m=mac&embed=1");
+        assert!(!terminal_url(7717, "x", None, true).contains("token"));
+    }
+
+    #[test]
+    fn url_is_printed_only_for_one_live_terminal() {
+        let list: Vec<serde_json::Value> = serde_json::from_str(
+            r#"[{"id":3,"name":"abwork-chat-claude","alive":true},
+                {"id":9,"name":"old-one","alive":false},
+                {"id":11,"name":"twin","alive":true},{"id":12,"name":"twin","alive":true},
+                {"id":18,"name":null,"alive":true}]"#,
+        )
+        .unwrap();
+        assert!(check_url_target(&list, "abwork-chat-claude").is_ok());
+        assert!(check_url_target(&list, "18").is_ok());
+        assert!(check_url_target(&list, "old-one").unwrap_err().contains("exited"));
+        assert!(check_url_target(&list, "9").unwrap_err().contains("exited"));
+        assert!(check_url_target(&list, "nope").unwrap_err().contains("no live terminal"));
+        assert!(check_url_target(&list, "99").unwrap_err().contains("no terminal 99"));
+        assert!(check_url_target(&list, "twin").unwrap_err().contains("More than one"));
     }
 
     #[test]

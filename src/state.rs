@@ -218,11 +218,13 @@ struct Client {
     /// A chunk was dropped and the client has not been told yet (see
     /// `send_to`). Only the actor touches it.
     lost: std::cell::Cell<bool>,
+    /// The page said it is not on screen (`ClientMsg::Visibility`).
+    hidden: std::cell::Cell<bool>,
 }
 
 impl Client {
     fn new(tx: Sender<Out>, rx: Receiver<Out>) -> Self {
-        Client { tx, rx, lost: std::cell::Cell::new(false) }
+        Client { tx, rx, lost: std::cell::Cell::new(false), hidden: std::cell::Cell::new(false) }
     }
 }
 
@@ -355,8 +357,23 @@ pub fn run(cfg: Config, rx: Receiver<Cmd>, tx: Sender<Cmd>, registry_cfg: Sender
         }
     }
 
-    // Ends by itself once every Sender is gone — no polled flag.
-    for cmd in rx.iter() {
+    // Ends by itself once every Sender is gone — no polled flag. Wakes on its
+    // own only to send a `State` held back by `STATE_EVERY`.
+    loop {
+        if state_due().is_some_and(|d| d <= Instant::now()) {
+            send_state(&cfg, &projects, &agent_names, scanned, &clients, &terminals, &dismissed, None);
+        }
+        let cmd = match state_due() {
+            Some(d) => match rx.recv_timeout(d.saturating_duration_since(Instant::now())) {
+                Ok(c) => c,
+                Err(crossbeam_channel::RecvTimeoutError::Timeout) => continue,
+                Err(crossbeam_channel::RecvTimeoutError::Disconnected) => break,
+            },
+            None => match rx.recv() {
+                Ok(c) => c,
+                Err(_) => break,
+            },
+        };
         match cmd {
             Cmd::ClientUp { id, tx, rx } => {
                 clients.insert(id, Client::new(tx, rx));
@@ -382,6 +399,18 @@ pub fn run(cfg: Config, rx: Receiver<Cmd>, tx: Sender<Cmd>, registry_cfg: Sender
 
             Cmd::ClientMsg { id, msg } => match msg {
                 ClientMsg::List => send_state(&cfg, &projects, &agent_names, scanned, &clients, &terminals, &dismissed, Some(id)),
+
+                // Back on screen: everything it was spared meanwhile, at once.
+                ClientMsg::Visibility { visible } => {
+                    let Some(c) = clients.get(&id) else { continue };
+                    let was_hidden = c.hidden.replace(!visible);
+                    if visible && was_hidden {
+                        send_state(&cfg, &projects, &agent_names, scanned, &clients, &terminals, &dismissed, Some(id));
+                        if let Some(load) = &last_load {
+                            send_to(&clients, id, json(load));
+                        }
+                    }
+                }
 
                 ClientMsg::Spawn { project, agent, resume, pick, cols, rows } => {
                     let (cols, rows) = sane_size(cols, rows);
@@ -2554,8 +2583,11 @@ pub fn run(cfg: Config, rx: Receiver<Cmd>, tx: Sender<Cmd>, registry_cfg: Sender
                 // would otherwise show nothing for its first couple of seconds.
                 last_load = Some(msg.clone());
                 let text = json(&msg);
-                for cid in clients.keys().copied().collect::<Vec<_>>() {
-                    send_to(&clients, cid, text.clone());
+                // Not to a page off screen: nobody is reading the meter.
+                for (cid, c) in &clients {
+                    if !c.hidden.get() {
+                        send_to(&clients, *cid, text.clone());
+                    }
                 }
             }
 
@@ -3377,6 +3409,12 @@ fn send_state(
     dismissed: &HashSet<u32>,
     only: Option<ClientId>,
 ) {
+    // A broadcast right behind another waits: the actor sends the latest
+    // one when its time comes (`state_due`). An answer to one client never
+    // waits.
+    if only.is_none() && !state_gate_open(Instant::now()) {
+        return;
+    }
     // Which sessions currently have a live terminal.
     let live: HashMap<&str, u32> = terminals
         .values()
@@ -3442,6 +3480,10 @@ fn send_state(
     let mut dismissed_terminals: Vec<u32> = dismissed.iter().copied().collect();
     dismissed_terminals.sort_unstable();
 
+    // What a page not on screen gets instead: the terminals, which is all its
+    // notifications read — a tenth the size, made only if someone needs it.
+    let hidden_any = only.is_none() && clients.values().any(|c| c.hidden.get());
+    let brief = hidden_any.then(|| json(&ServerMsg::Terminals { terminals: list.clone() }));
     let msg = json(&ServerMsg::State {
         projects,
         terminals: list,
@@ -3454,11 +3496,46 @@ fn send_state(
     match only {
         Some(id) => send_to(clients, id, msg),
         None => {
-            for id in clients.keys() {
-                send_to(clients, *id, msg.clone());
+            for (id, c) in clients {
+                match (&brief, c.hidden.get()) {
+                    (Some(b), true) => send_to(clients, *id, b.clone()),
+                    _ => send_to(clients, *id, msg.clone()),
+                }
             }
         }
     }
+}
+
+/// At most one broadcast `State` per this — the first after a quiet spell at
+/// once (a terminal just opened shows without delay), any more within it
+/// folded into one sent at its end. Agents rewrite their session files in
+/// bursts, and every rewrite used to be a full `State` to every page.
+const STATE_EVERY: Duration = Duration::from_secs(1);
+
+thread_local! {
+    /// When the last broadcast went, and whether one is owed since.
+    static STATE_GATE: std::cell::Cell<(Option<Instant>, bool)> = const { std::cell::Cell::new((None, false)) };
+}
+
+/// May a broadcast go now? When not, it is owed (`state_due`).
+fn state_gate_open(now: Instant) -> bool {
+    STATE_GATE.with(|g| {
+        let (last, _) = g.get();
+        if last.is_some_and(|t| now.duration_since(t) < STATE_EVERY) {
+            g.set((last, true));
+            return false;
+        }
+        g.set((Some(now), false));
+        true
+    })
+}
+
+/// When the owed broadcast is to go, if one is owed.
+fn state_due() -> Option<Instant> {
+    STATE_GATE.with(|g| match g.get() {
+        (Some(last), true) => Some(last + STATE_EVERY),
+        _ => None,
+    })
 }
 
 fn json(msg: &ServerMsg) -> Out {
@@ -3494,6 +3571,23 @@ fn send_to(clients: &HashMap<ClientId, Client>, id: ClientId, out: Out) {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn a_burst_of_states_goes_as_the_first_and_one_more() {
+        std::thread::spawn(|| {
+            let t0 = Instant::now();
+            assert!(state_gate_open(t0), "the first after quiet goes at once");
+            assert_eq!(state_due(), None);
+            assert!(!state_gate_open(t0 + Duration::from_millis(200)));
+            assert!(!state_gate_open(t0 + Duration::from_millis(700)));
+            assert_eq!(state_due(), Some(t0 + STATE_EVERY), "the rest folded into one, owed");
+            assert!(state_gate_open(t0 + STATE_EVERY));
+            assert_eq!(state_due(), None, "and nothing owed after it");
+        })
+        .join()
+        .unwrap();
+    }
+
     use super::*;
     use crossbeam_channel::bounded;
 

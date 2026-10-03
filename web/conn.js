@@ -115,6 +115,9 @@ export class Conn {
       this.answers = false;
       this.lostWhy = null;
       this.startBeat();
+      // A page off screen is sent less (`visibility`); a fresh socket starts
+      // out assumed visible, so say so when it is not.
+      if (document.hidden) this.send({ t: 'visibility', visible: false });
       this.emit('onStatus', 'open');
     };
 
@@ -144,6 +147,7 @@ export class Conn {
       }
       const map = {
         state: 'onState',
+        terminals: 'onTerminals',
         attached: 'onAttached',
         size: 'onSize',
         exit: 'onExit',

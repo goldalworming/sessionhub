@@ -258,6 +258,13 @@ pub enum ClientMsg {
         name: String,
         to: String,
     },
+    /// Whether the page is on screen. Hidden — another browser tab in front, a
+    /// phone asleep — it is sent only `Terminals`, what its notifications
+    /// need, instead of the whole `State`, and a full `State` once it shows
+    /// again. Assumed visible until said otherwise.
+    Visibility {
+        visible: bool,
+    },
     /// The paired machines in the order wanted — for their tabs and the list
     /// in Settings, on every device, since it is kept in the config. Names it
     /// leaves out keep their place after the ones it gives.
@@ -517,6 +524,12 @@ pub enum ServerMsg {
     Saved {
         path: String,
         modified_ms: u64,
+    },
+    /// The terminals alone, for a page that is not on screen (`Visibility`):
+    /// enough to notice work finishing and announce it, without the project
+    /// list — nine tenths of a `State` — that only the sidebar draws.
+    Terminals {
+        terminals: Vec<TerminalInfo>,
     },
     /// One agent's version, for an `AgentInfo` that went out with
     /// `version_pending` — empty when it could not be had.

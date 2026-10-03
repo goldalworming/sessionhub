@@ -21,6 +21,7 @@ import { attachScrollPad } from './scrollpad.js';
 import { unlock as unlockAudio, ding } from './chime.js';
 import { Toasts } from './toasts.js';
 import { Telemetry } from './telemetry.js';
+import { parseDeepLink, findTerminal, deepLinkSearch } from './deeplink.js';
 
 const LS = {
   token: 'sh.token',
@@ -152,12 +153,24 @@ function takeToken() {
   const q = new URLSearchParams(location.search).get('token');
   if (q) {
     localStorage.setItem(LS.token, q);
-    // Clear the token out of the URL so it is not bookmarked or copied along.
-    history.replaceState(null, '', location.pathname);
+    // Clear the token out of the URL so it is not bookmarked or copied along —
+    // only the token: a deep link beside it (`t`, `m`, `embed`) stays.
+    const rest = new URLSearchParams(location.search);
+    rest.delete('token');
+    const s = rest.toString();
+    history.replaceState(null, '', location.pathname + (s ? `?${s}` : ''));
     return q;
   }
   return localStorage.getItem(LS.token);
 }
+
+/// `?t=<name-or-id>` opens that terminal (`&m=` on a paired machine), and
+/// `&embed=1` shows it alone, for another local tool's iframe — see
+/// `deeplink.js`. Read before anything else touches the URL.
+const deep = parseDeepLink(location.search);
+/// Still to be opened: cleared once the terminal is found, or said not to be.
+let deepPending = !!deep.t;
+if (deep.embed) document.documentElement.classList.add('embed');
 
 const token = takeToken();
 if (!token) {
@@ -606,7 +619,14 @@ function show(id) {
   clearDone(id);
   const grid = layout === 'grid';
   for (const [tid, e] of terms) e.host.hidden = grid ? false : tid !== id;
+  // A deep link that could not be opened said so here; picking something else
+  // is the answer to it.
+  if (el.empty.dataset.deep) {
+    el.empty.innerHTML = el.empty.dataset.deep;
+    delete el.empty.dataset.deep;
+  }
   el.empty.hidden = terms.size > 0;
+  syncDeepUrl();
   // The key bar appears or disappears BEFORE the size is computed: it takes
   // height, so computing first and showing it after would cut off the last row.
   keybar.sync(activeId !== null && terms.size > 0);
@@ -3141,6 +3161,15 @@ conn.on.onLastCommand = (msg) => {
   if (waiting) waiting(msg.command || '');
 };
 
+/// What a page off screen is sent instead of `state`: the terminals alone —
+/// enough to notice work finishing and announce it. The sidebar waits for the
+/// full state that comes when the page shows again.
+conn.on.onTerminals = (msg, m) => {
+  const terminals = msg.terminals || [];
+  (m === current ? state : m.state).terminals = terminals;
+  noteBackground(m, terminals);
+};
+
 conn.on.onState = (msg, m) => {
   // Background machines still get their data updated — so switching to one does
   // not show a second of stale state — but nothing is drawn.
@@ -3168,7 +3197,9 @@ conn.on.onState = (msg, m) => {
   paintAllActivity(m);
   revealNewProject();
   sidePanel.syncRoots();
+  openDeepLink();
   offerSessionPicker();
+  syncDeepUrl();
 };
 
 /// On a narrow screen, landing with no terminal open means landing on an empty
@@ -3178,7 +3209,43 @@ conn.on.onState = (msg, m) => {
 /// Once only, and not recorded as a choice: closing it and seeing it open again
 /// on the next state update is far more annoying than an empty stage.
 let pickerOffered = false;
+/// The URL names the terminal on screen, so it can be copied, refreshed or
+/// gone back to (`history.replaceState`, never a reload). Left alone while a
+/// deep link is still to be opened — whatever the page restores first must not
+/// overwrite the one asked for.
+function syncDeepUrl() {
+  if (deepPending || !token) return;
+  const t = activeId !== null ? state.terminals.find((x) => x.id === activeId) || { id: activeId } : null;
+  const search = deepLinkSearch(location.search, t, current?.via || '');
+  if (search !== location.search) history.replaceState(null, '', location.pathname + search);
+}
+
+/// Open the deep link's terminal, once its machine's list has arrived — or say
+/// plainly, where the terminal would be, why it cannot be: an empty panel for a
+/// mistyped name would look like a broken page.
+function openDeepLink() {
+  if (!deepPending) return;
+  if (deep.m ? current?.via !== deep.m : current !== local) return;
+  deepPending = false;
+  const found = findTerminal(state.terminals, deep.t);
+  if (found.id !== undefined) {
+    attach(found.id);
+    return;
+  }
+  showDeepError(found.error);
+}
+
+function showDeepError(text) {
+  deepPending = false;
+  for (const e of terms.values()) e.host.hidden = true;
+  if (!el.empty.dataset.deep) el.empty.dataset.deep = el.empty.innerHTML;
+  el.empty.textContent = text;
+  el.empty.hidden = false;
+}
+
 function offerSessionPicker() {
+  // A deep link chose what to show; an embedded terminal has no drawer at all.
+  if (deep.t || deep.embed) return;
   if (pickerOffered) return;
   pickerOffered = true;
   if (!isNarrow() || activeId !== null || terms.size) return;
@@ -3497,6 +3564,10 @@ function switchMachine(m) {
   renderTabs();
   if (sidePanel) sidePanel.syncRoots();
   relayout();
+  // A machine that has already sent its state has it in hand now; one that
+  // has not yet gets it through `onState`.
+  openDeepLink();
+  syncDeepUrl();
 }
 
 function forgetMachine(m) {
@@ -3563,6 +3634,13 @@ conn.on.onRemotes = (msg, m) => {
   canOrderRemotes = msg.can_order === true;
   machineBar.paint(current);
   settings.setRemotes(want, msg.can_move === true, msg.can_rename === true, canOrderRemotes);
+  // A deep link to a paired machine's terminal: that machine first. Its list
+  // of terminals comes with its own state, where `openDeepLink` takes over.
+  if (deepPending && deep.m && current?.via !== deep.m) {
+    const target = machines.find((x) => x.via === deep.m);
+    if (target) switchMachine(target);
+    else showDeepError(`There is no paired machine called “${deep.m}” here.`);
+  }
 };
 
 /// Whether the local daemon keeps an order for the paired machines.
@@ -3615,7 +3693,11 @@ function probeLinks() {
   if (performance.now() - treeLookedAt > 5000) nudgeTree(current, undefined, 300);
 }
 document.addEventListener('visibilitychange', () => {
-  if (document.visibilityState === 'visible') probeLinks();
+  // Off screen the daemons send only the terminal list (`onTerminals`), and the
+  // whole state again on return.
+  const visible = document.visibilityState === 'visible';
+  for (const m of machines) if (m.started) m.conn.send({ t: 'visibility', visible });
+  if (visible) probeLinks();
 });
 window.addEventListener('online', probeLinks);
 window.addEventListener('pageshow', (e) => e.persisted && probeLinks());

@@ -176,6 +176,45 @@ actually run the terminal (local, or the far end of `--on`) understands
 `--env` before sending anything, and refuses with a clear message rather than
 starting a terminal silently missing the environment it was asked for.
 
+## Deep links and embedding
+
+The web UI opens straight on one terminal with `?t=`, given its name or its
+id — the same rule as `send` and `capture`: all digits is an id, anything else
+a name, and a name has to belong to exactly one live terminal.
+
+```text
+http://127.0.0.1:7717/?t=abwork-chat-claude
+http://127.0.0.1:7717/?t=18
+http://127.0.0.1:7717/?t=builder&m=mac        a terminal on the paired machine "mac"
+http://127.0.0.1:7717/?t=builder&embed=1      that terminal alone, for an iframe
+```
+
+The URL follows the terminal on screen: picking another one in the browser
+rewrites it in place (no reload), so the address bar can be copied, and a
+refresh or Back comes back to the same terminal. A name that is not there, or
+a terminal that has exited, is said plainly where the terminal would be.
+
+`&embed=1` shows only that terminal — no sidebar, no machine or tab strip, no
+file panel — filling whatever size its iframe has, and it still takes typing.
+The page may be framed by `http://127.0.0.1:*` and `http://localhost:*` (any
+port: another tool on this machine, such as abwork) and by nothing else.
+
+No token goes in these links. A browser that has signed in once keeps a
+cookie and uses it, inside an iframe from another local port too; one that has
+not gets the usual 401 sign-in page, `?t=` or not.
+
+`sessionhubd url` prints the link, so another program never has to guess the
+port — and only for a terminal it would actually open:
+
+```text
+sessionhubd url <id-or-name> [--embed] [--on MACHINE]
+```
+
+```text
+$ sessionhubd url abwork-chat-claude --embed
+http://127.0.0.1:7717/?t=abwork-chat-claude&embed=1
+```
+
 ## Known limits
 
 - Each terminal keeps the last 2 MB of output. History is lost when the daemon stops.
