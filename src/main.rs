@@ -148,9 +148,10 @@ fn print_help() {
          \x20                                 what is on screen, as plain text\n\
          sessionhubd wait <id-or-name> [--idle SECONDS] [--timeout SECONDS]\n\
          \x20                                 until quiet, or the process ends\n\
-         sessionhubd url <id-or-name> [--embed]\n\
+         sessionhubd url <id-or-name> [--embed] [--public]\n\
          \x20                                 the web UI's address for it; --embed shows\n\
-         \x20                                 that terminal alone, for an iframe\n\
+         \x20                                 that terminal alone, for an iframe; --public\n\
+         \x20                                 uses this machine's tunnel address\n\
          \n\
          sessionhubd tray                   show the tray icon; `start` does this too\n\
          sessionhubd tunnel                 expose it externally through cloudflared\n\
@@ -1009,7 +1010,7 @@ fn wrap_paste(text: &[u8]) -> Vec<u8> {
     out
 }
 
-/// `sessionhubd url <id-or-name> [--embed] [--on MACHINE]`: the address that
+/// `sessionhubd url <id-or-name> [--embed] [--public] [--on MACHINE]`: the address that
 /// opens one terminal in the web UI (`/?t=…`), for another tool to link to or
 /// put in an iframe without guessing the port. Checked against the live list
 /// first, by the same rule `send` and the page use, so a link is only printed
@@ -1018,7 +1019,7 @@ fn wrap_paste(text: &[u8]) -> Vec<u8> {
 fn cmd_url(argv: &[String]) -> ExitCode {
     let rest = positional(argv);
     let Some(target) = rest.first() else {
-        eprintln!("Usage: sessionhubd url <id-or-name> [--embed] [--on MACHINE]");
+        eprintln!("Usage: sessionhubd url <id-or-name> [--embed] [--public] [--on MACHINE]");
         return ExitCode::from(2);
     };
     let Some((port, token)) = local_daemon() else { return ExitCode::FAILURE };
@@ -1050,7 +1051,21 @@ fn cmd_url(argv: &[String]) -> ExitCode {
         eprintln!("{e}");
         return ExitCode::FAILURE;
     }
-    println!("{}", terminal_url(port, target, on.as_deref(), has_flag(argv, "--embed")));
+    // `--public`: this machine's tunnel address instead of 127.0.0.1, for a page
+    // opened from another device (abwork through its own forward).
+    let base = if has_flag(argv, "--public") {
+        let Some(cfg) = load_config() else { return ExitCode::FAILURE };
+        match cloudflare::own_host(&cfg.cloudflare, port) {
+            Ok(host) => format!("https://{host}"),
+            Err(e) => {
+                eprintln!("{e}");
+                return ExitCode::FAILURE;
+            }
+        }
+    } else {
+        format!("http://127.0.0.1:{port}")
+    };
+    println!("{}", terminal_url(&base, target, on.as_deref(), has_flag(argv, "--embed")));
     ExitCode::SUCCESS
 }
 
@@ -1075,9 +1090,10 @@ fn check_url_target(list: &[serde_json::Value], target: &str) -> Result<(), Stri
     }
 }
 
-/// The web UI's address for one terminal on this daemon's port.
-fn terminal_url(port: u16, target: &str, machine: Option<&str>, embed: bool) -> String {
-    let mut url = format!("http://127.0.0.1:{port}/?t={}", remote::percent_encode(target));
+/// The web UI's address for one terminal, under `base` (`http://127.0.0.1:7717`,
+/// or this machine's public address).
+fn terminal_url(base: &str, target: &str, machine: Option<&str>, embed: bool) -> String {
+    let mut url = format!("{base}/?t={}", remote::percent_encode(target));
     if let Some(m) = machine {
         url.push_str(&format!("&m={}", remote::percent_encode(m)));
     }
@@ -1893,10 +1909,10 @@ mod tests {
 
     #[test]
     fn url_names_the_terminal_and_never_the_token() {
-        assert_eq!(terminal_url(7717, "abwork-chat-claude", None, false), "http://127.0.0.1:7717/?t=abwork-chat-claude");
-        assert_eq!(terminal_url(7717, "18", None, true), "http://127.0.0.1:7717/?t=18&embed=1");
-        assert_eq!(terminal_url(7800, "ab r6", Some("mac"), true), "http://127.0.0.1:7800/?t=ab%20r6&m=mac&embed=1");
-        assert!(!terminal_url(7717, "x", None, true).contains("token"));
+        assert_eq!(terminal_url("http://127.0.0.1:7717", "abwork-chat-claude", None, false), "http://127.0.0.1:7717/?t=abwork-chat-claude");
+        assert_eq!(terminal_url("http://127.0.0.1:7717", "18", None, true), "http://127.0.0.1:7717/?t=18&embed=1");
+        assert_eq!(terminal_url("https://sbox.example.com", "ab r6", Some("mac"), true), "https://sbox.example.com/?t=ab%20r6&m=mac&embed=1");
+        assert!(!terminal_url("http://127.0.0.1:7717", "x", None, true).contains("token"));
     }
 
     #[test]

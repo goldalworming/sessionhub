@@ -219,6 +219,12 @@ impl Cloudflare {
             && !self.tunnel_id.is_empty()
     }
 
+    /// `host_for`, but only when that name lasts: a throwaway tunnel's address
+    /// is new each run and known only to it.
+    pub fn public_host(&self, f: &Forward) -> Option<String> {
+        (self.ready() && !self.zone_name.is_empty()).then(|| self.host_for(f))
+    }
+
     /// The address one forward answers at, when there is a domain for it.
     pub fn host_for(&self, f: &Forward) -> String {
         format!("{}.{}", f.name, self.zone_name)

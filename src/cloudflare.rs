@@ -157,6 +157,44 @@ pub fn withdraw(cf: &Cloudflare, f: &Forward) -> Result<(), String> {
     Ok(())
 }
 
+/// This machine's own public hostname: the one the tunnel sends to the daemon's
+/// port (`sbox.example.com` → `http://localhost:7717`). It is set up in
+/// Cloudflare, not here, so it is read back from the tunnel's ingress — and
+/// kept for an hour, because `sessionhubd url --public` is asked once per
+/// terminal a page shows.
+pub fn own_host(cf: &Cloudflare, port: u16) -> Result<String, String> {
+    let cache = crate::config::dir().join("public-host");
+    if let Ok(meta) = std::fs::metadata(&cache) {
+        let fresh = meta.modified().ok().and_then(|m| m.elapsed().ok()).is_some_and(|age| age.as_secs() < 3600);
+        if let (true, Ok(text)) = (fresh, std::fs::read_to_string(&cache)) {
+            if let Some((p, host)) = text.trim().split_once(' ') {
+                if p == port.to_string() && !host.is_empty() {
+                    return Ok(host.to_string());
+                }
+            }
+        }
+    }
+    if !cf.ready() {
+        return Err("no Cloudflare tunnel is set up here, so this machine has no public address".into());
+    }
+    let config = configuration(&cf.api_token, &cf.account_id, &cf.tunnel_id)?;
+    let host = host_serving(&ingress_of(&config), port).ok_or_else(|| {
+        format!("no hostname in the tunnel `{}` points at this machine's port {port}", cf.tunnel_name)
+    })?;
+    let _ = std::fs::write(&cache, format!("{port} {host}\n"));
+    Ok(host)
+}
+
+/// The hostname of the first rule that sends to `port` on this machine.
+fn host_serving(rules: &[Value], port: u16) -> Option<String> {
+    let wanted = [format!("http://localhost:{port}"), format!("http://127.0.0.1:{port}")];
+    rules.iter().find_map(|r| {
+        let service = text(r, "service");
+        let host = text(r, "hostname");
+        (wanted.iter().any(|w| service.trim_end_matches('/') == w) && !host.is_empty()).then_some(host)
+    })
+}
+
 // ------------------------------------------------------------------- ingress
 
 fn configuration(api_token: &str, account: &str, tunnel: &str) -> Result<Value, String> {
@@ -367,6 +405,18 @@ fn write_private(path: &PathBuf, text: &str) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_own_hostname_is_the_rule_that_sends_to_our_port() {
+        let rules = vec![
+            json!({ "hostname": "dev.example.com", "service": "http://localhost:5173" }),
+            json!({ "hostname": "sbox.example.com", "service": "http://localhost:7717/" }),
+            json!({ "hostname": "abc.example.com", "service": "http://localhost:7801" }),
+            json!({ "service": "http_status:404" }),
+        ];
+        assert_eq!(host_serving(&rules, 7717).as_deref(), Some("sbox.example.com"));
+        assert_eq!(host_serving(&rules, 7718), None);
+    }
 
     fn rules(hosts: &[&str], catch_all: bool) -> Vec<Value> {
         let mut out: Vec<Value> = hosts

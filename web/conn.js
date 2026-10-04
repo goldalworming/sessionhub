@@ -42,6 +42,11 @@ const DIAL_MS = 15000;
 /// is one frame that takes seconds, and a false alarm reconnects for nothing.
 const PROBE_MS = 10000;
 
+/// This page, for as long as it is open: sent with every socket, so a daemon
+/// can tell this page reconnecting from a second viewer and drop the socket it
+/// replaces at once rather than minutes later (`Cmd::ClientUp`).
+const PAGE = [...crypto.getRandomValues(new Uint8Array(12))].map((b) => b.toString(16).padStart(2, '0')).join('');
+
 export class Conn {
   /// `via` is the name of another paired machine; empty means this machine.
   /// `owner` is carried into every handler, so one set of handlers can serve
@@ -89,7 +94,7 @@ export class Conn {
     const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
     const via = this.via ? `&via=${encodeURIComponent(this.via)}` : '';
     const ws = new WebSocket(
-      `${proto}//${location.host}/ws?token=${encodeURIComponent(this.token)}${via}`,
+      `${proto}//${location.host}/ws?token=${encodeURIComponent(this.token)}${via}&page=${PAGE}`,
     );
     ws.binaryType = 'arraybuffer';
     this.ws = ws;

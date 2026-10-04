@@ -36,7 +36,8 @@ const MAX_ENV_VARS: usize = 32;
 const MAX_ENV_VALUE_LEN: usize = 4096;
 
 pub enum Cmd {
-    ClientUp { id: ClientId, tx: Sender<Out>, rx: Receiver<Out> },
+    /// `page`: which open page this socket belongs to (`page_id`), when it said.
+    ClientUp { id: ClientId, tx: Sender<Out>, rx: Receiver<Out>, page: Option<String> },
     ClientDown { id: ClientId },
     ClientMsg { id: ClientId, msg: ClientMsg },
     ClientInput { term: u32, data: Vec<u8> },
@@ -220,11 +221,29 @@ struct Client {
     lost: std::cell::Cell<bool>,
     /// The page said it is not on screen (`ClientMsg::Visibility`).
     hidden: std::cell::Cell<bool>,
+    /// The open page this socket belongs to (`Cmd::ClientUp`).
+    page: Option<String>,
+}
+
+/// Forget a client: no longer a viewer of anything, and the terminals it held
+/// at its size may grow (after `GROW_GRACE`).
+///
+/// ponytail: its socket is not closed from here — the reader thread holds the
+/// other sender and leaves only when the connection really dies; its
+/// `ClientDown` then finds nothing to do.
+fn drop_client(id: ClientId, clients: &mut HashMap<ClientId, Client>, terminals: &mut HashMap<u32, Terminal>) {
+    clients.remove(&id);
+    let now = Instant::now();
+    for t in terminals.values_mut() {
+        if t.viewers.remove(&id).is_some() && renegotiate_after_leave(t, now) {
+            broadcast_size(clients, t);
+        }
+    }
 }
 
 impl Client {
     fn new(tx: Sender<Out>, rx: Receiver<Out>) -> Self {
-        Client { tx, rx, lost: std::cell::Cell::new(false), hidden: std::cell::Cell::new(false) }
+        Client { tx, rx, lost: std::cell::Cell::new(false), hidden: std::cell::Cell::new(false), page: None }
     }
 }
 
@@ -375,8 +394,23 @@ pub fn run(cfg: Config, rx: Receiver<Cmd>, tx: Sender<Cmd>, registry_cfg: Sender
             },
         };
         match cmd {
-            Cmd::ClientUp { id, tx, rx } => {
-                clients.insert(id, Client::new(tx, rx));
+            Cmd::ClientUp { id, tx, rx, page } => {
+                // The same page connecting again means its earlier socket is
+                // dead, whether or not that has reached us yet: through a tunnel
+                // a phone's dropped connection can take minutes to be noticed,
+                // and until then it is still a viewer — holding the terminal at
+                // the size it had then, half a screen with the keyboard up.
+                if let Some(p) = &page {
+                    let stale: Vec<ClientId> =
+                        clients.iter().filter(|(_, c)| c.page.as_deref() == Some(p)).map(|(cid, _)| *cid).collect();
+                    for old in stale {
+                        drop_client(old, &mut clients, &mut terminals);
+                        info!(client = old, replaced_by = id, "client replaced by its page reconnecting");
+                    }
+                }
+                let mut client = Client::new(tx, rx);
+                client.page = page;
+                clients.insert(id, client);
                 info!(client = id, "client connected");
                 crate::telemetry::track("client_open", serde_json::json!({ "client": id, "clients": clients.len() }));
                 send_state(&cfg, &projects, &agent_names, scanned, &clients, &terminals, &dismissed, Some(id));
@@ -386,13 +420,11 @@ pub fn run(cfg: Config, rx: Receiver<Cmd>, tx: Sender<Cmd>, registry_cfg: Sender
             }
 
             Cmd::ClientDown { id } => {
-                clients.remove(&id);
-                let now = Instant::now();
-                for t in terminals.values_mut() {
-                    if t.viewers.remove(&id).is_some() && renegotiate_after_leave(t, now) {
-                        broadcast_size(&clients, t);
-                    }
+                // Already gone when its page reconnected first (`ClientUp`).
+                if !clients.contains_key(&id) {
+                    continue;
                 }
+                drop_client(id, &mut clients, &mut terminals);
                 info!(client = id, "client disconnected");
                 crate::telemetry::track("client_close", serde_json::json!({ "client": id, "clients": clients.len() }));
             }
@@ -1346,7 +1378,7 @@ pub fn run(cfg: Config, rx: Receiver<Cmd>, tx: Sender<Cmd>, registry_cfg: Sender
                         local: cfg.cloudflare.next_local(),
                     };
                     if let Err(message) =
-                        crate::http::open_forward(&entry.name, entry.local, entry.target())
+                        crate::http::open_forward(&entry.name, entry.local, entry.target(), cfg.cloudflare.public_host(&entry))
                     {
                         send_to(
                             &clients,

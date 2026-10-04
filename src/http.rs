@@ -65,6 +65,7 @@ static FORWARDS: Mutex<Option<HashMap<String, ForwardListener>>> = Mutex::new(No
 struct ForwardListener {
     local: u16,
     stop: Arc<AtomicBool>,
+    host: Option<String>,
 }
 
 struct LanListener {
@@ -94,11 +95,11 @@ pub fn serve(
     let lan_addr = cfg.lan_addr.clone();
     // Addresses that were open before the daemon stopped: the tunnel still
     // points at them, so their listeners have to come back with it.
-    let reopen: Vec<(String, u16, String)> = cfg
+    let reopen: Vec<(String, u16, String, Option<String>)> = cfg
         .cloudflare
         .forwards
         .iter()
-        .map(|f| (f.name.clone(), f.local, f.target()))
+        .map(|f| (f.name.clone(), f.local, f.target(), cfg.cloudflare.public_host(f)))
         .collect();
     let quick_again = !cfg.cloudflare.ready();
     let ctx = ServeCtx {
@@ -110,8 +111,8 @@ pub fn serve(
     };
     let _ = CTX.set(ctx.clone());
 
-    for (name, local, target) in reopen {
-        if let Err(e) = open_forward(&name, local, target) {
+    for (name, local, target, host) in reopen {
+        if let Err(e) = open_forward(&name, local, target, host) {
             warn!(%name, error = %e, "could not reopen a forwarded address");
             continue;
         }
@@ -144,7 +145,9 @@ pub fn serve(
 /// Loopback only, always: what reaches it comes from cloudflared running on this
 /// machine, and a forwarder listening on the network would be a second way in
 /// that nobody asked for.
-pub fn open_forward(name: &str, local: u16, target: String) -> Result<(), String> {
+/// `host`: its public hostname, when it has a lasting one — the page may be
+/// framed from there (`frame_ancestors`).
+pub fn open_forward(name: &str, local: u16, target: String, host: Option<String>) -> Result<(), String> {
     let Some(ctx) = CTX.get() else {
         return Err("server is not running yet".into());
     };
@@ -160,7 +163,7 @@ pub fn open_forward(name: &str, local: u16, target: String) -> Result<(), String
 
     let mut slot = FORWARDS.lock().map_err(|_| "forwarder state is poisoned".to_string())?;
     slot.get_or_insert_with(HashMap::new)
-        .insert(name.to_string(), ForwardListener { local, stop });
+        .insert(name.to_string(), ForwardListener { local, stop, host });
     info!(%name, %addr, %target, "forwarding");
     Ok(())
 }
@@ -222,6 +225,29 @@ fn dial_candidates(target: &str) -> Vec<SocketAddr> {
     out
 }
 
+/// The request head as the forwarded server should see it: addressed to
+/// itself (`Host: <target>`), with the tunnel's hostname moved to
+/// `X-Forwarded-Host`. A local server commonly refuses any Host but its own —
+/// a guard against DNS rebinding (abwork, Vite's `allowedHosts`) — and a
+/// tunnel hostname is new every time a forward is made, so no list of them
+/// could keep up. The token in front of the forward is what guards it here.
+fn with_target_host(head: &str, target: &str) -> String {
+    let mut out = String::with_capacity(head.len() + 64);
+    for line in head.split_inclusive("\r\n") {
+        let name = line.split(':').next().unwrap_or("").trim();
+        if name.eq_ignore_ascii_case("host") {
+            let original = line[line.find(':').map_or(line.len(), |i| i + 1)..].trim();
+            out.push_str(&format!("Host: {target}\r\n"));
+            if !original.is_empty() {
+                out.push_str(&format!("X-Forwarded-Host: {original}\r\n"));
+            }
+        } else if !name.eq_ignore_ascii_case("x-forwarded-host") {
+            out.push_str(line);
+        }
+    }
+    out
+}
+
 /// One connection to a forwarded address.
 ///
 /// The head is read and judged, then written through untouched and the rest
@@ -249,12 +275,7 @@ fn forward(mut sock: TcpStream, ctx: ServeCtx, target: String) -> io::Result<()>
     if from_query.is_some() {
         let clean = req.path_without_token();
         let head = format!(
-            "HTTP/1.1 302 Found
-Location: {clean}
-{}             Content-Length: 0
-Connection: close
-
-",
+            "HTTP/1.1 302 Found\r\nLocation: {clean}\r\n{}Content-Length: 0\r\nConnection: close\r\n\r\n",
             cookie_header(&secret)
         );
         sock.write_all(head.as_bytes())?;
@@ -278,7 +299,7 @@ Connection: close
         }
     };
     far.set_nodelay(true)?;
-    far.write_all(head.as_bytes())?;
+    far.write_all(with_target_host(&head, &target).as_bytes())?;
     far.flush()?;
     crate::remote::pump(sock, far);
     Ok(())
@@ -464,7 +485,7 @@ fn handle(
                 401,
                 "text/html; charset=utf-8",
                 signin_page(&req.path).as_bytes(),
-                FRAME_ANCESTORS,
+                &frame_ancestors(),
             );
         }
         return respond(&mut sock, 401, "text/plain; charset=utf-8", b"401 invalid token\n");
@@ -557,6 +578,14 @@ fn ask_remote(tx: &Sender<Cmd>, name: &str) -> Option<crate::config::Remote> {
 /// already exists, and that is exactly why not one line of the actor had to
 /// change. Backpressure comes free too — a relay that cannot keep writing makes
 /// TCP hold back the far side by itself.
+/// Which open page a socket comes from: `page=` on `/ws`, a random id the page
+/// picks once per load (see `Cmd::ClientUp`). Anything that does not look like
+/// one is ignored, and the socket is then simply not tied to a page.
+fn page_id(req: &Request) -> Option<String> {
+    req.query_param("page")
+        .filter(|p| (8..=64).contains(&p.len()) && p.bytes().all(|b| b.is_ascii_alphanumeric()))
+}
+
 fn relay_ws(sock: TcpStream, req: Request, r: crate::config::Remote) -> io::Result<()> {
     let Some(key) = req.header("sec-websocket-key") else {
         return respond(&mut { sock }, 400, "text/plain", b"400 not a websocket handshake\n");
@@ -564,7 +593,7 @@ fn relay_ws(sock: TcpStream, req: Request, r: crate::config::Remote) -> io::Resu
 
     // Connect to the far side first; if that fails, the client can still be told
     // over plain HTTP instead of getting a connection that dies suddenly.
-    let far = match crate::remote::dial_ws(&r) {
+    let far = match crate::remote::dial_ws(&r, page_id(&req).as_deref()) {
         Ok(f) => f,
         Err(e) => {
             warn!(remote = %r.name, error = %e, "could not reach the paired machine");
@@ -1217,7 +1246,7 @@ fn upgrade(
     // The actor holds the sending end; the copy of the receiving end exists only
     // to drop the oldest chunk when the queue is full.
     if tx
-        .send(Cmd::ClientUp { id, tx: out_tx.clone(), rx: out_rx.clone() })
+        .send(Cmd::ClientUp { id, tx: out_tx.clone(), rx: out_rx.clone(), page: page_id(&req) })
         .is_err()
     {
         return Ok(());
@@ -1377,9 +1406,9 @@ fn serve_static(
         let html = stamp_index(&String::from_utf8_lossy(&data), &asset_version());
         let caching = caching_for(rel, false);
         let extra = if set_cookie {
-            format!("{caching}{FRAME_ANCESTORS}{}", cookie_header(token))
+            format!("{caching}{}{}", frame_ancestors(), cookie_header(token))
         } else {
-            format!("{caching}{FRAME_ANCESTORS}")
+            format!("{caching}{}", frame_ancestors())
         };
         return respond_with(sock, 200, mime_of(rel), html.as_bytes(), &extra);
     }
@@ -1459,13 +1488,30 @@ fn cookie_header(token: &str) -> String {
 /// `vendor/` is excluded: it holds xterm and Monaco, which only change when
 /// their version does, and Monaco alone is nearly 5 MB. Re-fetching it on every
 /// load makes the first open feel heavy for no reason.
-/// Who may put the app in an iframe: itself, and other tools on this machine
+/// Who may put the app in an iframe: itself, other tools on this machine
 /// (`http://127.0.0.1:*`, `http://localhost:*` — abwork shows a terminal in
-/// one, `?t=<name>&embed=1`). Nothing else: until this the page sent no such
-/// header, and any site at all could frame it. The token is still what lets
-/// anyone in; a framing page cannot read or script what it frames.
-const FRAME_ANCESTORS: &str =
-    "Content-Security-Policy: frame-ancestors 'self' http://127.0.0.1:* http://localhost:*\r\n";
+/// one, `?t=<name>&embed=1`), and the hostnames of this machine's own forwards
+/// — the same tools, opened through the tunnel from another device. Nothing
+/// else. The token is still what lets anyone in; a framing page cannot read or
+/// script what it frames.
+fn frame_ancestors() -> String {
+    let hosts: Vec<String> = FORWARDS
+        .lock()
+        .ok()
+        .and_then(|slot| slot.as_ref().map(|m| m.values().filter_map(|f| f.host.clone()).collect()))
+        .unwrap_or_default();
+    frame_ancestors_for(&hosts)
+}
+
+fn frame_ancestors_for(hosts: &[String]) -> String {
+    let mut sources = String::from("'self' http://127.0.0.1:* http://localhost:*");
+    let mut hosts: Vec<&String> = hosts.iter().collect();
+    hosts.sort();
+    for h in hosts {
+        sources.push_str(&format!(" https://{h}"));
+    }
+    format!("Content-Security-Policy: frame-ancestors {sources}\r\n")
+}
 
 fn caching_for(rel: &str, versioned: bool) -> &'static str {
     // A `?v=<hash>` URL names one exact content: when the content changes, the
@@ -2067,6 +2113,26 @@ mod tests {
     fn plain_fetch_still_gets_text() {
         let r = req("GET /app.js HTTP/1.1\r\nSec-Fetch-Mode: cors\r\nAccept: */*\r\n\r\n");
         assert!(!wants_html(&r));
+    }
+
+    #[test]
+    fn a_forward_addresses_the_server_behind_it_by_its_own_name() {
+        let head = "GET /api/x HTTP/1.1\r\nhost: abc123.example.com\r\nX-Forwarded-Host: spoofed\r\nCookie: a=b\r\n\r\n";
+        let out = with_target_host(head, "127.0.0.1:7720");
+        assert_eq!(
+            out,
+            "GET /api/x HTTP/1.1\r\nHost: 127.0.0.1:7720\r\nX-Forwarded-Host: abc123.example.com\r\nCookie: a=b\r\n\r\n"
+        );
+    }
+
+    #[test]
+    fn only_this_machine_and_its_own_forwards_may_frame_the_page() {
+        assert_eq!(
+            frame_ancestors_for(&[]),
+            "Content-Security-Policy: frame-ancestors 'self' http://127.0.0.1:* http://localhost:*\r\n"
+        );
+        let h = frame_ancestors_for(&["b.example.com".into(), "a.example.com".into()]);
+        assert!(h.ends_with("http://localhost:* https://a.example.com https://b.example.com\r\n"), "{h}");
     }
 
     #[test]

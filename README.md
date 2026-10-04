@@ -197,7 +197,8 @@ a terminal that has exited, is said plainly where the terminal would be.
 `&embed=1` shows only that terminal — no sidebar, no machine or tab strip, no
 file panel — filling whatever size its iframe has, and it still takes typing.
 The page may be framed by `http://127.0.0.1:*` and `http://localhost:*` (any
-port: another tool on this machine, such as abwork) and by nothing else.
+port: another tool on this machine, such as abwork), by the hostnames of this
+machine's own forwards (see `--public` below), and by nothing else.
 
 No token goes in these links. A browser that has signed in once keeps a
 cookie and uses it, inside an iframe from another local port too; one that has
@@ -207,8 +208,14 @@ not gets the usual 401 sign-in page, `?t=` or not.
 port — and only for a terminal it would actually open:
 
 ```text
-sessionhubd url <id-or-name> [--embed] [--on MACHINE]
+sessionhubd url <id-or-name> [--embed] [--public] [--on MACHINE]
 ```
+
+`--public` gives the address under this machine's own tunnel hostname — the
+one the Cloudflare tunnel sends to the daemon's port — for a tool that is
+itself being opened from another device through one of sessionhub's forwards.
+The pages of those forwards may frame sessionhub as well, and nothing else
+beyond this machine. The hostname is read from the tunnel and kept for an hour.
 
 ```text
 $ sessionhubd url abwork-chat-claude --embed

@@ -803,7 +803,9 @@ pub fn percent_encode(raw: &str) -> String {
 /// Written on a plain `TcpStream` for the same reason as the server side: what
 /// is needed is a socket that can be `try_clone`d, so reading and writing can
 /// be held by two different threads.
-pub fn dial_ws(r: &Remote) -> Result<TcpStream, String> {
+/// `page`: the open page this relays for, passed on so the far side can tell
+/// its reconnects apart from a second viewer (`page_id` in http.rs).
+pub fn dial_ws(r: &Remote, page: Option<&str>) -> Result<TcpStream, String> {
     let t = parse_addr(&r.addr)?;
     // A terminal tab needs a socket that can be split in two — see `pump`, which
     // hands one half to another thread and shuts the socket down from the other
@@ -821,13 +823,14 @@ pub fn dial_ws(r: &Remote) -> Result<TcpStream, String> {
 
     let key = handshake_key()?;
     let req = format!(
-        "GET /ws?token={} HTTP/1.1\r\n\
+        "GET /ws?token={}{} HTTP/1.1\r\n\
          Host: {}\r\n\
          Upgrade: websocket\r\n\
          Connection: Upgrade\r\n\
          Sec-WebSocket-Key: {key}\r\n\
          Sec-WebSocket-Version: 13\r\n\r\n",
         percent_encode(&r.token),
+        page.map(|p| format!("&page={p}")).unwrap_or_default(),
         t.authority(),
     );
     sock.write_all(req.as_bytes()).map_err(|e| format!("Could not reach {}: {e}", r.addr))?;
