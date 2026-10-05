@@ -285,9 +285,9 @@ check(
 // What can be proven is everything after the dialog: the hidden input exists,
 // and giving it a file walks the whole drop route — upload, save on the
 // daemon, path typed back into the terminal.
-check(await ev(`!!document.querySelector('#keybar .kkey[data-act="upload"]')`), 'the second row offers an Img key');
-check(await ev(`(() => { const i = document.getElementById('upfile'); return !!i && i.accept === 'image/*'; })()`),
-  'behind it sits a file input that asks for images — on a phone that is the gallery');
+check(await ev(`!!document.querySelector('#keybar .kkey[data-act="upload"]')`), 'the second row offers a File key');
+check(await ev(`(() => { const i = document.getElementById('upfile'); return !!i && i.accept === '' && i.multiple; })()`),
+  'behind it sits a file input that takes any file — on a phone: files, gallery and camera');
 await ev(`
   (() => {
     const bytes = new Uint8Array([137,80,78,71,13,10,26,10,9,9,9,9]);

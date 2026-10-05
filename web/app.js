@@ -96,8 +96,10 @@ const keybar = new KeyBar(document.getElementById('stage'), {
     if (!entry) return;
     linksSheet.show(scanLinks(bufferLines(entry.term)));
   },
-  // The Img key: a file picker, because a phone has no drag-and-drop. On a
-  // phone `accept="image/*"` opens the gallery or camera directly. The chosen
+  // The File key: a file picker, because a phone has no drag-and-drop. No
+  // `accept` filter — `image/*` sent a phone straight to its gallery, with no
+  // way to a markdown file or subtitles; unfiltered, it offers files, gallery
+  // and camera alike. The chosen
   // files ride the exact drop route — saved into the daemon's dropped folder,
   // the path typed into the terminal.
   onUpload: () => {
@@ -2249,12 +2251,11 @@ const drops = new Drops(
   (text, isError) => banner(text, !isError),
 );
 
-// The picker behind the keybar's Img key. One hidden input, reused: `value` is
-// cleared before each open so picking the same photo twice still fires change.
+// The picker behind the keybar's File key. One hidden input, reused: `value` is
+// cleared before each open so picking the same file twice still fires change.
 const uploadInput = document.createElement('input');
 uploadInput.type = 'file';
 uploadInput.id = 'upfile';
-uploadInput.accept = 'image/*';
 uploadInput.multiple = true;
 uploadInput.hidden = true;
 uploadInput.onchange = () => {

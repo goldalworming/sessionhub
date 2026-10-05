@@ -41,9 +41,9 @@ const ROW2 = [
   // tunnel) or localhost: on plain LAN http the browser refuses.
   { label: 'Paste', act: 'paste', title: 'Paste the clipboard into the terminal' },
   // Its sibling: on a phone there is no drag-and-drop either. The picker this
-  // opens is the gallery/camera; the file then rides the same route as a drop —
+  // opens offers files, gallery and camera; the file then rides the same route as a drop —
   // saved on the daemon's machine, its path typed into the terminal.
-  { label: 'Img', act: 'upload', title: 'Send an image — its path is typed into the terminal' },
+  { label: 'File', act: 'upload', title: 'Send a file or a photo — its path is typed into the terminal' },
   // A finger cannot hover, so tapping a URL drawn on the canvas is a coin
   // toss — and the long ones agents print are often broken across lines by
   // the program itself. This opens a list of them instead, stitched back
