@@ -119,6 +119,15 @@ There is no CI. Nothing here needs a runner.
        python ../create_release.py v<version> <full commit sha> "<title>" <notes.md>
        python ../upload_asset.py <file> <asset name>
 
+9. **The download table**, after the last upload: a Windows / macOS / Linux
+   table of links at the top of the notes, built from the assets that are
+   there. It sits between `<!-- downloads -->` markers and is rebuilt on each
+   run, so run it again whenever an asset is added later (a macOS build that
+   arrives after the rest, a new `.shweb`):
+
+       python ../release_table.py            # the latest release
+       python ../release_table.py v<version>
+
 ## Asset names
 
 Parsed by the updater (`src/update.rs`), so they must be exact:
