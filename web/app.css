@@ -1210,6 +1210,66 @@ html, body {
 .lcopy:hover { color: var(--text); }
 .lnone { padding: 18px 12px; font-size: 12px; color: var(--muted); }
 
+/* The text sheet: a terminal's lines as page text, for the selection a phone
+   cannot make on the terminal itself. Taller than the links sheet — the point
+   is to see enough to choose from. */
+#textsheet {
+  position: fixed;
+  inset: 0;
+  z-index: 30;
+  background: var(--scrim);
+  display: flex;
+  justify-content: center;
+  align-items: flex-start;
+  padding: 6vh 8px 0;
+}
+#textsheet[hidden] { display: none; }
+.tsbox {
+  width: min(900px, 100%);
+  height: 84vh;
+  display: flex;
+  flex-direction: column;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  overflow: hidden;
+}
+.tshead {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border);
+}
+.tstitle {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--muted);
+}
+.tshead .lcopy { flex: 0 0 auto; padding: 6px 12px; }
+.tsbody {
+  flex: 1 1 auto;
+  margin: 0;
+  padding: 10px 12px;
+  overflow: auto;
+  font-family: var(--mono);
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--text);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  -webkit-user-select: text;
+  user-select: text;
+  -webkit-touch-callout: default;
+}
+
 /* Pinned. Worth seeing without reading the number. `--t-bright-red` rather
    than `--bad`, which is defined inside `#settings` and nowhere else — outside
    it the rule would simply be dropped, and the readout would look normal at
@@ -1361,6 +1421,9 @@ html, body {
   scrollbar-width: none;
 }
 .krow::-webkit-scrollbar { display: none; }
+/* The second row: every key whole and in sight, over two lines if need be. */
+.krow.kwrap { flex-wrap: wrap; overflow-x: visible; }
+.krow.kwrap .kkey { flex: 1 0 auto; padding: 0 6px; }
 
 .kkey {
   /* Shrink as well as grow. Grow-only left the row a few pixels wider than a

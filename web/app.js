@@ -16,6 +16,7 @@ import { FileBrowser } from './filebrowser.js';
 import { renderTree as renderSidebar, agentIcon, agentSlot } from './sidebar.js';
 import { KeyBar } from './keybar.js';
 import { LinksSheet, bufferLines, scanLinks } from './links.js';
+import { TextSheet } from './textsheet.js';
 import { attachTouchScroll, hasFinePointer } from './touchscroll.js';
 import { attachScrollPad } from './scrollpad.js';
 import { unlock as unlockAudio, ding } from './chime.js';
@@ -83,6 +84,7 @@ function insertIntoField(field, text) {
 /// The key bar for touch screens. Built first because every terminal's
 /// `onData` passes through it.
 const linksSheet = new LinksSheet(document.body);
+const textSheet = new TextSheet(document.body);
 
 const keybar = new KeyBar(document.getElementById('stage'), {
   send: (text) => {
@@ -95,6 +97,12 @@ const keybar = new KeyBar(document.getElementById('stage'), {
     const entry = terms.get(activeId);
     if (!entry) return;
     linksSheet.show(scanLinks(bufferLines(entry.term)));
+  },
+  // The Select key: the same lines as page text, where a phone can select.
+  onSelect: () => {
+    const entry = terms.get(activeId);
+    if (!entry) return;
+    textSheet.show(bufferLines(entry.term));
   },
   // The File key: a file picker, because a phone has no drag-and-drop. No
   // `accept` filter — `image/*` sent a phone straight to its gallery, with no

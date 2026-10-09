@@ -19,14 +19,15 @@ const ESC = '\x1b';
 
 const ROW1 = [
   { label: 'Esc', seq: ESC, title: 'Escape' },
-  // ⏎ and ⇧Tab are the two an agent session presses all day — one submits, the
-  // other cycles input modes — so neither may cost two taps. Enter is on the
+  // ⇧Tab and ⏎ are the two an agent session presses all day — one cycles input
+  // modes, the other submits — so neither may cost two taps. Enter is on the
   // bar at all, despite every phone keyboard having one, because that keyboard
   // is usually down: the terminal is a canvas and not a field, so nothing
   // raises it, and reaching a submit key should not first mean summoning one.
-  { label: '⏎', seq: '\r', title: 'Enter' },
+  // It sits after Ctrl, nearer the thumb and away from Esc.
   { label: '⇧Tab', seq: `${ESC}[Z`, title: 'Shift+Tab' },
   { label: 'Ctrl', mod: 'ctrl', title: 'Tap, then press a letter' },
+  { label: '⏎', seq: '\r', title: 'Enter' },
   { label: '←', seq: `${ESC}[D`, title: 'Left' },
   { label: '↑', seq: `${ESC}[A`, title: 'Up — previous command' },
   { label: '↓', seq: `${ESC}[B`, title: 'Down' },
@@ -49,6 +50,9 @@ const ROW2 = [
   // the program itself. This opens a list of them instead, stitched back
   // together, each row big enough for a thumb.
   { label: '🔗', act: 'links', title: 'Links this terminal has printed' },
+  // The terminal is not page text, so a phone cannot select in it. This shows
+  // the same lines as page text, where the device's own selection works.
+  { label: 'Select', act: 'select', title: 'Select and copy text from this terminal' },
   // Completion is a shell need rather than an agent one: worth a seat, but one
   // that can afford the tap which opens this row. The first row is full at
   // eight keys and the ⋯ — a tenth tips it into scrolling on a 390 px phone,
@@ -84,11 +88,12 @@ export class KeyBar {
   /// `send(text)` sends bytes to the terminal currently active.
   /// `onResize()` is called when the bar's height changes, so the PTY is
   /// renegotiated.
-  constructor(host, { send, onResize, onPaste, onUpload, onLinks }) {
+  constructor(host, { send, onResize, onPaste, onUpload, onLinks, onSelect }) {
     this.send = send;
     this.onPaste = onPaste;
     this.onUpload = onUpload;
     this.onLinks = onLinks;
+    this.onSelect = onSelect;
     this.onResize = onResize;
     this.ctrl = false;
     this.expanded = false;
@@ -178,6 +183,10 @@ export class KeyBar {
       this.onLinks?.();
       return;
     }
+    if (btn.dataset.act === 'select') {
+      this.onSelect?.();
+      return;
+    }
     const seq = btn.dataset.seq;
     if (seq === undefined) return;
     this.send(this.wrap(seq));
@@ -211,7 +220,10 @@ export class KeyBar {
 
   row(keys, withMore) {
     const r = document.createElement('div');
-    r.className = 'krow';
+    // The first row must stay one line, its keys shrinking to fit; the second
+    // holds more than a phone is wide, so it wraps instead of scrolling keys
+    // out of sight with their labels cut.
+    r.className = withMore ? 'krow' : 'krow kwrap';
     for (const k of keys) r.appendChild(this.key(k));
     if (withMore) {
       const more = document.createElement('button');
