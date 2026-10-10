@@ -2939,6 +2939,14 @@ conn.on.onStatus = (kind, m) => {
   if (m) {
     m.status = kind;
     machineBar.paint(current);
+    // A socket that opens again has nothing attached on it: the daemon knows
+    // attachments per connection. Every machine, the one on screen or not —
+    // this used to be set only for the one on screen, so a machine whose link
+    // came back while another was showing was left with dead terminals: no
+    // output, typing that echoed nothing, until a click in the sidebar
+    // attached afresh. Waits for that machine's first state (`onState`), so a
+    // daemon that restarted is not asked for terminals it no longer has.
+    if (kind === 'open') m.reattach = 'state';
   }
   // The paired machines are asked for each time the local daemon's socket
   // opens, reconnects included. It used to be asked once, 300 ms after the page
@@ -2998,16 +3006,11 @@ conn.on.onStatus = (kind, m) => {
     return;
   }
   banner(null);
-  // Reattaching waits for the first state to arrive: if the daemon restarted,
-  // the old terminals are gone and attaching to a ghost id only produces an
-  // error message.
-  pendingReattach = true;
   // Sampling starts here, not only when the button is pressed — the "RAM on"
   // state is restored from localStorage when the page opens.
   if (memOn) startMem();
 };
 
-let pendingReattach = false;
 
 /// Show the next terminal the daemon opens for us, rather than only tabbing it.
 ///
@@ -3194,9 +3197,12 @@ conn.on.onState = (msg, m) => {
   // daemon restarted while it sat in another tab must not come back holding
   // stale tabs.
   noteBackground(m, msg.terminals || []);
+  // Its state is in after a reconnect: attach again now if it is on screen,
+  // or the moment it is switched to (`switchMachine`).
+  if (m.reattach === 'state') m.reattach = 'show';
   if (m !== current) return;
-  if (pendingReattach) {
-    pendingReattach = false;
+  if (m.reattach === 'show') {
+    m.reattach = null;
     reattachAll();
   } else {
     pruneDeadTerminals();
@@ -3572,7 +3578,16 @@ function switchMachine(m) {
   renderTree();
   renderTabs();
   if (sidePanel) sidePanel.syncRoots();
+  // Its link came back while it was in the background: nothing is attached on
+  // the new socket yet, so the terminals would sit there dead.
+  if (m.reattach === 'show') {
+    m.reattach = null;
+    reattachAll();
+  }
   relayout();
+  // Typing goes to the terminal again, not to the machine tab just clicked —
+  // on a keyboard only: on a touch screen focusing would raise the keyboard.
+  if (hasFinePointer()) terms.get(activeId)?.term.focus();
   // A machine that has already sent its state has it in hand now; one that
   // has not yet gets it through `onState`.
   openDeepLink();
