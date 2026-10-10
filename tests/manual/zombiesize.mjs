@@ -33,7 +33,11 @@ const rows = () => JSON.parse(cli('ls', '--json').stdout).find((t) => t.id === i
 async function socket(page) {
   const ws = new WebSocket(`ws://127.0.0.1:${PORT}/ws?token=${TOKEN}${page ? `&page=${page}` : ''}`);
   await new Promise((r) => { ws.onopen = r; });
-  return { attach: (r) => ws.send(JSON.stringify({ t: 'attach', id, cols: 66, rows: r })), close: () => ws.close() };
+  return {
+    attach: (r) => ws.send(JSON.stringify({ t: 'attach', id, cols: 66, rows: r })),
+    send: (o) => ws.send(JSON.stringify(o)),
+    close: () => ws.close(),
+  };
 }
 
 // The phone, keyboard up.
@@ -64,7 +68,31 @@ plain2.attach(45);
 await sleep(800);
 check(rows() === 25, `sockets without a page are never taken for each other (${rows()})`);
 
+// A page in the background — another tab on the phone, frozen by the browser
+// with its socket open — stops counting once it says it is out of view.
 for (const s of [zombie, back, other, plain, plain2]) s.close();
+await sleep(800);
+const bgTab = await socket('cccccccccccccccc');
+bgTab.attach(22);
+await sleep(600);
+const looking = await socket('dddddddddddddddd');
+looking.attach(41);
+await sleep(600);
+check(rows() === 22, `two pages on screen: the smaller, 22 (${rows()})`);
+bgTab.send({ t: 'visibility', visible: false });
+await sleep(800);
+check(rows() === 22, `the background tab hides: no jump at once, the grace applies (${rows()})`);
+await sleep(31000);
+check(rows() === 41, `after the grace, the page being looked at gets its full height (${rows()})`);
+bgTab.send({ t: 'visibility', visible: true });
+await sleep(800);
+check(rows() === 22, `the tab comes back on screen: it counts again at once (${rows()})`);
+bgTab.send({ t: 'visibility', visible: false });
+const late = await socket('eeeeeeeeeeeeeeee');
+late.attach(41);
+await sleep(800);
+check(rows() === 41, `a page attaching while the other is hidden gets its size straight away (${rows()})`);
+for (const s of [bgTab, looking, late]) s.close();
 cli('stop');
 daemon.kill();
 console.log(`\n${steps.filter(Boolean).length}/${steps.length} steps passed`);

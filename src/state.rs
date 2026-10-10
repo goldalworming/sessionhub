@@ -235,7 +235,7 @@ fn drop_client(id: ClientId, clients: &mut HashMap<ClientId, Client>, terminals:
     clients.remove(&id);
     let now = Instant::now();
     for t in terminals.values_mut() {
-        if t.viewers.remove(&id).is_some() && renegotiate_after_leave(t, now) {
+        if t.viewers.remove(&id).is_some() && renegotiate_after_leave(t, now, clients) {
             broadcast_size(clients, t);
         }
     }
@@ -442,6 +442,27 @@ pub fn run(cfg: Config, rx: Receiver<Cmd>, tx: Sender<Cmd>, registry_cfg: Sender
                             send_to(&clients, id, json(load));
                         }
                     }
+                    // Only pages on screen size a terminal (`effective_size`).
+                    // Going out of view is a viewer leaving — a terminal may grow
+                    // after `GROW_GRACE`, so a phone whose screen blinks off does
+                    // not make the agent redraw twice; coming back counts at once.
+                    if visible != was_hidden {
+                        continue;
+                    }
+                    let now = Instant::now();
+                    for t in terminals.values_mut() {
+                        if !t.viewers.contains_key(&id) {
+                            continue;
+                        }
+                        let resized = if visible {
+                            renegotiate(t, &clients)
+                        } else {
+                            renegotiate_after_leave(t, now, &clients)
+                        };
+                        if resized {
+                            broadcast_size(&clients, t);
+                        }
+                    }
                 }
 
                 ClientMsg::Spawn { project, agent, resume, pick, cols, rows } => {
@@ -502,7 +523,7 @@ pub fn run(cfg: Config, rx: Receiver<Cmd>, tx: Sender<Cmd>, registry_cfg: Sender
                     match terminals.get_mut(&tid) {
                         Some(t) => {
                             t.viewers.insert(id, (cols, rows));
-                            let resized = renegotiate(t);
+                            let resized = renegotiate(t, &clients);
 
                             // A client that already has the screen up to `since`
                             // gets only what came after, when the ring can vouch
@@ -564,7 +585,7 @@ pub fn run(cfg: Config, rx: Receiver<Cmd>, tx: Sender<Cmd>, registry_cfg: Sender
 
                 ClientMsg::Detach { id: tid } => {
                     if let Some(t) = terminals.get_mut(&tid) {
-                        if t.viewers.remove(&id).is_some() && renegotiate_after_leave(t, Instant::now()) {
+                        if t.viewers.remove(&id).is_some() && renegotiate_after_leave(t, Instant::now(), &clients) {
                             broadcast_size(&clients, t);
                         }
                     }
@@ -577,7 +598,7 @@ pub fn run(cfg: Config, rx: Receiver<Cmd>, tx: Sender<Cmd>, registry_cfg: Sender
                         // its size must not pull on the PTY.
                         if t.viewers.contains_key(&id) {
                             t.viewers.insert(id, (cols, rows));
-                            if renegotiate(t) {
+                            if renegotiate(t, &clients) {
                                 broadcast_size(&clients, t);
                             }
                         }
@@ -2425,7 +2446,7 @@ pub fn run(cfg: Config, rx: Receiver<Cmd>, tx: Sender<Cmd>, registry_cfg: Sender
                         let tid = t.id;
                         if let Some(t) = terminals.get_mut(&tid) {
                             t.viewers.insert(id, (cols, rows));
-                            let resized = renegotiate(t);
+                            let resized = renegotiate(t, &clients);
                             let from = t.ring.end() - t.ring.len() as u64;
                             send_to(&clients, id, json(&ServerMsg::Replay { id: tid, from }));
                             if !t.ring.is_empty() {
@@ -2607,7 +2628,7 @@ pub fn run(cfg: Config, rx: Receiver<Cmd>, tx: Sender<Cmd>, registry_cfg: Sender
                 // lets a terminal grow back once a viewer has stayed away.
                 let now = Instant::now();
                 for t in terminals.values_mut() {
-                    if t.grow_at.is_some_and(|at| at <= now) && renegotiate(t) {
+                    if t.grow_at.is_some_and(|at| at <= now) && renegotiate(t, &clients) {
                         broadcast_size(&clients, t);
                     }
                 }
@@ -3280,8 +3301,15 @@ fn enabled_agents(cfg: &Config) -> Vec<AgentBrief> {
 /// The effective PTY size = the smallest cols and the smallest rows across every
 /// attached client (the tmux pattern). Letting each client pull the PTY as it
 /// likes makes the reflow diverge and two devices show different things.
-fn effective_size(viewers: &HashMap<ClientId, (u16, u16)>) -> Option<(u16, u16)> {
-    let mut it = viewers.values().copied();
+///
+/// Only clients on screen count. A page in the background — a phone's other
+/// tab, a tablet put down — is frozen by its browser with its socket still
+/// open, and used to hold the terminal at whatever size it last had (half a
+/// screen, with its keyboard up) for whoever was actually looking. With nobody
+/// on screen, `None`: the size stays as it was.
+fn effective_size(viewers: &HashMap<ClientId, (u16, u16)>, clients: &HashMap<ClientId, Client>) -> Option<(u16, u16)> {
+    let hidden = |id: &ClientId| clients.get(id).is_some_and(|c| c.hidden.get());
+    let mut it = viewers.iter().filter(|(id, _)| !hidden(id)).map(|(_, size)| *size);
     let first = it.next()?;
     Some(it.fold(first, |(c, r), (c2, r2)| (c.min(c2), r.min(r2))))
 }
@@ -3297,11 +3325,11 @@ fn effective_size(viewers: &HashMap<ClientId, (u16, u16)>) -> Option<(u16, u16)>
 const GROW_GRACE: Duration = Duration::from_secs(30);
 
 /// Recompute the effective size and apply it to the PTY. `true` when it changed.
-fn renegotiate(t: &mut Terminal) -> bool {
+fn renegotiate(t: &mut Terminal, clients: &HashMap<ClientId, Client>) -> bool {
     t.grow_at = None;
     // With no client attached, the last size is kept — the terminal is still
     // alive and must not shrink to nothing.
-    let Some((cols, rows)) = effective_size(&t.viewers) else { return false };
+    let Some((cols, rows)) = effective_size(&t.viewers, clients) else { return false };
     if (cols, rows) == (t.cols, t.rows) {
         return false;
     }
@@ -3320,13 +3348,13 @@ fn renegotiate(t: &mut Terminal) -> bool {
 /// leave room) or staying applies at once; growing waits `GROW_GRACE`, and
 /// happens then only if no viewer came back or resized meanwhile (`renegotiate`
 /// clears the wait). `true` when the size changed now.
-fn renegotiate_after_leave(t: &mut Terminal, now: Instant) -> bool {
-    let Some((cols, rows)) = effective_size(&t.viewers) else { return false };
+fn renegotiate_after_leave(t: &mut Terminal, now: Instant, clients: &HashMap<ClientId, Client>) -> bool {
+    let Some((cols, rows)) = effective_size(&t.viewers, clients) else { return false };
     if cols > t.cols || rows > t.rows {
         t.grow_at.get_or_insert(now + GROW_GRACE);
         return false;
     }
-    renegotiate(t)
+    renegotiate(t, clients)
 }
 
 /// A client can report 0 while its layout is still settling; that must never
@@ -3867,12 +3895,29 @@ mod tests {
 
     #[test]
     fn effective_size_is_none_without_viewers() {
-        assert_eq!(effective_size(&viewers(&[])), None);
+        assert_eq!(effective_size(&viewers(&[]), &HashMap::new()), None);
+    }
+
+    #[test]
+    fn a_page_out_of_view_does_not_size_the_terminal() {
+        // The phone's other tab, frozen in the background with its keyboard-up
+        // size, and the page actually being looked at.
+        let v = viewers(&[(1, 66, 22), (2, 66, 41)]);
+        let mut clients = HashMap::new();
+        for id in [1u64, 2] {
+            let (tx, rx) = bounded(4);
+            clients.insert(id, Client::new(tx, rx));
+        }
+        assert_eq!(effective_size(&v, &clients), Some((66, 22)), "both on screen: the smaller");
+        clients[&1].hidden.set(true);
+        assert_eq!(effective_size(&v, &clients), Some((66, 41)), "the hidden one no longer counts");
+        clients[&2].hidden.set(true);
+        assert_eq!(effective_size(&v, &clients), None, "nobody looking: the size stays");
     }
 
     #[test]
     fn effective_size_follows_single_viewer() {
-        assert_eq!(effective_size(&viewers(&[(1, 120, 32)])), Some((120, 32)));
+        assert_eq!(effective_size(&viewers(&[(1, 120, 32)]), &HashMap::new()), Some((120, 32)));
     }
 
     #[test]
@@ -3880,19 +3925,19 @@ mod tests {
         // Client A is wider but shorter, B the other way round: the result is the
         // combined minimum, not either client.
         let v = viewers(&[(1, 120, 24), (2, 80, 40)]);
-        assert_eq!(effective_size(&v), Some((80, 24)));
+        assert_eq!(effective_size(&v, &HashMap::new()), Some((80, 24)));
     }
 
     #[test]
     fn effective_size_across_three_viewers() {
         let v = viewers(&[(1, 100, 30), (2, 90, 50), (3, 110, 20)]);
-        assert_eq!(effective_size(&v), Some((90, 20)));
+        assert_eq!(effective_size(&v, &HashMap::new()), Some((90, 20)));
     }
 
     #[test]
     fn renegotiate_reports_no_change_when_size_matches() {
         let mut t = terminal_with(&[(1, 80, 24)], 80, 24);
-        assert!(!renegotiate(&mut t));
+        assert!(!renegotiate(&mut t, &HashMap::new()));
         assert_eq!((t.cols, t.rows), (80, 24));
     }
 
@@ -3919,30 +3964,30 @@ mod tests {
         // The phone (66 columns) has just gone; the desktop (166) is left.
         let mut t = terminal_with(&[(1, 166, 44)], 66, 44);
         let now = Instant::now();
-        assert!(!renegotiate_after_leave(&mut t, now), "no resize yet");
+        assert!(!renegotiate_after_leave(&mut t, now, &HashMap::new()), "no resize yet");
         assert_eq!((t.cols, t.rows), (66, 44));
         assert_eq!(t.grow_at, Some(now + GROW_GRACE), "it grows back after the grace");
 
         // A second departure in the meantime does not push the moment back.
-        assert!(!renegotiate_after_leave(&mut t, now + Duration::from_secs(10)));
+        assert!(!renegotiate_after_leave(&mut t, now + Duration::from_secs(10), &HashMap::new()));
         assert_eq!(t.grow_at, Some(now + GROW_GRACE));
 
         // The phone coming back, or anyone resizing, settles it there and then.
-        renegotiate(&mut t);
+        renegotiate(&mut t, &HashMap::new());
         assert_eq!(t.grow_at, None);
     }
 
     #[test]
     fn a_viewer_leaving_that_changes_nothing_sets_no_wait() {
         let mut t = terminal_with(&[(1, 66, 44)], 66, 44);
-        assert!(!renegotiate_after_leave(&mut t, Instant::now()));
+        assert!(!renegotiate_after_leave(&mut t, Instant::now(), &HashMap::new()));
         assert_eq!(t.grow_at, None);
     }
 
     #[test]
     fn renegotiate_keeps_last_size_when_everyone_detaches() {
         let mut t = terminal_with(&[], 100, 30);
-        assert!(!renegotiate(&mut t), "tanpa viewer tidak ada yang dinegosiasikan");
+        assert!(!renegotiate(&mut t, &HashMap::new()), "tanpa viewer tidak ada yang dinegosiasikan");
         assert_eq!((t.cols, t.rows), (100, 30), "terminal tidak mengecil jadi nol");
     }
 
