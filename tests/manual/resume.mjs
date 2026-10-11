@@ -81,7 +81,10 @@ await ev(`document.querySelector('.tab[data-id="${id}"]').click()`);
 await sleep(2500);
 // Enough output that a full replay would be unmistakable.
 cli('send', id, '1..4000 | ForEach-Object { "filler line $_ of the history" }; echo BEFORE-MARK-41', '--enter');
-check(await waitFor(`/BEFORE-MARK-41/.test(${screen})`, 20000), 'the screen shows output from before');
+// The last filler line, not the mark: the mark is in the typed command too, and
+// waiting for that cut the link before the output had arrived — the replay
+// then rightly carried all of it, and this test failed for the wrong reason.
+check(await waitFor(`/filler line 4000 of the history/.test(${screen})`, 30000), 'the screen shows output from before');
 
 binBytes = 0; sentAttach.length = 0; gotReplay.length = 0;
 cut();

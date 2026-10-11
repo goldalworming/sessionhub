@@ -41,6 +41,7 @@ const LS = {
   filesOpen: 'sh.files.open',
   filesWidth: 'sh.files.width',
   tabOrder: 'sh.taborder',
+  installOffered: 'sh.install.offered',
 };
 
 const MAC = /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent);
@@ -732,7 +733,24 @@ function labelOf(id) {
   return t ? terminalLabel(t) : `terminal ${id}`;
 }
 
+/// How long a size has to hold before it is reported. A resize makes the agent
+/// redraw its whole screen — Claude Code reprints far more than one screenful
+/// — for every device watching. A layout that wobbles for a moment and comes
+/// back (a toolbar or taskbar showing and hiding, two windows trading focus)
+/// used to do that over a thousand times a day on one terminal: two rows up,
+/// two rows down, a few milliseconds apart.
+const SIZE_SETTLE_MS = 300;
+
+/// Report this client's size for a terminal once it has settled; a wobble that
+/// ends where it started is never sent at all.
 function pushSize(id) {
+  const entry = terms.get(id);
+  if (!entry || entry.host.hidden) return;
+  clearTimeout(entry.sizeTimer);
+  entry.sizeTimer = setTimeout(() => sendSize(id), SIZE_SETTLE_MS);
+}
+
+function sendSize(id) {
   const entry = terms.get(id);
   if (!entry || entry.host.hidden) return;
   const size = proposed(entry);
@@ -1804,8 +1822,12 @@ function startMem() {
   conn.send({ t: 'mem' });
   clearInterval(memTimer);
   // Sampled periodically rather than streamed: reading the process table is
-  // expensive.
-  memTimer = setInterval(() => conn.send({ t: 'mem' }), 2000);
+  // expensive — measured at about 0.7% of a core per page asking every 2 s,
+  // for every page with RAM on. Every 5 s is plenty for a number that drifts,
+  // and a page nobody is looking at does not ask at all.
+  memTimer = setInterval(() => {
+    if (!document.hidden) conn.send({ t: 'mem' });
+  }, 5000);
 }
 
 /// `CPU 7% · 7.5/15.6 GB` — the machine, not the terminal.
@@ -3449,7 +3471,10 @@ conn.on.onError = (msg, m) => {
   if (msg.code === 'tree_failed') {
     // A folder that failed to open is marked on its own row; a banner for that
     // would only cover what is being looked at.
-    const path = (/Cannot (?:open|read) (.+?):/.exec(msg.message || '') || [])[1];
+    // Up to `": "`, the separator before the OS's reason — not the first
+    // colon, which on Windows is the drive's: `C:\…` read as just `C`, so a
+    // folder that failed was never marked and was asked for again forever.
+    const path = (/Cannot (?:open|read) (.+?): /.exec(msg.message || '') || [])[1];
     if (path) sidePanel.tree.fail(path);
     return;
   }
@@ -3724,6 +3749,23 @@ document.addEventListener('visibilitychange', () => {
   if (visible) probeLinks();
 });
 window.addEventListener('online', probeLinks);
+
+// A phone or tablet with sessionhub open as an ordinary browser tab is offered
+// the installed app, once. A home-screen shortcut opens a new tab on every
+// tap, and each forgotten tab kept a connection and every terminal it had
+// attached; the app has one window that a tap goes back to. The browser only
+// fires this when the page can be installed, and never inside the app itself.
+window.addEventListener('beforeinstallprompt', (e) => {
+  if (hasFinePointer() || localStorage.getItem(LS.installOffered)) return;
+  e.preventDefault();
+  localStorage.setItem(LS.installOffered, '1');
+  toasts.show({
+    key: 'install',
+    title: 'Install sessionhub as an app',
+    note: 'Tap here. It gets its own window, and the icon goes back to it instead of opening a new tab each time.',
+    onClick: () => e.prompt(),
+  });
+});
 window.addEventListener('pageshow', (e) => e.persisted && probeLinks());
 window.addEventListener('focus', probeLinks);
 

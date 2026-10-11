@@ -186,10 +186,15 @@ export class FileTree {
   /// a tree blinking under someone reading it is worse than a second's delay.
   /// What is already listed stays until the answer comes; an answer that
   /// changes nothing redraws nothing (`update`).
+  ///
+  /// Not a folder that failed to open: this runs every few seconds while an
+  /// agent writes, and asking again for one that cannot be read — deleted,
+  /// refused — made the same error over and over (868 in one hour, once). A
+  /// refresh by hand, or opening it again, still tries.
   refreshQuietly() {
     for (const path of this.expanded) {
       const state = this.dirs.get(path);
-      if (state && !state.loading) this.onList(path);
+      if (state && !state.loading && !state.failed) this.onList(path);
     }
   }
 
@@ -302,8 +307,12 @@ export class FileTree {
 
   /// A folder failed to open: mark it so its row does not hang on "…".
   fail(path) {
-    const state = this.dirs.get(path);
-    if (state) this.dirs.set(path, { ...state, loading: false, failed: true });
+    // The daemon reports the path as it normalised it: the same folder, maybe
+    // not the same spelling as the one asked for.
+    const same = (p) => p.replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase();
+    const key = this.dirs.has(path) ? path : [...this.dirs.keys()].find((k) => same(k) === same(path));
+    const state = key !== undefined && this.dirs.get(key);
+    if (state) this.dirs.set(key, { ...state, loading: false, failed: true });
     this.rebuild();
   }
 
@@ -312,7 +321,8 @@ export class FileTree {
       this.expanded.delete(path);
     } else {
       this.expanded.add(path);
-      if (!this.dirs.has(path)) this.request(path);
+      // A folder that failed is tried again when opened again.
+      if (!this.dirs.has(path) || this.dirs.get(path).failed) this.request(path);
     }
     this.rebuild();
   }
