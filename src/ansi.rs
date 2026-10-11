@@ -76,6 +76,10 @@ fn skip_string_sequence(input: &[u8], mut i: usize) -> usize {
 /// took — the replacement character for anything that does not decode, so one
 /// bad byte in a stream never loses the rest of it.
 fn next_char(bytes: &[u8]) -> (char, usize) {
+    // A character is at most 4 bytes; validating the whole rest of the buffer
+    // for each one made `capture` quadratic — over two minutes, a core flat
+    // out, on the 2 MB a busy agent terminal holds.
+    let bytes = &bytes[..bytes.len().min(4)];
     match std::str::from_utf8(bytes) {
         Ok(s) => {
             let ch = s.chars().next().expect("bytes is non-empty");
@@ -151,6 +155,24 @@ mod tests {
     fn an_unterminated_escape_at_end_of_input_does_not_hang_or_panic() {
         assert_eq!(strip_ansi(b"a\x1b["), "a");
         assert_eq!(strip_ansi(b"a\x1b]0;no terminator"), "a");
+    }
+
+    #[test]
+    fn a_full_ring_is_stripped_in_well_under_a_second() {
+        // 2 MB of mixed text, colour codes and multi-byte characters: what a
+        // busy agent terminal holds. Quadratic decoding took minutes here.
+        let chunk = "\x1b[38;5;214m● Läuft…\x1b[0m café ✓ done\r\n".as_bytes();
+        let input: Vec<u8> = chunk.iter().copied().cycle().take(2 << 20).collect();
+        let start = std::time::Instant::now();
+        let out = strip_ansi(&input);
+        assert!(out.contains("café ✓ done"));
+        assert!(start.elapsed() < std::time::Duration::from_secs(1), "took {:?}", start.elapsed());
+    }
+
+    #[test]
+    fn multi_byte_characters_next_to_each_other_survive() {
+        assert_eq!(strip_ansi("é✓😀a".as_bytes()), "é✓😀a");
+        assert_eq!(strip_ansi(b"a\xe2\x9c"), "a\u{fffd}\u{fffd}");
     }
 
     #[test]
