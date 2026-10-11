@@ -605,7 +605,19 @@ function openView(id, focus = true) {
     state.dismissed_terminals = state.dismissed_terminals.filter((x) => x !== id);
     conn.send({ t: 'set_dismissed', id, dismissed: false });
   }
-  const entry = terms.get(id) || makeTerminal(id);
+  // Already open here: it is attached and its screen is current, give or take
+  // what came while it was hidden — which `show` writes, or resumes for. A
+  // fresh attach threw the screen away and fetched the terminal's whole
+  // history again, 1.5–2 MB through the tunnel, on every click in the sidebar
+  // or the palette: 94 such replays in one morning, seven in sixteen seconds
+  // of going back and forth between four sessions.
+  const open = terms.get(id);
+  if (open) {
+    if (layout === 'grid') open.host.hidden = false;
+    if (focus) show(id);
+    return;
+  }
+  const entry = makeTerminal(id);
   if (layout === 'grid') entry.host.hidden = false;
   const size = proposed(entry) || { cols: 80, rows: 24 };
   entry.lastSize = size;
