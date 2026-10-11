@@ -475,6 +475,14 @@ fn handle(
     let from_query = req.query_param("token");
     let authed = token_ok(&secret, from_query.as_deref())
         || token_ok(&secret, req.cookie("sh_token").as_deref());
+    // The one exception: what installing the app needs. On Android the app is
+    // built by Google's WebAPK server, which fetches the manifest's icons itself,
+    // with no cookie — behind the token it got a 401, and Chrome fell back to a
+    // plain shortcut that opens a new tab every time it is tapped. A name, a
+    // colour and a picture; nothing in them is anyone's to keep.
+    if !authed && is_public_asset(&req.path) {
+        return serve_static(&mut sock, &req, false, &secret);
+    }
     if !authed {
         // A browser that typed the address without a token gets an input box, not
         // one line of text. The status stays 401 — only the shape of the answer
@@ -1295,7 +1303,17 @@ fn drop_limit(cfg: &Config) -> usize {
     (want as usize).clamp(8 << 20, CEILING)
 }
 
+/// How long a page may say nothing before its socket is dropped. A page pings
+/// every 15 s, and a background tab the browser throttles still does once a
+/// minute; one that says nothing for this long is frozen — a phone's old tab
+/// with its socket still open, which kept receiving every terminal it had
+/// attached and, through a tunnel, could stay "connected" for hours. If it
+/// thaws it reconnects on its own, exactly as after any dropped link.
+const IDLE_LIMIT: Duration = Duration::from_secs(150);
+
 fn read_loop(sock: TcpStream, tx: &Sender<Cmd>, out: &Sender<Out>, id: u64, limit: usize) {
+    // A read that waits past this fails, and the loop below ends on any error.
+    let _ = sock.set_read_timeout(Some(IDLE_LIMIT));
     let conf = tungstenite::protocol::WebSocketConfig::default()
         .max_message_size(Some(limit))
         .max_frame_size(Some(limit));
@@ -1373,6 +1391,15 @@ impl Write for ReadHalf {
 #[derive(rust_embed::RustEmbed)]
 #[folder = "web/"]
 struct Web;
+
+/// The files served without a token: the manifest and the icons it names, and
+/// nothing else (see `handle`).
+fn is_public_asset(path: &str) -> bool {
+    matches!(
+        path,
+        "/manifest.json" | "/icon-192.png" | "/icon-512.webp" | "/icon-maskable-512.webp" | "/icon-32.png"
+    )
+}
 
 fn serve_static(
     sock: &mut TcpStream,
@@ -2133,6 +2160,16 @@ mod tests {
         );
         let h = frame_ancestors_for(&["b.example.com".into(), "a.example.com".into()]);
         assert!(h.ends_with("http://localhost:* https://a.example.com https://b.example.com\r\n"), "{h}");
+    }
+
+    #[test]
+    fn only_what_installing_needs_is_served_without_a_token() {
+        for p in ["/manifest.json", "/icon-192.png", "/icon-512.webp", "/icon-maskable-512.webp", "/icon-32.png"] {
+            assert!(is_public_asset(p), "{p}");
+        }
+        for p in ["/", "/index.html", "/app.js", "/app.css", "/ws", "/api/status", "/manifest.json/../app.js", "/icon-192.png?x"] {
+            assert!(!is_public_asset(p), "{p}");
+        }
     }
 
     #[test]
