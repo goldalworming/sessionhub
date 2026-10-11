@@ -113,11 +113,10 @@ setup.
 
 ## Scripted control
 
-A script or another program on the same machine (a workflow engine, a build
-step) can create and drive an agent terminal directly, without a human ever
-opening it in the browser first. The terminal it spawns is a normal terminal:
-it appears live in the browser immediately and can be typed into from there
-at the same time.
+A script or another program on the same machine, such as a workflow engine or
+a build step, can create and drive an agent terminal without anyone opening it
+in the browser first. The terminal is a normal terminal: it appears live in
+the browser right away, and you can type into it there at the same time.
 
 ```text
 sessionhubd spawn --agent omp --project ~/code/demo --name builder
@@ -125,6 +124,8 @@ sessionhubd send builder --file task.md
 sessionhubd wait builder --idle 20 --timeout 1800
 sessionhubd capture builder
 ```
+
+### Commands
 
 ```text
 sessionhubd ls [--json]
@@ -134,47 +135,63 @@ sessionhubd capture <id-or-name> [--lines N] [--raw] [--json] [--on MACHINE]
 sessionhubd wait <id-or-name> [--idle S] [--timeout S] [--on MACHINE]
 ```
 
-`ls` lists live terminals with their id, name, agent, project, and status.
-`spawn` prints the new terminal's id on stdout, so `id=$(sessionhubd spawn
-...)` works in a script; `--name` gives it a label other commands can target
-instead of the id, valid only while that terminal is alive (it is never
-written to `config.toml`, unlike a terminal saved from the browser). `send`
-reads the text to send from a trailing argument, `--file`, or stdin, and
-wraps it in a bracketed paste so a multi-line message reaches the agent as
-one message rather than one line at a time — pass `--raw` for an agent that
-does not honour that. Repeat `--key` (`esc`, `enter`, `tab`, `shift-tab`,
-arrows, `home`/`end`/`pgup`/`pgdn`/`del`, `ctrl-c`/`ctrl-d`/`ctrl-r`, or
-`ctrl-<letter>`) to send special keys before the text; `--enter` presses
-Enter after it; `--verify` polls the screen afterwards and fails if the text
-never became visible. `capture` reads the terminal's current screen as plain
-text with ANSI codes stripped; `--lines N` limits it to the last N lines.
-`wait` blocks until the terminal has produced no new output for `--idle`
-seconds or its process has exited, up to `--timeout` seconds (default 300, max
-3600). Give `spawn` a moment to settle before the first `send` — for example
+| Command | What it does |
+|---|---|
+| `ls` | Lists live terminals with their id, name, agent, project, and status. |
+| `spawn` | Starts a terminal and prints its id on stdout, so `id=$(sessionhubd spawn ...)` works in a script. |
+| `send` | Sends text to a terminal. The text comes from a trailing argument, `--file`, or stdin. |
+| `capture` | Prints the terminal's current screen as plain text, with ANSI codes removed. |
+| `wait` | Blocks until the terminal has been quiet for `--idle` seconds or its process has exited. |
+
+Options:
+
+- `spawn --name LABEL` gives the terminal a label that other commands can use
+  instead of the id. The label lasts only while the terminal is alive. It is
+  never written to `config.toml`, unlike a terminal saved from the browser.
+- `send` wraps the text in a bracketed paste, so a multi-line message reaches
+  the agent as one message instead of one line at a time. Use `--raw` for an
+  agent that does not support bracketed paste.
+- `send --key NAME` sends a special key before the text. Repeat it for more
+  keys. Names: `esc`, `enter`, `tab`, `shift-tab`, arrows,
+  `home`/`end`/`pgup`/`pgdn`/`del`, `ctrl-c`/`ctrl-d`/`ctrl-r`, or
+  `ctrl-<letter>`.
+- `send --enter` presses Enter after the text.
+- `send --verify` checks the screen afterwards and fails if the text never
+  appeared.
+- `capture --lines N` returns only the last N lines.
+- `wait --timeout S` sets the upper limit: 300 seconds by default, 3600 at most.
+
+A new terminal needs a moment to start. Before the first `send`, run
 `wait --idle 2 --timeout 10`.
 
-All five commands accept `--on MACHINE` to run against a paired machine
-instead, under the same **Remote commands** setting and logging as `run`.
-`ls` and `capture` are read-only and work even when Remote commands is off;
-`spawn` and `send` are refused with a 403 when it is off, the same as `run`.
+### On another machine
 
-Repeat `--env` on `spawn` to give that one terminal its own environment —
-useful for running two accounts of the same agent side by side (a client's
-`CLAUDE_CONFIG_DIR` in one terminal, yours in another), and layered on top of
-whatever `[agents.<name>.env]` already sets in `config.toml`. `--env NAME`
-without a value reads it from the shell running `spawn` itself, so a token
-never has to be typed on the command line, where any other process on the
-machine can read it back out of the process list:
+All five commands accept `--on MACHINE` to work on a paired machine. They
+follow the same **Remote commands** setting and logging as `run`:
+
+- `ls` and `capture` only read, so they work even when Remote commands is off.
+- `spawn` and `send` are refused with a 403 when it is off, the same as `run`.
+
+### Per-terminal environment
+
+Repeat `--env` on `spawn` to give one terminal its own environment variables.
+They are added on top of `[agents.<name>.env]` in `config.toml`. This lets you
+run two accounts of the same agent side by side, for example a client's
+`CLAUDE_CONFIG_DIR` in one terminal and yours in another.
+
+`--env NAME` without a value copies the variable from the shell that runs
+`spawn`. Use this for tokens. A token typed on the command line can be read by
+any other process on the machine through the process list.
 
 ```text
 CLAUDE_CODE_OAUTH_TOKEN=... sessionhubd spawn --agent claude --project ~/code/demo \
   --name clientx-builder --env CLAUDE_CONFIG_DIR=$HOME/.acc/clientx --env CLAUDE_CODE_OAUTH_TOKEN
 ```
 
-`--on MACHINE` works with `--env` too — `spawn` checks the machine that will
-actually run the terminal (local, or the far end of `--on`) understands
-`--env` before sending anything, and refuses with a clear message rather than
-starting a terminal silently missing the environment it was asked for.
+`--env` also works with `--on MACHINE`. Before sending anything, `spawn`
+checks that the machine that will run the terminal supports `--env`. If it
+does not, `spawn` stops with a clear message instead of starting a terminal
+without the environment you asked for.
 
 ## Deep links and embedding
 
