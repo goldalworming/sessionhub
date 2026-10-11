@@ -1013,9 +1013,25 @@ function terminalMenu(t, { ordering = false } = {}) {
   // After updating an agent, a running process still holds the binary it
   // started with. This puts the new one to work without losing the conversation:
   // same tab, same folder, session resumed.
+  items.push({ label: 'Copy reference', run: () => copyOrShow(terminalReference(t), 'reference') });
   items.push({ label: 'Relaunch', run: () => relaunch(t.id) });
   items.push({ label: 'Kill terminal…', run: () => killTerminal(t.id) });
   return items;
+}
+
+/// What to paste into another session to ask about this one: which terminal, on
+/// which machine, and the command an agent reads it with. By name where it has
+/// one — ids start again from 1 when a daemon restarts, names do not.
+///
+/// ponytail: `--on` names the machine as this page knows it, which is right for
+/// a session on this page's own machine; one on another machine would need its
+/// own name for it.
+function terminalReference(t) {
+  const via = current?.via || '';
+  const who = t.name ? `terminal ${t.id} "${t.name}"` : `terminal ${t.id}`;
+  const target = /^[\w.-]+$/.test(t.name || '') ? t.name : t.id;
+  const on = via ? ` --on ${via}` : '';
+  return `${who}${via ? ` on ${via}` : ''} (${t.project}) — read it with: sessionhubd capture ${target}${on}`;
 }
 
 /// Tag a tab. Sent to the daemon rather than kept in this browser: the same
@@ -2630,10 +2646,15 @@ el.filterClear.onclick = () => {
 // terminal without a path with spaces in it falling apart. Shared by the
 // tree and the standalone file-finder modal below — copying a path is the
 // same act wherever the click came from.
-async function copyPath(path) {
-  const text = quotePath(path);
+function copyPath(path) {
+  return copyOrShow(quotePath(path), 'path');
+}
+
+/// Onto the clipboard, or, where the page cannot reach it, into a field to copy
+/// from by hand.
+async function copyOrShow(text, what) {
   if (canCopy() && (await copyText(text))) {
-    toasts.show({ key: 'copy-path', title: 'Path copied', note: text });
+    toasts.show({ key: `copy-${what}`, title: `${what[0].toUpperCase()}${what.slice(1)} copied`, note: text });
     return;
   }
   // Over plain HTTP no browser will hand the page a clipboard, so there is
@@ -2642,11 +2663,11 @@ async function copyPath(path) {
   // copy it by hand is only advice if the thing to copy is somewhere they can
   // reach.
   await ask.show({
-    title: 'Copy path',
+    title: `Copy ${what}`,
     value: text,
     note: window.isSecureContext
-      ? 'This browser would not let the page reach the clipboard. The path is selected — copy it from here.'
-      : 'Copying straight to the clipboard needs https, and this page is on plain http. The path is selected — copy it from here.',
+      ? `This browser would not let the page reach the clipboard. The ${what} is selected — copy it from here.`
+      : `Copying straight to the clipboard needs https, and this page is on plain http. The ${what} is selected — copy it from here.`,
     ok: 'Done',
   });
 }
