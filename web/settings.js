@@ -89,6 +89,11 @@ export class Settings {
     this.onLanAddr = () => {};
     /// `onReorderRemotes(names)` stores a new order for the paired machines.
     this.onReorderRemotes = () => {};
+    /// `onLocalHttps(on)` opens this machine's tunnel hostname here directly,
+    /// or stops.
+    this.onLocalHttps = () => {};
+    this.localHttps = null;
+    this.localHttpsBusy = false;
     this.onRemoteCommands = onRemoteCommands || (() => {});
     this.onRotateToken = onRotateToken || (() => {});
     this.onInstallSkill = onInstallSkill || (() => {});
@@ -229,6 +234,7 @@ export class Settings {
     this.pairUrl = msg.pair_url || '';
     this.drops = msg.drops || null;
     this.setCloudflare(msg.cloudflare, false);
+    this.localHttps = msg.local_https || null;
     setPath(this.el.querySelector('.path'), this.configPath);
     this.paint();
   }
@@ -1159,6 +1165,61 @@ export class Settings {
 
   // ---------------------------------------------------------------- machines
 
+  /// The answer to `onLocalHttps`, or null when it failed — the reason is
+  /// already in the note.
+  setLocalHttps(info, failed) {
+    this.localHttpsBusy = false;
+    if (info !== undefined) this.localHttps = info;
+    if (failed) this.moveFailed(failed);
+    else if (this.open) this.paint();
+  }
+
+  /// This machine's own tunnel hostname, opened here without the internet.
+  localHttpsRows() {
+    const wrap = document.createElement('div');
+    const lh = this.localHttps;
+    if (!lh) return wrap;
+    const url = `https://${lh.host}`;
+
+    const row = document.createElement('div');
+    row.className = 'usagebar';
+    const label = document.createElement('span');
+    label.className = 'usage';
+    label.textContent = lh.on
+      ? `${url} opens straight from this computer.`
+      : `Open ${url} on this computer without going through the internet.`;
+    row.appendChild(label);
+
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'secbtn';
+    btn.textContent = this.localHttpsBusy ? 'Waiting…' : lh.on ? 'Turn off' : 'Open locally';
+    btn.disabled = this.localHttpsBusy;
+    btn.onclick = () => {
+      this.localHttpsBusy = true;
+      this.onLocalHttps(!lh.on);
+      this.paint();
+      this.note.textContent = 'Accept the administrator prompt on this computer…';
+    };
+    row.appendChild(btn);
+    wrap.appendChild(row);
+
+    wrap.appendChild(
+      lh.on && !lh.serving
+        ? Settings.stat('bad', 'Set up, but port 443 here is taken by something else, so it does not open yet.')
+        : Settings.stat(
+            'muted',
+            lh.on
+              ? 'Still https, so copy and paste keep working. Other devices still go through ' +
+                  'Cloudflare. Turning it off removes the hosts line and the certificate again.'
+              : 'Points the name at this computer in the hosts file and adds a certificate made ' +
+                  'here to the trusted ones — one administrator prompt, on this computer. Other ' +
+                  'devices keep going through Cloudflare.',
+          ),
+    );
+    return wrap;
+  }
+
   machinesPane() {
     const pane = document.createElement('div');
     pane.className = 'sec machines';
@@ -1169,6 +1230,7 @@ export class Settings {
           'tab above the terminal to edit them.',
       ),
     );
+    pane.appendChild(this.localHttpsRows());
 
     if (!this.remotes.length) {
       pane.appendChild(

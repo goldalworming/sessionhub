@@ -86,6 +86,14 @@ On a public server, leave Network access off so sessionhub stays on
 Serve sessionhub at the root of a hostname, not a subpath. Reverse proxies must
 support WebSocket upgrades and long-lived connections.
 
+On Windows, **Settings → Machines → Open locally** makes this machine's own
+tunnel hostname (`https://sbox.example.com`) open straight from this machine,
+without the round trip through Cloudflare. It points the name at 127.0.0.1 in
+the hosts file, trusts a certificate made on the spot, and serves https on
+`127.0.0.1:443` — one administrator prompt. It stays https, so the clipboard
+keeps working; other devices still go through the tunnel. **Turn off** removes
+the hosts line and the certificate.
+
 ## Using another machine
 
 A paired machine can run commands and transfer files:

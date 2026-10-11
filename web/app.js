@@ -2390,6 +2390,8 @@ const settings = new Settings(
 // belongs beside: the addresses being chosen between are those of the machine
 // whose panel is open.
 settings.onLanAddr = (addr) => conn.send({ t: 'set_lan_addr', addr });
+// The Machines section is this computer's alone, so this goes to the local daemon.
+settings.onLocalHttps = (on) => local.conn.send({ t: 'local_https', on });
 
 /// OSC 52 — how a program inside the terminal says "put this on the clipboard".
 ///
@@ -3470,6 +3472,11 @@ conn.on.onError = (msg, m) => {
     if (!settings.open) banner(msg.message, true);
     return;
   }
+  if (msg.code === 'local_https_failed') {
+    settings.setLocalHttps(undefined, msg.message || msg.code);
+    if (!settings.open) banner(msg.message, true);
+    return;
+  }
   if (msg.code === 'move_failed' || msg.code === 'rename_failed' || msg.code === 'bad_addr') {
     settings.moveFailed(msg.message || msg.code);
     if (!settings.open) banner(msg.message, true);
@@ -3528,6 +3535,8 @@ conn.on.onCloudflare = (msg, m) => {
   if (m !== current) return;
   settings.setCloudflare(msg.cloudflare);
 };
+
+conn.on.onLocalHttps = (msg) => settings.setLocalHttps(msg.local_https || null);
 
 conn.on.onUpdate = (msg, m) => {
   // Only for the machine being looked at: a check answered by a background

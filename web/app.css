@@ -892,6 +892,8 @@ html, body {
   white-space: nowrap;
 }
 .zjage { flex: 0 0 auto; font-variant-numeric: tabular-nums; }
+.zjmore { cursor: pointer; }
+.zjmore:hover { color: var(--text); }
 
 /* The bell is drawn, and the icon must never be what the click lands on. */
 #sound-btn svg { pointer-events: none; display: block; }

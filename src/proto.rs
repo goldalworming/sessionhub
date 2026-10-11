@@ -233,6 +233,12 @@ pub enum ClientMsg {
     RemoveForward {
         name: String,
     },
+    /// Open this machine's tunnel hostname on this machine directly, or stop.
+    /// Answered with `local_https`, after the administrator prompt it raises
+    /// on this machine's screen.
+    LocalHttps {
+        on: bool,
+    },
     /// Point an already paired machine at a different address.
     ///
     /// A machine whose IP moved is still the same machine: its name and its
@@ -468,6 +474,11 @@ pub enum ServerMsg {
     Cloudflare {
         cloudflare: CloudflareInfo,
     },
+    /// Where opening this machine's own hostname locally stands, after a
+    /// `local_https` request.
+    LocalHttps {
+        local_https: Option<crate::localhttps::Info>,
+    },
     /// The token was replaced, and this is the address that works now.
     ///
     /// Sent only to the client that asked, down the socket it already holds —
@@ -580,6 +591,10 @@ pub enum ServerMsg {
         /// an older daemon would drop the message without answering, leaving a
         /// switch that flips back on its own.
         can_run_remotely: bool,
+        /// This machine's tunnel hostname, and whether it is opened here
+        /// without the internet. Absent where that cannot be done.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        local_https: Option<crate::localhttps::Info>,
     },
 }
 

@@ -172,6 +172,7 @@ export class Conn {
         remotes: 'onRemotes',
         token_rotated: 'onTokenRotated',
         cloudflare: 'onCloudflare',
+        local_https: 'onLocalHttps',
         update: 'onUpdate',
         resync: 'onResync',
         replay: 'onReplay',

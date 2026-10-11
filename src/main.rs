@@ -18,6 +18,7 @@ mod proto;
 mod pty;
 mod registry;
 mod remote;
+mod localhttps;
 mod ring;
 mod service;
 mod skill;

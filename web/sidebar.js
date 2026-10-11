@@ -26,6 +26,8 @@ const ZONE_MAX = 8;
 /// Groups open on first sight. The rest are folded: old history exists to be
 /// searched occasionally, not looked at every day.
 const OPEN_BY_DEFAULT = new Set(['today']);
+/// Terminals whose background jobs are shown in full, not folded into one line.
+const openJobs = new Set();
 
 /// Below this the history is laid out flat, without day groups.
 const FLAT_MAX = 3;
@@ -562,7 +564,26 @@ function zoneRow(ctx, o) {
   // only thing shown — so a download with two hours left looked exactly like a
   // finished one. Each job gets its own line because that is what you came to
   // read: which one, and how long it has been going.
-  for (const j of o.jobs || []) {
+  //
+  // More than a couple and they bury every row below, so they fold into one
+  // line — opened per terminal, and kept open across redraws.
+  const jobs = o.jobs || [];
+  const folds = jobs.length > 2;
+  const unfolded = folds && openJobs.has(o.tid);
+  if (folds) {
+    const more = el('div', 'zjob zjmore');
+    more.appendChild(el('span', 'zjkind', unfolded ? '▾' : '▸'));
+    more.appendChild(el('span', 'zjname', `${jobs.length} background jobs`));
+    more.title = unfolded ? 'Hide them' : 'Show them';
+    more.onclick = (e) => {
+      e.stopPropagation();
+      if (unfolded) openJobs.delete(o.tid);
+      else openJobs.add(o.tid);
+      ctx.rerender();
+    };
+    col.appendChild(more);
+  }
+  for (const j of folds && !unfolded ? [] : jobs) {
     const line = el('div', 'zjob');
     // The clock is kept here rather than recomputed from the message: state
     // arrives only when something changes, and a job that runs for an hour

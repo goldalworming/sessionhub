@@ -1,6 +1,6 @@
 [package]
 name = "sessionhubd"
-version = "0.0.52"
+version = "0.0.53"
 edition = "2021"
 
 [dependencies]
@@ -19,6 +19,8 @@ tracing-subscriber = "0.3.23"
 tungstenite = "0.30.0"
 
 [target."cfg(windows)".dependencies]
+rcgen = { version = "0.14.10", default-features = false, features = ["ring"] }
+rustls = { version = "0.23.45", default-features = false, features = ["ring", "std", "tls12"] }
 windows-service = "0.8.1"
 # The tray icon and the handles a detached child must not inherit:
 # Shell_NotifyIcon, a hidden window, a popup menu, the clipboard.

@@ -110,6 +110,7 @@ pub fn serve(
         next_id: Arc::new(AtomicU64::new(1)),
     };
     let _ = CTX.set(ctx.clone());
+    crate::localhttps::resume(ctx.cfg.port);
 
     for (name, local, target, host) in reopen {
         if let Err(e) = open_forward(&name, local, target, host) {

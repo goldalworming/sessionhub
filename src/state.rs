@@ -642,6 +642,8 @@ pub fn run(cfg: Config, rx: Receiver<Cmd>, tx: Sender<Cmd>, registry_cfg: Sender
                     let token = cfg.token.clone();
                     let limits = cfg.drops.clone();
                     let cloudflare = cloudflare_info(&cfg.cloudflare, &cfg.token, &choices);
+                    let cf = cfg.cloudflare.clone();
+                    let port = cfg.port;
                     // Counted here while the terminal list is still in hand; the
                     // thread below must not touch it.
                     let live: Vec<(String, usize)> = cfg
@@ -755,6 +757,7 @@ pub fn run(cfg: Config, rx: Receiver<Cmd>, tx: Sender<Cmd>, registry_cfg: Sender
                                 crate::skill::State::Stale => "stale",
                             }
                             .to_string(),
+                            local_https: local_https_info(&cf, port),
                         };
                         if let Ok(text) = serde_json::to_string(&msg) {
                             let _ = out.try_send(Out::Text(text));
@@ -1473,6 +1476,37 @@ pub fn run(cfg: Config, rx: Receiver<Cmd>, tx: Sender<Cmd>, registry_cfg: Sender
                     }
                     info!(%name, target = %entry.target(), "an address was closed");
                     send_to(&clients, id, json(&cloudflare_msg(&cfg, &choices)));
+                }
+
+                ClientMsg::LocalHttps { on } => {
+                    let Some(out) = clients.get(&id).map(|c| c.tx.clone()) else { continue };
+                    let cf = cfg.cloudflare.clone();
+                    let port = cfg.port;
+                    // Off the actor: this waits on someone answering a UAC
+                    // prompt, which can take as long as it takes.
+                    std::thread::spawn(move || {
+                        let done = if on {
+                            match local_https_info(&cf, port) {
+                                Some(i) => crate::localhttps::enable(&i.host, port),
+                                None => Err("This machine has no tunnel hostname of its own to open.".into()),
+                            }
+                        } else {
+                            crate::localhttps::disable()
+                        };
+                        let msg = match done {
+                            Ok(()) => {
+                                info!(on, "local https changed");
+                                ServerMsg::LocalHttps { local_https: local_https_info(&cf, port) }
+                            }
+                            Err(message) => {
+                                warn!(on, %message, "local https not changed");
+                                ServerMsg::Error { code: "local_https_failed".into(), message }
+                            }
+                        };
+                        if let Ok(text) = serde_json::to_string(&msg) {
+                            let _ = out.try_send(Out::Text(text));
+                        }
+                    });
                 }
 
                 ClientMsg::SetRemoteAddr { name, addr } => {
@@ -3239,6 +3273,15 @@ fn reachable_target(host: &str) -> bool {
 /// itself, which never leaves this process.
 fn cloudflare_msg(cfg: &Config, choices: &crate::cloudflare::Found) -> ServerMsg {
     ServerMsg::Cloudflare { cloudflare: cloudflare_info(&cfg.cloudflare, &cfg.token, choices) }
+}
+
+/// This machine's tunnel hostname, and whether it is opened here directly.
+///
+/// ponytail: asks Cloudflare when the hourly cache of the hostname is stale,
+/// which can add a second to the Settings panel once an hour.
+fn local_https_info(cf: &crate::config::Cloudflare, port: u16) -> Option<crate::localhttps::Info> {
+    let public = if cf.ready() { crate::cloudflare::own_host(cf, port).ok() } else { None };
+    crate::localhttps::info(public)
 }
 
 /// What the panel is told — everything except the API token, which never leaves
