@@ -348,6 +348,23 @@ function treeRoot() {
   return browseRoot || explorerRoot();
 }
 
+/// The machine an event is about, for the behaviour log: its pairing name,
+/// or `local` for the one serving this page.
+function mname(m) {
+  return m ? m.via || 'local' : '';
+}
+
+/// Why an error happened, without the path in it (telemetry carries no
+/// content): the OS error number when there is one — `os2` not found, `os5`
+/// access denied — otherwise the message's first words.
+function errorWhy(message) {
+  const s = String(message || '');
+  const os = /\(os error (\d+)\)/.exec(s);
+  if (os) return `os${os[1]}`;
+  if (/is not a folder/.test(s)) return 'not_folder';
+  return s.replace(/[A-Za-z]:[\\/]\S*|\/\S+/g, '…').slice(0, 40);
+}
+
 /// Every machine that is open; `current` is the one showing.
 const machines = [];
 
@@ -579,7 +596,7 @@ function makeTerminal(id) {
     // took it — that this side cannot see — but a person who has to wait
     // presses later, and that shows.
     e.firstIn = true;
-    tele.track('first_input', { ms: Math.round(performance.now() - e.openedAt) });
+    tele.track('first_input', { ms: Math.round(performance.now() - e.openedAt), machine: mname(current) });
   });
 
   const entry = { term, fit, host, view, capName, awaitingReplay: false, lastSize: null };
@@ -805,6 +822,7 @@ function closeView(id) {
     renderTabs();
     renderTree();
   } else {
+    showHow = 'closed';
     show(activeId);
   }
 }
@@ -871,7 +889,7 @@ function spawn(project, agent, resume, pick = false) {
   const size = (active && proposed(active)) || { cols: 100, rows: 30 };
   showNextAttach = current;
   spawnAskedAt = performance.now();
-  tele.track('spawn_ask', { agent, resume: !!resume, pick });
+  tele.track('spawn_ask', { agent, resume: !!resume, pick, machine: mname(current) });
   conn.send({
     t: 'spawn',
     project,
@@ -1543,9 +1561,17 @@ function sidebarCtx() {
     explorerRoot,
     saveCollapsed,
     saveBookmarks,
-    attach,
+    // Every way the sidebar opens a terminal goes through these two, so the
+    // behaviour log can tell a sidebar click from everything else.
+    attach: (id) => {
+      showHow = 'sidebar';
+      attach(id);
+    },
     spawn,
-    show,
+    show: (id) => {
+      showHow = 'sidebar';
+      show(id);
+    },
     focusProject,
     openMenu,
     closeMenu,
@@ -2074,12 +2100,18 @@ function endEchoProbe(m, entry) {
       if (typing.samples.length > 600) typing.samples.shift();
       if (echo + paint >= SLOW_ECHO_MS && performance.now() - typing.slowAt > 30000) {
         typing.slowAt = performance.now();
+        // Which agent, and whether it was mid-task: a slow echo from a busy
+        // agent is the agent, not the link.
+        const t = m.state.terminals.find((x) => m.terms.get(x.id) === entry);
         tele.track('slow_echo', {
           ms: Math.round(echo + paint),
           echo: Math.round(echo),
           paint: Math.round(paint),
           rtt,
           remote: !!m.via,
+          machine: mname(m),
+          agent: t?.agent || '',
+          working: !!t?.working,
           long_ms: Math.round(typing.longMs),
         });
       }
@@ -2773,6 +2805,29 @@ conn.on.onTree = (msg) => {
   fileBrowser.update(msg);
 };
 conn.on.onShortcuts = (msg) => fileBrowser.updateShortcuts(msg);
+/// `sessionhubd show PATH`. Run inside a terminal, only the browser showing
+/// that terminal moves; run anywhere else, every browser on that machine does.
+conn.on.onShow = (msg, m) => {
+  if (m !== current || (msg.terminal != null && msg.terminal !== activeId)) return;
+  const under = (root) => {
+    const norm = (p) => p.replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase();
+    return root && `${norm(msg.path)}/`.startsWith(`${norm(root.path)}/`);
+  };
+  if (under(explorerRoot())) browseRoot = null;
+  else if (!under(treeRoot())) {
+    // Somewhere outside the project: the folder itself, or the file's folder,
+    // becomes what the tree shows.
+    const trimmed = msg.path.replace(/(?<=[^:\\/])[\\/]+$/, '');
+    const cut = Math.max(trimmed.lastIndexOf('/'), trimmed.lastIndexOf('\\'));
+    let dir = msg.dir || cut < 0 ? trimmed : trimmed.slice(0, cut);
+    if (!dir || dir.endsWith(':')) dir += trimmed[cut] || '/';
+    browseTo(dir, dir.split(/[\\/]/).filter(Boolean).pop() || dir);
+  }
+  if (!sidePane.open) sidePane.show();
+  sidePanel.syncRoots();
+  sidePanel.tree.revealDeep(msg.path);
+  if (!msg.dir) sidePanel.ask(msg.path);
+};
 conn.on.onMade = (msg) => sidePanel.tree.made(msg);
 conn.on.onFile = (msg) => sidePanel.openFile(msg);
 conn.on.onSaved = (msg) => {
@@ -3020,7 +3075,7 @@ conn.on.onStatus = (kind, m) => {
     label: 'Retry now',
     run: () => {
       if (!m) return;
-      tele.track('retry', { remote: !!m.via });
+      tele.track('retry', { remote: !!m.via, machine: mname(m) });
       m.conn.retry();
     },
   };
@@ -3029,10 +3084,10 @@ conn.on.onStatus = (kind, m) => {
     // Why, and whether the page was even on screen: a phone dropping its
     // socket while asleep is not the same problem as a link dying under
     // someone typing.
-    tele.track('conn_lost', { remote: !!m.via, why: m.conn.lostWhy || '', hidden: document.hidden });
+    tele.track('conn_lost', { remote: !!m.via, machine: mname(m), why: m.conn.lostWhy || '', hidden: document.hidden });
   }
   if (m && kind === 'open' && m.lostAt) {
-    tele.track('conn_back', { remote: !!m.via, ms: Math.round(performance.now() - m.lostAt) });
+    tele.track('conn_back', { remote: !!m.via, machine: mname(m), ms: Math.round(performance.now() - m.lostAt) });
     m.lostAt = 0;
   }
   if (kind === 'connecting') {
@@ -3301,6 +3356,7 @@ function openDeepLink() {
   deepPending = false;
   const found = findTerminal(state.terminals, deep.t);
   if (found.id !== undefined) {
+    showHow = 'link';
     attach(found.id);
     return;
   }
@@ -3361,9 +3417,10 @@ conn.on.onAttached = (msg, m) => {
   if (asked) {
     // The clock the first output and the first keystroke are read against.
     entry.openedAt = performance.now();
-    tele.track('opened', { ms: Math.round(entry.openedAt - spawnAskedAt) });
+    tele.track('opened', { ms: Math.round(entry.openedAt - spawnAskedAt), machine: mname(m) });
   }
   entry.term.resize(msg.cols, msg.rows);
+  if (asked) showHow = 'spawn';
   if (asked || activeId === null || activeId === msg.id) show(msg.id);
   else renderTabs();
 };
@@ -3403,7 +3460,7 @@ conn.on.onOutput = (id, data, m) => {
       if (entry.keyAt && !entry.awaitingReplay) endEchoProbe(m, entry);
       if (entry.openedAt && !entry.firstOut) {
         entry.firstOut = true;
-        tele.track('first_output', { ms: Math.round(performance.now() - entry.openedAt) });
+        tele.track('first_output', { ms: Math.round(performance.now() - entry.openedAt), machine: mname(m) });
       }
     }
     // Activity bookkeeping — but never for the attach replay: the whole ring
@@ -3428,7 +3485,7 @@ conn.on.onOutput = (id, data, m) => {
 /// replayed when next shown; the ones on screen once their output goes quiet,
 /// rather than piling a whole ring buffer onto a link that is already behind.
 conn.on.onResync = (msg, m) => {
-  tele.track('resync', { remote: !!m.via });
+  tele.track('resync', { remote: !!m.via, machine: mname(m) });
   for (const [id, entry] of m.terms) {
     // A screen with a piece missing is not at the position it counted to:
     // only a full replay puts it right, never a resume from there.
@@ -3461,7 +3518,7 @@ conn.on.onExit = (msg, m) => {
 };
 
 conn.on.onError = (msg, m) => {
-  tele.track('error', { code: msg.code || '', remote: !!(m && m.via) });
+  tele.track('error', { code: msg.code || '', remote: !!(m && m.via), machine: mname(m), why: errorWhy(msg.message) });
   // Whatever was going to open did not. Leaving the claim standing would give it
   // to the next terminal opened for any reason at all.
   showNextAttach = null;
@@ -3514,8 +3571,8 @@ conn.on.onError = (msg, m) => {
     // Up to `": "`, the separator before the OS's reason — not the first
     // colon, which on Windows is the drive's: `C:\…` read as just `C`, so a
     // folder that failed was never marked and was asked for again forever.
-    const path = (/Cannot (?:open|read) (.+?): /.exec(msg.message || '') || [])[1];
-    if (path) sidePanel.tree.fail(path);
+    const hit = /Cannot (?:open|read) (.+?): /.exec(msg.message || '');
+    if (hit) sidePanel.tree.fail(hit[1], msg.message.slice(hit.index + hit[0].length).trim());
     return;
   }
   if (picker.open && /^(browse|mkdir|bad_project|duplicate_project|unknown_project|config_write)/.test(msg.code || '')) {
@@ -3631,7 +3688,7 @@ const machineBar = new MachineBar(document.getElementById('main'), {
 /// data. Nothing is torn down — its xterm and file panel stay alive.
 function switchMachine(m) {
   if (m === current) return;
-  tele.track('machine', { remote: !!m.via });
+  tele.track('machine', { remote: !!m.via, machine: mname(m) });
   useMachine(m);
   // Settings follows the active machine; otherwise an open panel would quietly
   // be editing the wrong machine's config.

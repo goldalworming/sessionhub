@@ -158,7 +158,16 @@ pub fn spawn(cfg: Config, tx: Sender<Cmd>) -> Sender<Config> {
             // Only the slow ones: a scan is normally a few milliseconds, and
             // that is not worth a line each — the outliers are.
             if ms >= 250 {
-                crate::telemetry::track("slow_scan", serde_json::json!({ "ms": ms }));
+                // What kind of scan it was, so a slow one can be told apart: a
+                // full walk of every session file, or a few files re-read.
+                let (full, files) = match &scan {
+                    Scan::Full => (true, cache.files.len()),
+                    Scan::Only(p) => (false, p.len()),
+                };
+                crate::telemetry::track(
+                    "slow_scan",
+                    serde_json::json!({ "ms": ms, "full": full, "files": files, "projects": projects.len() }),
+                );
             }
             let scan_changed = last.as_ref() != Some(&projects);
             if scan_changed {
@@ -1056,6 +1065,32 @@ pub fn project_icon(project: &str) -> Option<ProjectIcon> {
     })
 }
 
+/// How long a project's folder and icon, once found, are taken as read.
+const LOOK_TTL: Duration = Duration::from_secs(60);
+
+/// Whether a project's folder is there, and its icon — remembered for
+/// `LOOK_TTL`. Looking costs one `stat` per icon candidate, ~30 for a project
+/// without one; with 49 projects that was ~1,200 per scan, and an agent at
+/// work sets off a scan every few seconds. A folder that is missing is asked
+/// again every time, so one just cloned shows up at once.
+fn project_look(path: &str) -> (bool, Option<ProjectIcon>) {
+    static SEEN: Mutex<Option<HashMap<String, (Instant, Option<ProjectIcon>)>>> = Mutex::new(None);
+    let mut seen = SEEN.lock().unwrap_or_else(|e| e.into_inner());
+    let seen = seen.get_or_insert_with(HashMap::new);
+    if let Some((at, icon)) = seen.get(path) {
+        if at.elapsed() < LOOK_TTL {
+            return (true, icon.clone());
+        }
+    }
+    if !Path::new(path).is_dir() {
+        seen.remove(path);
+        return (false, None);
+    }
+    let icon = project_icon(path);
+    seen.insert(path.to_string(), (Instant::now(), icon.clone()));
+    (true, icon)
+}
+
 /// The project list = the manual list in the config merged with every unique cwd
 /// from the session files. A project whose directory is gone is marked, not
 /// removed.
@@ -1087,10 +1122,10 @@ pub fn build_projects(config_projects: &[String], sessions: Vec<SessionRow>) -> 
         .map(|(path, mut rows)| {
             rows.sort_by(|a, b| b.updated_ms.cmp(&a.updated_ms).then(a.title.cmp(&b.title)));
             let newest = rows.first().map(|r| r.updated_ms).unwrap_or(0);
-            let exists = Path::new(&path).is_dir();
+            let (exists, icon) = project_look(&path);
             (newest, ProjectInfo {
                 name: project_name(&path),
-                icon: if exists { project_icon(&path) } else { None },
+                icon,
                 exists,
                 sessions: rows
                     .into_iter()

@@ -201,6 +201,17 @@ checks that the machine that will run the terminal supports `--env`. If it
 does not, `spawn` stops with a clear message instead of starting a terminal
 without the environment you asked for.
 
+### Showing a file
+
+```text
+sessionhubd show PATH
+```
+
+Run inside a sessionhub terminal, this opens `PATH` in the file panel of the
+browser showing that terminal. A file opens in the editor with its folders
+unfolded; a folder is unfolded and selected. An agent can use it to point at
+what it just made instead of describing where it put it.
+
 ## Deep links and embedding
 
 The web UI opens straight on one terminal with `?t=`, given its name or its

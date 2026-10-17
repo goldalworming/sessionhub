@@ -394,6 +394,14 @@ pub enum ServerMsg {
         id: u32,
         from: u64,
     },
+    /// `sessionhubd show PATH`: put this file or folder in front of whoever
+    /// is looking. `terminal` is the one that asked (its
+    /// `SESSIONHUB_TERMINAL`), so only a browser showing that terminal moves.
+    Show {
+        path: String,
+        dir: bool,
+        terminal: Option<u32>,
+    },
     Size {
         id: u32,
         cols: u16,

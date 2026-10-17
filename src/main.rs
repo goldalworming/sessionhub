@@ -97,6 +97,7 @@ fn main() -> ExitCode {
         "send" => cmd_send(&argv),
         "capture" => cmd_capture(&argv),
         "wait" => cmd_wait(&argv),
+        "show" => cmd_show(&argv),
         "tray" => tray::run(home),
         "tunnel" => cmd_tunnel(),
         "bundle-web" => cmd_bundle_web(&argv),
@@ -149,6 +150,8 @@ fn print_help() {
          \x20                                 what is on screen, as plain text\n\
          sessionhubd wait <id-or-name> [--idle SECONDS] [--timeout SECONDS]\n\
          \x20                                 until quiet, or the process ends\n\
+         sessionhubd show PATH              open a file or folder in the browser's file\n\
+         \x20                                 panel, beside the terminal that ran it\n\
          sessionhubd url <id-or-name> [--embed] [--public]\n\
          \x20                                 the web UI's address for it; --embed shows\n\
          \x20                                 that terminal alone, for an iframe; --public\n\
@@ -1533,6 +1536,64 @@ fn cmd_capture(argv: &[String]) -> ExitCode {
         println!("{text}");
     }
     ExitCode::SUCCESS
+}
+
+/// Put a file or folder in the browser's file panel. Run inside a terminal,
+/// only the browser showing that terminal moves (`SESSIONHUB_TERMINAL`).
+fn cmd_show(argv: &[String]) -> ExitCode {
+    let rest = positional(argv);
+    let Some(arg) = rest.first() else {
+        eprintln!("Usage: sessionhubd show PATH");
+        return ExitCode::from(2);
+    };
+    // Not `canonicalize`: on Windows that answers `\\?\C:\…`, a spelling the
+    // tree's own listings never use.
+    let path = match std::path::absolute(arg) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("{arg}: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let dir = match std::fs::metadata(&path) {
+        Ok(m) => m.is_dir(),
+        Err(e) => {
+            eprintln!("{}: {e}", path.display());
+            return ExitCode::FAILURE;
+        }
+    };
+    let Some((port, token)) = local_daemon() else { return ExitCode::FAILURE };
+    let mut url = format!(
+        "/api/show?token={}&path={}&dir={}",
+        remote::percent_encode(&token),
+        remote::percent_encode(&path.to_string_lossy()),
+        if dir { 1 } else { 0 }
+    );
+    if let Ok(t) = std::env::var("SESSIONHUB_TERMINAL") {
+        url.push_str(&format!("&terminal={}", remote::percent_encode(&t)));
+    }
+    match daemon::ask(port, "GET", &url, &[], Duration::from_secs(5)) {
+        Ok((200, body)) => {
+            let n: usize = String::from_utf8_lossy(&body).trim().parse().unwrap_or(0);
+            if n == 0 {
+                println!("No browser has sessionhub open; nothing was shown.");
+            } else {
+                println!("Shown {}", path.display());
+            }
+            ExitCode::SUCCESS
+        }
+        Ok((status, body)) => {
+            match old_daemon_message(status, &body) {
+                Some(msg) => eprintln!("{msg}"),
+                None => eprintln!("{}", String::from_utf8_lossy(&body).trim()),
+            }
+            ExitCode::FAILURE
+        }
+        Err(e) => {
+            eprintln!("{e}");
+            ExitCode::FAILURE
+        }
+    }
 }
 
 /// The ceiling on `wait --timeout` — `exec::clamp_timeout`'s 600s belongs to

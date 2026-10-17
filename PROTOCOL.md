@@ -274,6 +274,8 @@ The answer is `{"t":"dropped",…}`, or `error` with the code `drop_failed`.
 
 {"t":"saved","path":"C:\\…\\main.rs","modified_ms":1786694119020}
 
+{"t":"show","path":"C:\\data\\code\\notex\\out.png","dir":false,"terminal":3}
+
 {"t":"remotes","remotes":[{"name":"office","addr":"10.8.0.4:7717","version":"0.1.0"}]}
 
 {"t":"dir","path":"C:\\data\\code","name":"code","parent":"C:\\data",
@@ -290,6 +292,10 @@ are none".
 
 `exists: false` marks a project whose directory has disappeared. Its sessions stay
 listed; only spawning into it will be rejected.
+
+`show` asks the file panel to put `path` on screen; see `/api/show` below.
+Every terminal starts with `SESSIONHUB_TERMINAL=<its id>`, so `sessionhubd
+show` run inside it can say which terminal it came from.
 
 `live_terminal_id` holds a terminal id if that session is currently live — this is
 the difference between "just attach" and "respawn with the resume flag".
@@ -384,6 +390,7 @@ cookie.
 | `PUT /api/term/spawn?project=…&agent=…[&resume=…][&name=…]`, body (optional) = `{"env": {"NAME": "VALUE"}}` | Starts a terminal exactly like the browser's *New* button; `{"id": N}`, or 400 with `{"error", "code"}` (`code: "name_taken"` when `name` is already live, `"bad_env"` for an invalid variable name/value or too many of them) |
 | `PUT /api/term/send?(id=N\|name=…)[&from=…]`, body = raw bytes to type | Types the body into that terminal, as if a person had; `{"id": N, "bytes": N}` |
 | `GET /api/term/capture?(id=N\|name=…)` | The terminal's raw scrollback (same bytes as the ring buffer), as `application/octet-stream` |
+| `GET /api/show?path=…&dir=0\|1[&terminal=N]` | `sessionhubd show`: sends every client a `show` frame and answers how many there were. A browser moves its file panel only if `terminal` is the one it is showing, or there is no `terminal`. Moves nothing on disk, so it is not gated by Remote commands |
 
 `send`'s body is delivered to the PTY exactly as given — bracketed-paste
 wrapping, a trailing Enter, and named keys (`--key esc`, `--raw`, …) are all

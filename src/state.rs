@@ -99,6 +99,9 @@ pub enum Cmd {
     /// its viewers, and a script reading the screen must never be the thing
     /// that shrinks it out from under someone actually looking at it.
     TermCapture { target: TermTarget, reply: Sender<Result<Vec<u8>, String>> },
+    /// `sessionhubd show`: tell every browser, which decides for itself
+    /// whether it is the one looking. Answers how many were told.
+    Show { path: String, dir: bool, terminal: Option<u32>, reply: Sender<usize> },
 }
 
 /// How a scripted-control command names the terminal it means.
@@ -2803,6 +2806,14 @@ pub fn run(cfg: Config, rx: Receiver<Cmd>, tx: Sender<Cmd>, registry_cfg: Sender
                 let _ = reply.send(result);
             }
 
+            Cmd::Show { path, dir, terminal, reply } => {
+                let msg = json(&ServerMsg::Show { path, dir, terminal });
+                for cid in clients.keys() {
+                    send_to(&clients, *cid, msg.clone());
+                }
+                let _ = reply.send(clients.len());
+            }
+
             Cmd::Shutdown => {
                 info!(terminals = terminals.len(), "shutdown requested");
                 for t in terminals.values_mut() {
@@ -3004,7 +3015,9 @@ fn build_terminal(
     // `opencode -s` resumes a session in whatever directory the command ran in.
     let cwd = PathBuf::from(project);
     let sink_tx = tx.clone();
-    let env = merged_env(&agent_cfg.env, extra_env);
+    let mut env = merged_env(&agent_cfg.env, extra_env);
+    // So `sessionhubd show` run inside it can say which terminal asked.
+    env.insert("SESSIONHUB_TERMINAL".into(), id.to_string());
     let pty = Pty::spawn(
         &agent_cfg.command,
         &args,

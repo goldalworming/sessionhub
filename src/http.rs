@@ -567,6 +567,7 @@ fn handle(
         "/api/term/spawn" => api_term_spawn(&mut sock, &req, &tx, put_body),
         "/api/term/send" => api_term_send(&mut sock, &req, &tx, put_body),
         "/api/term/capture" => api_term_capture(&mut sock, &req, &tx),
+        "/api/show" => api_show(&mut sock, &req, &tx),
         "/api/signout" => api_signout(&mut sock),
         _ => serve_static(&mut sock, &req, set_cookie, &secret),
     }
@@ -1048,7 +1049,25 @@ fn api_term_capture(sock: &mut TcpStream, req: &Request, tx: &Sender<Cmd>) -> io
     }
 }
 
-/// Forward a listing request to another machine.
+/// `sessionhubd show`: point the browsers at a file or folder. Only moves what
+/// is on screen — nothing on disk — so it is not gated by Remote commands.
+fn api_show(sock: &mut TcpStream, req: &Request, tx: &Sender<Cmd>) -> io::Result<()> {
+    let Some(path) = req.query_param("path").filter(|p| !p.is_empty()) else {
+        return respond(sock, 400, "text/plain; charset=utf-8", b"400 missing path
+");
+    };
+    let dir = req.query_param("dir").as_deref() == Some("1");
+    let terminal = req.query_param("terminal").and_then(|t| t.parse().ok());
+    let (reply, wait) = bounded(1);
+    if tx.send(Cmd::Show { path, dir, terminal, reply }).is_err() {
+        return respond(sock, 500, "text/plain; charset=utf-8", b"actor is gone
+");
+    }
+    let n = wait.recv_timeout(Duration::from_secs(3)).unwrap_or(0);
+    respond(sock, 200, "text/plain; charset=utf-8", format!("{n}
+").as_bytes())
+}
+
 /// Forward a status check to another machine — used by `sessionhubd spawn
 /// --env --on NAME` to ask the machine that will actually create the
 /// terminal whether it understands `--env`, before sending it anything.

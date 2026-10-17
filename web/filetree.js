@@ -15,6 +15,7 @@ import { installIcons, iconFor } from './fileicons.js';
 
 const ROW = 22; // row height, must match the CSS
 const OVERSCAN = 8; // spare rows above and below the window
+const RETRY_MS = 30000; // a folder that failed is asked again this often
 
 export class FileTree {
   /// `onList(path)` asks for a folder's contents, `onOpen(path, name)` opens a
@@ -187,14 +188,17 @@ export class FileTree {
   /// What is already listed stays until the answer comes; an answer that
   /// changes nothing redraws nothing (`update`).
   ///
-  /// Not a folder that failed to open: this runs every few seconds while an
-  /// agent writes, and asking again for one that cannot be read — deleted,
-  /// refused — made the same error over and over (868 in one hour, once). A
-  /// refresh by hand, or opening it again, still tries.
+  /// A folder that failed to open is asked again only after `RETRY_MS`: this
+  /// runs every few seconds while an agent writes, and asking every time for
+  /// one that cannot be read made the same error over and over (868 in one
+  /// hour, once). Never asking again was worse — a folder caught mid-rewrite,
+  /// or a machine mid-restart, said "Could not read" until opened by hand.
   refreshQuietly() {
     for (const path of this.expanded) {
       const state = this.dirs.get(path);
-      if (state && !state.loading && !state.failed) this.onList(path);
+      if (!state || state.loading) continue;
+      if (!state.failed) this.onList(path);
+      else if (Date.now() - state.failedAt > RETRY_MS) this.request(path);
     }
   }
 
@@ -224,6 +228,7 @@ export class FileTree {
     // The same files as before — the usual answer to `refreshQuietly` — need
     // no new rows; rebuilding would only cost a repaint for nothing.
     if (!same) this.rebuild();
+    this.stepReveal();
   }
 
   /// Something was created. The folder is asked for again rather than the new
@@ -305,14 +310,20 @@ export class FileTree {
     this.onMake.send(folder, name.trim(), dir);
   }
 
-  /// A folder failed to open: mark it so its row does not hang on "…".
-  fail(path) {
+  /// A folder failed to open: mark it so its row does not hang on "…", and
+  /// say why — "Access is denied" and "cannot find" need different fixes.
+  fail(path, reason = '') {
     // The daemon reports the path as it normalised it: the same folder, maybe
     // not the same spelling as the one asked for.
     const same = (p) => p.replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase();
     const key = this.dirs.has(path) ? path : [...this.dirs.keys()].find((k) => same(k) === same(path));
     const state = key !== undefined && this.dirs.get(key);
-    if (state) this.dirs.set(key, { ...state, loading: false, failed: true });
+    // A folder that is gone is folded away, not retried: an agent deleting
+    // one it had made would otherwise cost an error every `RETRY_MS`.
+    if (state && /os error [23]\)|No such file/i.test(reason)) {
+      this.expanded.delete(key);
+      this.dirs.delete(key);
+    } else if (state) this.dirs.set(key, { ...state, loading: false, failed: true, failedAt: Date.now(), reason });
     this.rebuild();
   }
 
@@ -338,6 +349,50 @@ export class FileTree {
       if (top < this.scroll.scrollTop || top > this.scroll.scrollTop + view - ROW) {
         this.scroll.scrollTop = Math.max(0, top - view / 2);
       }
+    }
+  }
+
+  /// Open the folders down to `path` as their listings arrive, then select it
+  /// (`sessionhubd show`). Each step is found in the listing above it rather
+  /// than cut from the string: `expanded` is keyed on the listing's spelling.
+  revealDeep(path) {
+    this.pendingReveal = path;
+    this.revealAsked = new Set();
+    this.stepReveal();
+  }
+
+  stepReveal() {
+    const root = this.getRoot();
+    if (!this.pendingReveal || !root) return;
+    const norm = (p) => p.replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase();
+    const t = norm(this.pendingReveal);
+    const done = (p) => {
+      this.pendingReveal = null;
+      this.reveal(p);
+    };
+    if (norm(root.path) === t) return done(root.path);
+    let dir = root.path;
+    for (;;) {
+      const state = this.dirs.get(dir);
+      if (!state || state.loading) return; // `update` comes back here
+      const e = !state.failed && state.entries.find((x) => t === norm(x.path) || t.startsWith(`${norm(x.path)}/`));
+      if (!e) {
+        // What an agent just wrote is not in a listing from before it did;
+        // a second listing that lacks it too means it is not there.
+        if (this.revealAsked.has(dir)) this.pendingReveal = null;
+        else {
+          this.revealAsked.add(dir);
+          this.request(dir);
+        }
+        return;
+      }
+      if (norm(e.path) === t) return done(e.path);
+      if (!this.expanded.has(e.path)) {
+        this.expanded.add(e.path);
+        if (!this.dirs.has(e.path) || this.dirs.get(e.path).failed) this.request(e.path);
+        this.rebuild();
+      }
+      dir = e.path;
     }
   }
 
@@ -388,16 +443,27 @@ export class FileTree {
       return;
     }
     if (state.failed) {
-      rows.push({ path: `${path}\0failed`, name: 'Could not read this folder', depth, note: true });
+      const name = state.reason ? `Could not read this folder: ${state.reason}` : 'Could not read this folder';
+      rows.push({ path: `${path}\0failed`, name, depth, note: true });
       return;
     }
     const q = this.filter;
+    let hidden = 0;
     for (const e of state.entries) {
       // The filter applies to files only: hiding folders would cut the path to
       // the matching files inside them.
-      if (q && !e.is_dir && !e.name.toLowerCase().includes(q)) continue;
+      if (q && !e.is_dir && !e.name.toLowerCase().includes(q)) {
+        hidden++;
+        continue;
+      }
       rows.push({ path: e.path, name: e.name, isDir: e.is_dir, size: e.size, depth });
       if (e.is_dir && this.expanded.has(e.path)) this.walk(e.path, depth + 1, rows);
+    }
+    // Said where the files went missing: a filter typed once and forgotten
+    // otherwise reads as a folder with nothing in it.
+    if (hidden) {
+      const name = `${hidden} file${hidden > 1 ? 's' : ''} hidden by the filter`;
+      rows.push({ path: `${path}\0hidden`, name, depth, note: true });
     }
     if (state.truncated) {
       rows.push({
