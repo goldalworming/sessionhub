@@ -33,7 +33,9 @@ writeFileSync(`${HOME}/.sessionhub/config.toml`,
   `port = ${PORT}\nlan_access = false\ntoken = "${TOKEN}"\nprojects = ['${PROJ.replaceAll('/', '\\')}']\n`);
 const daemon = spawn(BIN, ['start', '--foreground', '--no-open', '--no-tray', '--home', HOME], { stdio: 'ignore' });
 await sleep(3000);
-const cli = (args, env = {}) => spawnSync(BIN, [...args, '--home', HOME], { encoding: 'utf8', env: { ...process.env, ...env } });
+// Never the one of whatever terminal runs this test: `show` would aim at it.
+const { SESSIONHUB_TERMINAL: _own, ...bare } = process.env;
+const cli = (args, env = {}) => spawnSync(BIN, [...args, '--home', HOME], { encoding: 'utf8', env: { ...bare, ...env } });
 
 const t1 = cli(['spawn', '--agent', 'terminal', '--project', PROJ]).stdout.trim();
 const t2 = cli(['spawn', '--agent', 'terminal', '--project', PROJ]).stdout.trim();

@@ -6,6 +6,7 @@
 
 import { FileTree } from './filetree.js';
 import { Editor } from './editor.js';
+import { ChangesView } from './changes.js';
 import { iconFor } from './fileicons.js';
 
 const LS_WIDTH = 'sh.explorer.width';
@@ -16,6 +17,12 @@ const LS_FILES = 'sh.files.';
 /// weeks cannot grow one of these without end.
 const MAX_REMEMBERED = 20;
 const MIN = 120;
+/// A diff tab's key: its file's path behind a prefix no path starts with, so
+/// the file itself can be open in a tab of its own beside it.
+const DIFF = '\u0001diff:';
+/// Which record a diff tab is from is part of its key: the same file changed
+/// today and last week is two tabs.
+const diffKey = (path, record) => `${DIFF}${record ?? ''}\u0001${path}`;
 /// Below this the code column is too narrow to read, and the Explorer is better
 /// out of the way. The number is roughly 80 columns at the default font size.
 const CODE_MIN = 420;
@@ -90,6 +97,15 @@ export class SidePanel {
       // switches into. See FILE-EXPLORER-PLAN.md for why that changed from
       // the toggle this button used to be.
       toggle: on.browse,
+      changes: () => this.showChanges(),
+    });
+    this.changes = new ChangesView(this.exp, {
+      list: on.changes.list,
+      reset: on.changes.reset,
+      record: on.changes.record,
+      open: (path, record) => this.ask(diffKey(path, record)),
+      back: () => this.showFiles(),
+      root: on.project,
     });
     this.editor = new Editor(this.body, {
       save: on.save,
@@ -108,6 +124,34 @@ export class SidePanel {
     this.paint();
   }
 
+  /// The Explorer column shows what changed instead of the tree, and back.
+  showChanges() {
+    this.tree.hide();
+    this.changes.show();
+  }
+
+  showFiles() {
+    this.changes.hide();
+    this.tree.show();
+  }
+
+  /// One file's two sides, from the daemon. Ignored when it belongs to another
+  /// project than the one now showing.
+  openDiff(msg) {
+    if (msg.root !== this.on.project()?.path) return;
+    const path = diffKey(msg.path, msg.record);
+    const name = msg.path.split(/[\\/]/).pop();
+    // A file from an earlier record says which day it is from.
+    const label = msg.record ? `${name} · ${new Date(msg.record).toLocaleDateString([], { day: 'numeric', month: 'short' })}` : name;
+    if (!this.files.some((f) => f.path === path)) this.files.push({ path, name: label, diff: true });
+    this.active = path;
+    this.editor.loadDiff(path, { name, real: msg.path, status: msg.status, before: msg.before, after: msg.after });
+    // The same rule as opening a file: the list folds away when the code
+    // would be cramped, and the strip brings it back.
+    if (this.el.clientWidth - this.exp.offsetWidth < CODE_MIN) this.fold();
+    this.paint();
+  }
+
   /// The Explorer retreats to a strip; the code column takes the rest.
   fold() {
     if (this.exp.classList.contains('folded')) return;
@@ -121,6 +165,8 @@ export class SidePanel {
     this.exp.classList.remove('folded');
     this.editor.relayout();
     this.tree.paint();
+    // Not looked at while it was folded away.
+    if (this.changes.open) this.changes.refresh();
     this.on.layout?.();
   }
 
@@ -166,6 +212,7 @@ export class SidePanel {
     }
     this.scope = key;
     this.editor.setScope(key || '');
+    if (this.changes.open) this.changes.refresh();
     this.pending = null;
 
     const seen = key ? this.byScope.get(key) : null;
@@ -215,15 +262,25 @@ export class SidePanel {
 
   remember() {
     if (!this.scope) return;
-    const files = this.files.slice(-MAX_REMEMBERED);
+    // A diff is a moment's comparison, not a file to come back to.
+    const files = this.files.filter((f) => !f.diff).slice(-MAX_REMEMBERED);
+    const active = files.some((f) => f.path === this.active) ? this.active : files[0]?.path;
     if (!files.length) localStorage.removeItem(LS_FILES + this.scope);
-    else localStorage.setItem(LS_FILES + this.scope, JSON.stringify({ files, active: this.active }));
+    else localStorage.setItem(LS_FILES + this.scope, JSON.stringify({ files, active }));
   }
 
   /// Ask the daemon for a file. `restoring` means the tab is already in the
   /// strip — it was read back from storage or clicked — so the extras that
   /// belong to opening something new are skipped.
   ask(path, restoring = false) {
+    if (path.startsWith(DIFF)) {
+      const root = this.on.project();
+      const rest = path.slice(DIFF.length);
+      const cut = rest.indexOf('\u0001');
+      const record = rest.slice(0, cut) ? Number(rest.slice(0, cut)) : null;
+      if (root) this.on.changes.diff(root.path, rest.slice(cut + 1), record);
+      return;
+    }
     this.pending = { scope: this.scope, path, restoring };
     this.on.open(path);
   }
@@ -318,7 +375,7 @@ export class SidePanel {
   paintTabs() {
     this.strip.textContent = '';
     for (const f of this.files) {
-      this.strip.appendChild(this.tab(f.path, f.name));
+      this.strip.appendChild(this.tab(f.path, f.diff ? `± ${f.name}` : f.name));
     }
     // The active tab is brought into view; opening a tenth file must not hide
     // its own tab off screen. Computed here because `scrollIntoView` often
@@ -334,7 +391,7 @@ export class SidePanel {
 
   tab(path, label) {
     const el = document.createElement('div');
-    el.className = 'ptab' + (this.active === path ? ' on' : '');
+    el.className = 'ptab' + (this.active === path ? ' on' : '') + (path.startsWith(DIFF) ? ' diff' : '');
     el.title = path;
 
     const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');

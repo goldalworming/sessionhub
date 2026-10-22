@@ -122,6 +122,28 @@ pub enum ClientMsg {
     OpenFile {
         path: String,
     },
+    /// The code files changed in a project since its snapshot (`changes.rs`).
+    /// Answered with `Changes`; the first ask for a project starts tracking it.
+    Changes {
+        root: String,
+    },
+    /// Take a new snapshot: what is listed now counts as reviewed.
+    ChangesReset {
+        root: String,
+    },
+    /// One changed file, both sides. Answered with `ChangeDiff`. With
+    /// `record`, from that saved record rather than the live snapshot.
+    ChangeDiff {
+        root: String,
+        path: String,
+        #[serde(default)]
+        record: Option<u64>,
+    },
+    /// The files of one saved record. Answered with `ChangeRecord`.
+    ChangeRecord {
+        root: String,
+        id: u64,
+    },
     /// Save the file currently open.
     SaveFile {
         path: String,
@@ -514,6 +536,34 @@ pub enum ServerMsg {
     Dir(DirList),
     /// One folder's contents for the file panel.
     Tree(TreeList),
+    /// Answers `changes`. `state` is "ready", "taking" (the snapshot is still
+    /// being made; ask again), "too_big", or "idle" (no terminal is open in the
+    /// project, so nothing is tracked). `since_ms` is when the snapshot was
+    /// taken. `history` is the saved records of earlier snapshots, newest first.
+    Changes {
+        root: String,
+        state: &'static str,
+        since_ms: u64,
+        files: Vec<ChangedFile>,
+        history: Vec<RecordInfo>,
+    },
+    /// Answers `change_record`.
+    ChangeRecord {
+        root: String,
+        id: u64,
+        info: RecordInfo,
+        files: Vec<ChangedFile>,
+    },
+    /// Answers `change_diff`: the file at the snapshot and after. An added file
+    /// has an empty `before`, a deleted one an empty `after`.
+    ChangeDiff {
+        root: String,
+        path: String,
+        record: Option<u64>,
+        status: String,
+        before: String,
+        after: String,
+    },
     /// The file browser's sidebar shortcuts — answers `ClientMsg::Shortcuts`.
     Shortcuts {
         /// Home plus the standard folders that actually exist on this
@@ -668,6 +718,27 @@ pub struct RemoteInfo {
     /// The version that machine answered with when last paired — useful when one
     /// machine falls behind and starts behaving oddly.
     pub version: String,
+}
+
+/// One row of `ServerMsg::Changes`. `status` is "added", "modified" or
+/// "deleted"; the counts are lines.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChangedFile {
+    pub path: String,
+    pub status: String,
+    pub added: u32,
+    pub removed: u32,
+}
+
+/// A saved record of what changed during one snapshot, kept on disk after the
+/// snapshot ended. `since_ms` is its id.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RecordInfo {
+    pub since_ms: u64,
+    pub until_ms: u64,
+    pub files: u32,
+    pub added: u32,
+    pub removed: u32,
 }
 
 #[derive(Debug, Clone, Serialize)]

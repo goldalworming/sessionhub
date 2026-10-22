@@ -34,6 +34,9 @@ browser.
 - Phone controls for Esc, Enter, Shift+Tab, Ctrl, arrows, paste, and uploads
 - Busy/finished status, finish chime, tab colours, CPU, and RAM usage
 - Monaco file panel with drag-and-drop and paste uploads
+- What agents changed, without git: **±** in the Explorer lists the code files
+  changed since the project's first terminal opened, each with a diff; earlier
+  rounds are kept for 30 days to look back at
 - Self-update and Cloudflare access from Settings
 - One binary with no frontend build step
 

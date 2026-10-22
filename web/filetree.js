@@ -26,7 +26,7 @@ export class FileTree {
   /// and the folder picker use, so one theme covers all three. `make(parent,
   /// name, dir)` creates something, and `shell(path)` opens a terminal in a
   /// folder. Both are optional: without them the panel is exactly what it was.
-  constructor(host, { list, open, root, projects, pick, menu, make, shell, up, copy, toggle }) {
+  constructor(host, { list, open, root, projects, pick, menu, make, shell, up, copy, toggle, changes }) {
     this.onList = list;
     this.onOpen = open;
     this.getRoot = root;
@@ -44,6 +44,8 @@ export class FileTree {
     /// overlay for looking somewhere else on disk, not part of this tree.
     /// Optional, same as the rest of the panel's chrome.
     this.onToggleMode = toggle;
+    /// Swaps this view for the list of changed code files (`changes.js`).
+    this.onChanges = changes;
     /// Whether the daemon that answered the last listing understands
     /// `make_entry`. An older one does not, and then nothing is offered rather
     /// than a menu entry that would go unanswered. Absent means no.
@@ -70,6 +72,7 @@ export class FileTree {
     // the project picker belong to this view itself.
     this.el.innerHTML =
       '<div class="fhead"><span class="ftitle">Explorer</span>' +
+      '<button class="fchanges" title="What changed">±</button>' +
       '<button class="fbrowse" title="Browse other folders…">▦</button>' +
       '<button class="frefresh" title="Refresh">⟳</button>' +
       '<button class="fpick" title="Show a different project">▾</button></div>' +
@@ -83,6 +86,9 @@ export class FileTree {
     const browseBtn = this.el.querySelector('.fbrowse');
     if (this.onToggleMode) browseBtn.onclick = () => this.onToggleMode();
     else browseBtn.hidden = true;
+    const changesBtn = this.el.querySelector('.fchanges');
+    if (this.onChanges) changesBtn.onclick = () => this.onChanges();
+    else changesBtn.hidden = true;
     this.el.querySelector('.frefresh').onclick = () => this.refresh();
     this.el.querySelector('.fpick').onclick = (e) => {
       e.stopPropagation();

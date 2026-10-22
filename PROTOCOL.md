@@ -97,6 +97,11 @@ The answer is `{"t":"dropped",…}`, or `error` with the code `drop_failed`.
 {"t":"tree","path":"C:\\data\\code\\notex"}
 {"t":"open_file","path":"C:\\data\\code\\notex\\src\\main.rs"}
 {"t":"save_file","path":"C:\\data\\code\\notex\\src\\main.rs","text":"fn main() {}\n"}
+{"t":"changes","root":"C:\\data\\code\\notex"}
+{"t":"changes_reset","root":"C:\\data\\code\\notex"}
+{"t":"change_diff","root":"C:\\data\\code\\notex","path":"C:\\data\\code\\notex\\src\\main.rs"}
+{"t":"change_record","root":"C:\\data\\code\\notex","id":1786690000000}
+{"t":"change_diff","root":"C:\\data\\code\\notex","path":"C:\\data\\code\\notex\\src\\main.rs","record":1786690000000}
 {"t":"set_lan_access","enabled":true}
 {"t":"track","events":[{"e":"switch","how":"tab","ts":1789000000000}]}
 {"t":"set_lan_addr","addr":"192.168.0.108"}
@@ -210,6 +215,24 @@ The answer is `{"t":"dropped",…}`, or `error` with the code `drop_failed`.
   connection.
 - `save_file` only overwrites files that **already exist**; a path that does not
   exist is answered with `save_failed` instead of quietly creating it.
+- `changes` lists the code files changed in a project since its snapshot,
+  without git. The snapshot is taken, on its own thread, when the first
+  terminal opens in that project, and is held in memory until the last one
+  ends. Only code is tracked: dependency, build-output and cache folders
+  (`node_modules`, `target`, `build`, `dist`, `.git`, …), lockfiles and files
+  over 1 MB are left out, and a project with more than 20,000 code files or
+  64 MB of them is answered with `state: "too_big"`. `state: "taking"` means the
+  snapshot is still being made (ask again); `"idle"` means no terminal is open
+  in the project, so nothing is tracked.
+- A snapshot that ends — `changes_reset` ("reviewed", which takes a new one),
+  the project's last terminal ending, or the daemon stopping — first writes
+  what changed during it, both sides of each file, to
+  `~/.sessionhub/changes/<project hash>/<since_ms>.jsonl`. Those records are
+  kept for 30 days. `changes` lists them as `history`, newest first;
+  `change_record` returns one record's files.
+- `change_diff` answers with one file's two sides: `before` is the snapshot
+  (empty for an added file), `after` the disk now (empty for a deleted one) —
+  or, with `record`, both sides as that record kept them.
 - `set_lan_access` takes effect immediately: loopback is untouched, what is opened
   or closed is only the second listener, and live terminals are not disturbed.
 - `pair` calls that machine's `/api/status` **first**, so a wrong token or a
@@ -275,6 +298,17 @@ The answer is `{"t":"dropped",…}`, or `error` with the code `drop_failed`.
 {"t":"saved","path":"C:\\…\\main.rs","modified_ms":1786694119020}
 
 {"t":"show","path":"C:\\data\\code\\notex\\out.png","dir":false,"terminal":3}
+
+{"t":"changes","root":"C:\\data\\code\\notex","state":"ready","since_ms":1786694118700,
+ "files":[{"path":"C:\\data\\code\\notex\\src\\main.rs","status":"modified","added":2,"removed":1}],
+ "history":[{"since_ms":1786690000000,"until_ms":1786693000000,"files":4,"added":30,"removed":12}]}
+
+{"t":"change_record","root":"C:\\data\\code\\notex","id":1786690000000,
+ "info":{"since_ms":1786690000000,"until_ms":1786693000000,"files":4,"added":30,"removed":12},
+ "files":[{"path":"C:\\…\\main.rs","status":"modified","added":2,"removed":1}]}
+
+{"t":"change_diff","root":"C:\\data\\code\\notex","path":"C:\\…\\main.rs","record":null,
+ "status":"modified","before":"fn main() {}\n","after":"fn main() { run() }\n"}
 
 {"t":"remotes","remotes":[{"name":"office","addr":"10.8.0.4:7717","version":"0.1.0"}]}
 

@@ -157,6 +157,12 @@ pub fn installed() -> Result<Option<WebVersion>, String> {
     let path = installed_dir().join("version.json");
     let Ok(bytes) = std::fs::read(&path) else { return Ok(None) };
     let v = parse_version(&bytes)?;
+    // Installed from an older release, then the daemon was updated past it: the
+    // one built in is newer, and keeping the old one would hide every fix the
+    // update brought — which it did, from 1.2.59 over a built-in 1.2.61.
+    if !outranks(&v.version, built_in_version()) {
+        return Ok(None);
+    }
     if !daemon_is_new_enough(env!("CARGO_PKG_VERSION"), &v.needs_daemon) {
         return Err(format!(
             "the installed interface {} needs sessionhub {} or newer; this one is {}",
@@ -166,6 +172,23 @@ pub fn installed() -> Result<Option<WebVersion>, String> {
         ));
     }
     Ok(Some(v))
+}
+
+/// An installed frontend is used only when it is newer than the built-in one.
+fn outranks(installed: &str, built_in: &str) -> bool {
+    crate::update::is_newer(installed, built_in)
+}
+
+/// The version of the frontend baked into this binary.
+pub fn built_in_version() -> &'static str {
+    static V: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    V.get_or_init(|| {
+        crate::http::embedded_app_files()
+            .get("version.json")
+            .and_then(|raw| parse_version(raw).ok())
+            .map(|v| v.version)
+            .unwrap_or_default()
+    })
 }
 
 /// Read one file from the installed frontend, if it is there and usable.
@@ -410,6 +433,14 @@ mod tests {
         assert!(parse_version(br#"{"needs_daemon":"0.0.4"}"#).is_err(), "no version");
         assert!(parse_version(br#"{"version":"","needs_daemon":"0.0.4"}"#).is_err(), "empty");
         assert!(parse_version(b"not json").is_err());
+    }
+
+    #[test]
+    fn an_installed_frontend_only_wins_over_an_older_built_in_one() {
+        assert!(outranks("1.2.62", "1.2.61"));
+        assert!(!outranks("1.2.59", "1.2.61"), "the update's own interface wins");
+        assert!(!outranks("1.2.61", "1.2.61"), "the same one: the built-in copy will do");
+        assert!(outranks("1.2.61", ""), "a built-in version that cannot be read loses");
     }
 
     #[test]

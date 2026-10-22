@@ -1096,6 +1096,37 @@ pub fn run(cfg: Config, rx: Receiver<Cmd>, tx: Sender<Cmd>, registry_cfg: Sender
                     });
                 }
 
+                ClientMsg::Changes { root } => changes_reply(&clients, id, root, false),
+                ClientMsg::ChangesReset { root } => changes_reply(&clients, id, root, true),
+
+                ClientMsg::ChangeDiff { root, path, record } => {
+                    let Some(out) = clients.get(&id).map(|c| c.tx.clone()) else { continue };
+                    std::thread::spawn(move || {
+                        let msg = match crate::changes::diff(&root, &path, record) {
+                            Ok((status, before, after)) => {
+                                ServerMsg::ChangeDiff { root, path, record, status, before, after }
+                            }
+                            Err(e) => ServerMsg::Error { code: "diff_failed".into(), message: e },
+                        };
+                        if let Ok(text) = serde_json::to_string(&msg) {
+                            let _ = out.try_send(Out::Text(text));
+                        }
+                    });
+                }
+
+                ClientMsg::ChangeRecord { root, id: rec } => {
+                    let Some(out) = clients.get(&id).map(|c| c.tx.clone()) else { continue };
+                    std::thread::spawn(move || {
+                        let msg = match crate::changes::record(&root, rec) {
+                            Ok((info, files)) => ServerMsg::ChangeRecord { root, id: rec, info, files },
+                            Err(e) => ServerMsg::Error { code: "diff_failed".into(), message: e },
+                        };
+                        if let Ok(text) = serde_json::to_string(&msg) {
+                            let _ = out.try_send(Out::Text(text));
+                        }
+                    });
+                }
+
                 ClientMsg::SaveFile { path, text } => {
                     let Some(out) = clients.get(&id).map(|c| c.tx.clone()) else { continue };
                     std::thread::spawn(move || {
@@ -2627,6 +2658,13 @@ pub fn run(cfg: Config, rx: Receiver<Cmd>, tx: Sender<Cmd>, registry_cfg: Sender
                             send_to(&clients, cid, msg.clone());
                         }
                     }
+                    // The project's last terminal: its snapshot goes, once what
+                    // changed is kept. On a thread — that means reading files.
+                    if let Some(project) = terminals.get(&term).map(|t| t.project.clone()) {
+                        if !terminals.values().any(|o| o.alive && same_path(&o.project, &project)) {
+                            std::thread::spawn(move || crate::changes::release(&project));
+                        }
+                    }
                     send_state(&cfg, &projects, &agent_names, scanned, &clients, &terminals, &dismissed, None);
                 }
             },
@@ -2821,6 +2859,7 @@ pub fn run(cfg: Config, rx: Receiver<Cmd>, tx: Sender<Cmd>, registry_cfg: Sender
                         p.kill();
                     }
                 }
+                crate::changes::save_all();
                 return;
             }
         }
@@ -2905,6 +2944,10 @@ fn spawn_terminal(
             format!("Agent `{agent}` has no session picker. Set `picker_args` for it in config.toml."),
         ));
     }
+
+    // Before the agent has had a chance to write anything: this snapshot is
+    // what "changed" is measured against.
+    crate::changes::track(project);
 
     let rest: Vec<String> = match &resume {
         Some(sid) => agent_cfg
@@ -3487,11 +3530,10 @@ fn update_msg(rel: &crate::update::Release, applying: bool) -> ServerMsg {
 
 /// The version of the interface baked into this binary.
 fn built_in_web_version() -> String {
-    crate::http::embedded_app_files()
-        .get("version.json")
-        .and_then(|raw| crate::webpack::parse_version(raw).ok())
-        .map(|v| v.version)
-        .unwrap_or_else(|| "unknown".to_string())
+    match crate::webpack::built_in_version() {
+        "" => "unknown".to_string(),
+        v => v.to_string(),
+    }
 }
 
 /// Which band of the project list a folder belongs to. Lower sorts first.
@@ -3664,6 +3706,21 @@ fn json(msg: &ServerMsg) -> Out {
 /// full history — and the PTY reader must never stall.
 /// Sent once a client has missed output, so it can draw its screens again.
 pub const RESYNC: &str = r#"{"t":"resync"}"#;
+
+/// The changed files of a project, off the actor: it walks the whole project,
+/// and a `reset` reads all of it.
+fn changes_reply(clients: &HashMap<ClientId, Client>, id: ClientId, root: String, reset: bool) {
+    let Some(out) = clients.get(&id).map(|c| c.tx.clone()) else { return };
+    std::thread::spawn(move || {
+        if reset {
+            crate::changes::reset(&root);
+        }
+        let (state, since_ms, files, history) = crate::changes::list(&root);
+        if let Ok(text) = serde_json::to_string(&ServerMsg::Changes { root, state, since_ms, files, history }) {
+            let _ = out.try_send(Out::Text(text));
+        }
+    });
+}
 
 fn send_to(clients: &HashMap<ClientId, Client>, id: ClientId, out: Out) {
     let Some(c) = clients.get(&id) else { return };

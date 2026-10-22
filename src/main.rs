@@ -7,6 +7,7 @@
 mod ansi;
 mod config;
 mod browse;
+mod changes;
 mod cloudflare;
 mod daemon;
 mod drops;

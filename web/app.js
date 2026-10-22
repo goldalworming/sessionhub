@@ -2158,7 +2158,10 @@ let treeLookedAt = 0;
 let treeTimer = null;
 function nudgeTree(m, id, wait = 1500) {
   if (m !== current || !sidePanel || treeTimer) return;
-  const view = sidePanel.tree.el;
+  // The list of changes, when it is what the Explorer column is showing, is
+  // looked at again on the same occasions as the tree.
+  const changes = sidePanel.changes.open;
+  const view = changes ? sidePanel.changes.el : sidePanel.tree.el;
   if (view.hidden || view.offsetParent === null || document.visibilityState !== 'visible') return;
   if (id !== undefined) {
     const t = state.terminals.find((x) => x.id === id);
@@ -2168,7 +2171,8 @@ function nudgeTree(m, id, wait = 1500) {
   treeTimer = setTimeout(() => {
     treeTimer = null;
     treeLookedAt = performance.now();
-    sidePanel.tree.refreshQuietly();
+    if (changes) sidePanel.changes.refresh();
+    else sidePanel.tree.refreshQuietly();
   }, wait);
 }
 
@@ -2734,6 +2738,15 @@ sidePanel = new SidePanel(el.side, {
     if (root) fileBrowser.open(root.path);
   },
   projects: () => state.projects.filter((p) => p.exists).map((p) => ({ path: p.path, name: p.name })),
+  /// The project whose changes are listed — the project, not wherever `..`
+  /// has walked the tree to.
+  project: () => explorerRoot(),
+  changes: {
+    list: (root) => conn.send({ t: 'changes', root }),
+    reset: (root) => conn.send({ t: 'changes_reset', root }),
+    diff: (root, path, record) => conn.send({ t: 'change_diff', root, path, record }),
+    record: (root, id) => conn.send({ t: 'change_record', root, id }),
+  },
   // Picking a project is the way back from wherever `..` led.
   pick: (path) => {
     pinnedProject = path;
@@ -2805,6 +2818,15 @@ conn.on.onTree = (msg) => {
   fileBrowser.update(msg);
 };
 conn.on.onShortcuts = (msg) => fileBrowser.updateShortcuts(msg);
+conn.on.onChanges = (msg, m) => {
+  if (m === current) sidePanel.changes.update(msg);
+};
+conn.on.onChangeRecord = (msg, m) => {
+  if (m === current) sidePanel.changes.showRecord(msg);
+};
+conn.on.onChangeDiff = (msg, m) => {
+  if (m === current) sidePanel.openDiff(msg);
+};
 /// `sessionhubd show PATH`. Run inside a terminal, only the browser showing
 /// that terminal moves; run anywhere else, every browser on that machine does.
 conn.on.onShow = (msg, m) => {

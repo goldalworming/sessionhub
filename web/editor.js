@@ -80,6 +80,7 @@ export class Editor {
       '<button class="esave" title="Save (Ctrl+S)">Save</button>' +
       '</div>' +
       '<div class="ebody"></div>' +
+      '<div class="ediff" hidden></div>' +
       '<div class="eimg"><img alt="" /></div>' +
       '<div class="eplace">Loading the editor…</div>';
     root.appendChild(this.el);
@@ -89,6 +90,10 @@ export class Editor {
     this.saveBtn = this.el.querySelector('.esave');
     this.moreBtn = this.el.querySelector('.emore');
     this.bodyEl = this.el.querySelector('.ebody');
+    this.diffEl = this.el.querySelector('.ediff');
+    /// scope+key -> { original, modified } models, for the diff tabs.
+    this.diffs = new Map();
+    this.differ = null;
     this.imgWrap = this.el.querySelector('.eimg');
     this.imgEl = this.imgWrap.querySelector('img');
     this.placeEl = this.el.querySelector('.eplace');
@@ -162,7 +167,7 @@ export class Editor {
         run: () => window.open(this.fileUrl(), '_blank', 'noopener'),
       });
     }
-    if (this.current) {
+    if (this.current && !meta?.diff) {
       items.push({
         label: 'Download',
         run: () => {
@@ -184,6 +189,7 @@ export class Editor {
   /// opened afterwards without being set again on each.
   applyWrap() {
     if (this.editor) this.editor.updateOptions({ wordWrap: this.wrap ? 'on' : 'off' });
+    if (this.differ) this.differ.updateOptions({ wordWrap: this.wrap ? 'on' : 'off' });
   }
 
   get open() {
@@ -239,6 +245,7 @@ export class Editor {
       return;
     }
     this.imgWrap.hidden = true;
+    this.diffEl.hidden = true;
     this.bodyEl.hidden = false;
     this.placeEl.hidden = false;
     this.placeEl.textContent = 'Loading the editor…';
@@ -275,12 +282,73 @@ export class Editor {
     this.attach(file.path);
   }
 
+  /// A changed file, its snapshot on the left and what is on disk now on the
+  /// right. Read-only: the snapshot is not something to edit, and the right side
+  /// is edited in the file's own tab.
+  async loadDiff(key, { name, real, status, before, after }) {
+    const k = this.key(key);
+    this.meta.set(k, { name, real, status, diff: true });
+    this.current = key;
+    this.el.hidden = false;
+    this.paintHead();
+    this.hideAll();
+    this.placeEl.hidden = false;
+    this.placeEl.textContent = 'Loading the editor…';
+    let monaco;
+    try {
+      monaco = await loadMonaco();
+    } catch {
+      this.placeEl.textContent = 'The editor could not be loaded.';
+      return;
+    }
+    this.monaco = monaco;
+    let pair = this.diffs.get(k);
+    if (pair) {
+      // Asked again: the agent may have written more since.
+      if (pair.original.getValue() !== before) pair.original.setValue(before);
+      if (pair.modified.getValue() !== after) pair.modified.setValue(after);
+    } else {
+      const lang = languageFor(name);
+      pair = { original: monaco.editor.createModel(before, lang), modified: monaco.editor.createModel(after, lang) };
+      this.diffs.set(k, pair);
+    }
+    if (this.current === key) this.showDiff(key);
+  }
+
+  showDiff(key) {
+    const pair = this.diffs.get(this.key(key));
+    if (!pair || !this.monaco) return;
+    this.hideAll();
+    this.diffEl.hidden = false;
+    if (!this.differ) {
+      this.differ = this.monaco.editor.createDiffEditor(this.diffEl, {
+        automaticLayout: true,
+        readOnly: true,
+        originalEditable: false,
+        theme: this.resolvedTheme(),
+        fontSize: 13,
+        fontFamily: getComputedStyle(document.documentElement).getPropertyValue('--mono').trim(),
+        minimap: { enabled: false },
+        scrollBeyondLastLine: false,
+        wordWrap: this.wrap ? 'on' : 'off',
+        // Side by side when there is room, one column with both sides
+        // interleaved when there is not — a phone, a narrow panel.
+        useInlineViewWhenSpaceIsLimited: true,
+      });
+    }
+    this.differ.setModel(pair);
+  }
+
   /// Switch to a file whose model already exists.
   select(path) {
     this.current = path;
     this.el.hidden = false;
     const meta = this.meta.get(this.key(path));
     this.paintHead();
+    if (meta?.diff) {
+      this.showDiff(path);
+      return;
+    }
     if (meta?.image) {
       this.showImage(path);
       return;
@@ -292,6 +360,7 @@ export class Editor {
       return;
     }
     this.imgWrap.hidden = true;
+    this.diffEl.hidden = true;
     this.bodyEl.hidden = false;
     this.placeEl.hidden = true;
     this.attach(path);
@@ -299,6 +368,7 @@ export class Editor {
 
   hideAll() {
     this.bodyEl.hidden = true;
+    this.diffEl.hidden = true;
     this.imgWrap.hidden = true;
     this.placeEl.hidden = true;
   }
@@ -360,6 +430,14 @@ export class Editor {
     const model = this.models.get(key);
     if (model && !model.isDisposed()) model.dispose();
     this.models.delete(key);
+    const pair = this.diffs.get(key);
+    if (pair) {
+      // Detached first: a diff editor still showing a disposed model throws.
+      if (this.differ?.getModel()?.modified === pair.modified) this.differ.setModel(null);
+      pair.original.dispose();
+      pair.modified.dispose();
+      this.diffs.delete(key);
+    }
     this.meta.delete(key);
     this.dirty.delete(key);
     if (this.current === path) this.current = null;
@@ -367,6 +445,7 @@ export class Editor {
 
   relayout() {
     if (this.editor) this.editor.layout();
+    if (this.differ) this.differ.layout();
   }
 
   // ------------------------------------------------------------------ theme
@@ -393,7 +472,7 @@ export class Editor {
   /// `src > render.h`. Shown relative to the project rather than as a full path:
   /// a prefix repeated on every row tells you nothing.
   paintCrumb() {
-    const path = this.current;
+    const path = this.meta.get(this.key(this.current))?.real || this.current;
     if (!path) {
       this.crumbEl.textContent = '';
       return;
@@ -416,6 +495,12 @@ export class Editor {
     this.paintCrumb();
     const meta = this.meta.get(this.key(this.current));
     if (!meta) return;
+    if (meta.diff) {
+      this.noteEl.textContent = `${meta.status} · read-only`;
+      this.saveBtn.disabled = true;
+      this.saveBtn.classList.remove('on');
+      return;
+    }
     const bits = [kb(meta.size)];
     if (meta.dims) bits.push(meta.dims);
     if (meta.truncated) bits.push('first 2 MB only — read-only');

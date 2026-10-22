@@ -737,7 +737,8 @@ html, body {
   width: 26px !important;
   overflow: hidden;
 }
-.pexp.folded > * { display: none; }
+.pexp.folded > *,
+.pexp.folded > #changes { display: none; }
 .pexp.folded > .foldstrip { display: flex; }
 
 .foldstrip {
@@ -2847,6 +2848,53 @@ html, body {
 .fempty { padding: 12px 10px; color: var(--muted); line-height: 1.5; font-size: 12px; }
 .fempty[hidden] { display: none; }
 
+/* What changed: the Explorer column's other view (changes.js). Not virtualised
+   like the tree — a change list is tens of rows, not tens of thousands. */
+#changes { flex: 1 1 auto; display: flex; flex-direction: column; min-height: 0; }
+#changes[hidden] { display: none; }
+.fhead .fchanges,
+.fhead .creset,
+.fhead .cback {
+  flex: 0 0 auto;
+  font: inherit;
+  font-size: 11px;
+  line-height: 1;
+  color: var(--muted);
+  background: none;
+  border: none;
+  padding: 3px 6px;
+  border-radius: var(--radius);
+  cursor: pointer;
+}
+.fhead .fchanges:hover,
+.fhead .creset:hover,
+.fhead .cback:hover { color: var(--text); background: color-mix(in srgb, var(--text) 10%, transparent); }
+.fhead .fchanges[hidden] { display: none; }
+.cnote { padding: 6px 10px; color: var(--muted); font-size: 11px; line-height: 1.4; border-bottom: 1px solid var(--border); }
+.cscroll { flex: 1 1 auto; overflow-y: auto; overflow-x: hidden; }
+.crow { padding-left: 10px; }
+.crow .cdir,
+.crec .cdir { margin-left: 6px; color: var(--muted); font-size: 11px; }
+.crow.added .fname { color: #3fa66a; }
+.crow.deleted .fname { color: var(--muted); text-decoration: line-through; }
+.ccount { flex: 0 0 auto; display: flex; gap: 4px; font-size: 11px; font-family: var(--mono); }
+.ccount b { font-weight: 500; }
+.cadd { color: #3fa66a; }
+.cdel { color: #d9534f; }
+.ptab.diff .ptname { font-style: italic; }
+.fhead .creset[hidden] { display: none; }
+.chead {
+  margin-top: 10px;
+  padding: 6px 10px 4px;
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--muted);
+  border-top: 1px solid var(--border);
+}
+.crec { padding-left: 10px; }
+.clink { padding-left: 10px; color: var(--muted); }
+
 /* ------------------------------------------------------- file browser dialog */
 /* A file-finder modal — Places/Storage, breadcrumb navigation, a sortable
    table — over whatever the tree (`#files`) is showing, not a replacement
@@ -3183,6 +3231,8 @@ html, body {
 
 .ebody { flex: 1 1 auto; min-height: 0; }
 .ebody[hidden] { display: none; }
+.ediff { flex: 1 1 auto; min-height: 0; }
+.ediff[hidden] { display: none; }
 
 /* Images are fitted to the panel and never scaled past their real size —
    blowing a 16px PNG up to panel width only turns it to mush. */
