@@ -57,6 +57,10 @@ export class FileTree {
     this.dirs = new Map();
     /// folder paths currently expanded
     this.expanded = new Set();
+    /// Which machine the two above belong to, and what every other machine's
+    /// were when it was last on screen (`setScope`).
+    this.scope = undefined;
+    this.byScope = new Map();
     /// The tree flattened into a list of rows. Recomputed only when the
     /// structure changes, not on every scroll.
     this.rows = [];
@@ -148,6 +152,22 @@ export class FileTree {
 
   /// Called when the project list or the active project changes.
   syncRoots() {
+    if (this.open) this.rebuild();
+  }
+
+  /// Move to another machine. What is cached and unfolded is that machine's
+  /// own: it used to be one set for all of them, keyed by path alone, so the
+  /// first look after a switch asked the new machine for the old one's folders
+  /// — "not found", in bursts — and then folded them away as deleted.
+  setScope(key) {
+    if (key === this.scope) return;
+    if (this.scope !== undefined) this.byScope.set(this.scope, { dirs: this.dirs, expanded: this.expanded });
+    this.scope = key;
+    const kept = this.byScope.get(key);
+    this.dirs = kept ? kept.dirs : new Map();
+    this.expanded = kept ? kept.expanded : new Set();
+    this.selected = null;
+    this.pendingReveal = null;
     if (this.open) this.rebuild();
   }
 

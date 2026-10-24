@@ -1788,6 +1788,17 @@ pub fn run_daemon(home: Option<PathBuf>) {
     init_logging();
     let started = Instant::now();
 
+    // `start` detaches with CREATE_NEW_PROCESS_GROUP, which quietly sets
+    // "ignore Ctrl+C" on the new process — and every process inherits that from
+    // its parent. Left alone, each shell in each terminal inherited it, and
+    // Ctrl+C stopped nothing that waits for the signal: `python -m
+    // http.server` ran on through every press. Agents read the key as a byte,
+    // which is why it went unnoticed.
+    #[cfg(windows)]
+    unsafe {
+        windows_sys::Win32::System::Console::SetConsoleCtrlHandler(None, 0);
+    }
+
     // Did the last update actually go in? An update that fails leaves a note
     // beside the binary, because the alternative is what happened on one
     // machine here: three updates in a row that downloaded, restarted, and came

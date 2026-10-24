@@ -318,6 +318,9 @@ function fileScope() {
 
 function syncScope() {
   if (sidePanel) sidePanel.setScope(fileScope());
+  // The tree's cache is per machine, not per project: one project's folders
+  // stay unfolded when you come back to it from another on the same disk.
+  if (sidePanel) sidePanel.tree.setScope(current?.id ?? null);
   // The picker walks the disk of the machine now showing, so it is scoped to
   // the machine alone — not to the project the Explorer happens to be on.
   if (picker) picker.setScope(current?.id || null);
@@ -438,6 +441,9 @@ function useMachine(m) {
     current.memById = memById;
     current.pinnedProject = pinnedProject;
     current.browseRoot = browseRoot;
+    // A search names that machine's projects; carried over, it filtered the
+    // next machine's list down to nothing.
+    current.filter = el.filter.value;
     current.host.hidden = true;
   }
   current = m;
@@ -447,6 +453,9 @@ function useMachine(m) {
   memById = m.memById;
   pinnedProject = m.pinnedProject;
   browseRoot = m.browseRoot || null;
+  // Not through `setFilter`: the caller draws the sidebar once it has finished.
+  el.filter.value = m.filter || '';
+  el.filterClear.hidden = el.filter.value === '';
   m.host.hidden = false;
   // After the swap, not before: the scope is read from the machine now showing.
   syncScope();
@@ -2813,7 +2822,9 @@ const sidePane = {
   },
 };
 
-conn.on.onTree = (msg) => {
+conn.on.onTree = (msg, m) => {
+  // A late answer from the machine just left belongs to its tree, not this one.
+  if (m !== current) return;
   sidePanel.tree.update(msg);
   fileBrowser.update(msg);
 };
@@ -3588,6 +3599,7 @@ conn.on.onError = (msg, m) => {
     return;
   }
   if (msg.code === 'tree_failed') {
+    if (m !== current) return;
     // A folder that failed to open is marked on its own row; a banner for that
     // would only cover what is being looked at.
     // Up to `": "`, the separator before the OS's reason — not the first
