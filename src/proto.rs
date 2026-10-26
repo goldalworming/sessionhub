@@ -41,6 +41,11 @@ pub enum ClientMsg {
         since: Option<u64>,
         #[serde(default)]
         tail: Option<u32>,
+        /// The page can inflate raw DEFLATE, so a large replay may be sent
+        /// packed (`Replay::deflate` says when it was). A daemon that predates
+        /// this ignores it and sends the bytes as they are.
+        #[serde(default)]
+        deflate: bool,
     },
     Detach {
         id: u32,
@@ -415,6 +420,10 @@ pub enum ServerMsg {
     Replay {
         id: u32,
         from: u64,
+        /// The binary frame that follows is raw DEFLATE, to be inflated before
+        /// it is written. Only ever set for an attach that asked with `deflate`.
+        #[serde(skip_serializing_if = "std::ops::Not::not")]
+        deflate: bool,
     },
     /// `sessionhubd show PATH`: put this file or folder in front of whoever
     /// is looking. `terminal` is the one that asked (its
@@ -1012,6 +1021,20 @@ pub fn encode_frame(id: u32, data: &[u8]) -> Vec<u8> {
     out
 }
 
+/// Replays below this go as they are: packing a few kilobytes saves less than
+/// the round of inflating costs the page.
+pub const DEFLATE_MIN: usize = 16 * 1024;
+
+/// A replay as raw DEFLATE, at the fastest level — this runs on the actor, so
+/// every terminal waits while it does. `None` if packing somehow fails, and the
+/// replay then goes unpacked.
+pub fn pack(data: &[u8]) -> Option<Vec<u8>> {
+    use std::io::Write;
+    let mut z = flate2::write::DeflateEncoder::new(Vec::with_capacity(data.len() / 6), flate2::Compression::fast());
+    z.write_all(data).ok()?;
+    z.finish().ok()
+}
+
 /// The inverse of `encode_frame`. `None` when the frame is shorter than the header.
 pub fn decode_frame(buf: &[u8]) -> Option<(u32, &[u8])> {
     if buf.len() < 4 {
@@ -1101,7 +1124,7 @@ mod tests {
         }
 
         let m: ClientMsg = serde_json::from_str(r#"{"t":"attach","id":3,"cols":80,"rows":24}"#).unwrap();
-        assert!(matches!(m, ClientMsg::Attach { id: 3, cols: 80, rows: 24, since: None, tail: None }));
+        assert!(matches!(m, ClientMsg::Attach { id: 3, cols: 80, rows: 24, since: None, tail: None, deflate: false }));
     }
 
     #[test]
@@ -1248,6 +1271,28 @@ mod contract {
                 }
             })
             .collect()
+    }
+
+    #[test]
+    fn a_packed_replay_inflates_to_the_same_bytes_and_is_far_smaller() {
+        use std::io::Read;
+        // Something like a full ring: an agent's redraws, colours and all.
+        let mut ring = Vec::new();
+        let mut i = 0u32;
+        while ring.len() < 2 * 1024 * 1024 {
+            ring.extend_from_slice(
+                format!("\x1b[2K\x1b[38;5;{}m● Reading src/state.rs line {i}\x1b[0m  (esc to interrupt)\r\n", i % 255).as_bytes(),
+            );
+            i += 1;
+        }
+        let started = std::time::Instant::now();
+        let packed = super::pack(&ring).expect("packs");
+        let took = started.elapsed();
+        let mut back = Vec::new();
+        flate2::read::DeflateDecoder::new(&packed[..]).read_to_end(&mut back).unwrap();
+        assert_eq!(back, ring, "inflates to exactly what went in");
+        assert!(packed.len() * 5 < ring.len(), "{} → {}", ring.len(), packed.len());
+        eprintln!("2 MB packed to {} KB in {took:?}", packed.len() / 1024);
     }
 
     #[test]

@@ -652,7 +652,7 @@ function openView(id, focus = true) {
   entry.term.reset();
   entry.pos = null;
   entry.awaitingReplay = true;
-  conn.send({ t: 'attach', id, cols: size.cols, rows: size.rows });
+  conn.send({ t: 'attach', id, cols: size.cols, rows: size.rows, deflate: !!current?.conn.inflate });
   if (focus) show(id);
 }
 
@@ -3281,7 +3281,9 @@ function requestReplay(id, entry, m = current) {
   dropHeld(entry);
   entry.awaitingReplay = true;
   const size = entry.lastSize || { cols: 80, rows: 24 };
-  const msg = { t: 'attach', id, cols: size.cols, rows: size.rows };
+  // Packed when the browser can inflate it: a full replay is 2 MB, a tenth
+  // of that packed, and over a tunnel that is most of the wait to open one.
+  const msg = { t: 'attach', id, cols: size.cols, rows: size.rows, deflate: !!m.conn.inflate };
   const tail = entry.tail;
   if (m.canResume && entry.pos != null && tail && tail.length === Math.min(entry.pos, RESUME_TAIL)) {
     msg.since = entry.pos;

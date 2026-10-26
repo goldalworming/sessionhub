@@ -377,6 +377,21 @@ contents will be drawn again in full.
 The ring buffer keeps **the last 2 MB** per terminal. A replay frame can be that
 large in a single message.
 
+A client that can inflate raw DEFLATE (a browser's `DecompressionStream`
+with `"deflate-raw"`) may say so with `"deflate":true` on `attach`. A replay of
+16 KB or more is then sent packed, and the `replay` message before it carries
+`"deflate":true`: the binary frame that follows (same 4-byte id header) holds
+DEFLATE, to be inflated before it is written. Terminal output packs about
+twentyfold, so a full ring is ~100 KB instead of 2 MB. Nothing after it may be
+drawn before it, so a client holds later frames until the replay is inflated.
+A daemon that predates this ignores the field and sends the bytes as they are,
+with no `deflate` on `replay`.
+
+```json
+{"t":"attach","id":3,"cols":120,"rows":32,"deflate":true}
+{"t":"replay","id":3,"from":0,"deflate":true}
+```
+
 ## Size rules
 
 Every client has its own size. The PTY size that applies is the **smallest cols

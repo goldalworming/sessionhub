@@ -4,6 +4,24 @@
 const RECONNECT_MIN = 500;
 const RECONNECT_MAX = 8000;
 
+/// Whether this browser can inflate raw DEFLATE (`DecompressionStream`), and so
+/// may ask for a packed replay: a full ring buffer is 2 MB, a tenth of that
+/// packed, which over a tunnel is the difference between opening a terminal at
+/// once and waiting seconds for it.
+const CAN_INFLATE = (() => {
+  try {
+    new DecompressionStream('deflate-raw');
+    return true;
+  } catch {
+    return false;
+  }
+})();
+
+function inflate(bytes) {
+  const out = new Blob([bytes]).stream().pipeThrough(new DecompressionStream('deflate-raw'));
+  return new Response(out).arrayBuffer().then((b) => new Uint8Array(b));
+}
+
 /// How often to prove the link is alive.
 ///
 /// A WebSocket does not always die loudly. A tunnel that idles it out, a phone
@@ -82,6 +100,16 @@ export class Conn {
     /// socket ended), 'silent' (nothing heard for SILENT_MS), 'probe' (a probe
     /// went unanswered) or 'dial' (the handshake never completed).
     this.lostWhy = null;
+    /// Whether to ask for packed replays. Turned off for good on this
+    /// connection if one ever fails to inflate; the replay is then asked for
+    /// again, unpacked.
+    this.inflate = CAN_INFLATE;
+    /// The terminal whose next binary frame is packed (`replay` said so).
+    this.packedFor = null;
+    /// Frames that arrived while a packed one was inflating, held so nothing
+    /// overtakes it: the replay has to be on the screen before `attached` and
+    /// the live output that follow it.
+    this.backlog = null;
     // handlers: onState, onAttached, onSize, onExit, onError, onMem,
     //           onOutput(id, bytes), onStatus(kind) — all of them take
     //           `owner` as their last argument.
@@ -98,6 +126,8 @@ export class Conn {
     );
     ws.binaryType = 'arraybuffer';
     this.ws = ws;
+    this.packedFor = null;
+    this.backlog = null;
     this.emit('onStatus', 'connecting');
 
     clearTimeout(this.dial);
@@ -128,61 +158,9 @@ export class Conn {
 
     ws.onmessage = (ev) => {
       this.lastSeen = Date.now();
-      if (typeof ev.data !== 'string') {
-        const view = new DataView(ev.data);
-        const id = view.getUint32(0, true);
-        this.emit('onOutput', id, new Uint8Array(ev.data, 4));
-        return;
-      }
-      let msg;
-      try {
-        msg = JSON.parse(ev.data);
-      } catch {
-        return;
-      }
-      if (msg.t === 'pong') {
-        // Arriving is the whole message; what it proves is that this peer
-        // answers at all, which is what lets the timeout below arm.
-        this.answers = true;
-        // And how long the round trip took — the network's share of a slow
-        // echo, for the typing telemetry.
-        if (this.pingAt) this.rtt = Math.round(performance.now() - this.pingAt);
-        this.pingAt = 0;
-        return;
-      }
-      const map = {
-        state: 'onState',
-        terminals: 'onTerminals',
-        attached: 'onAttached',
-        size: 'onSize',
-        exit: 'onExit',
-        error: 'onError',
-        mem: 'onMem',
-        load: 'onLoad',
-        config: 'onConfig',
-        agent_version: 'onAgentVersion',
-        dropped: 'onDropped',
-        dir: 'onDir',
-        tree: 'onTree',
-        changes: 'onChanges',
-        change_diff: 'onChangeDiff',
-        change_record: 'onChangeRecord',
-        show: 'onShow',
-        shortcuts: 'onShortcuts',
-        made: 'onMade',
-        file: 'onFile',
-        saved: 'onSaved',
-        last_command: 'onLastCommand',
-        remotes: 'onRemotes',
-        token_rotated: 'onTokenRotated',
-        cloudflare: 'onCloudflare',
-        local_https: 'onLocalHttps',
-        update: 'onUpdate',
-        resync: 'onResync',
-        replay: 'onReplay',
-      };
-      const fn = map[msg.t];
-      if (fn) this.emit(fn, msg);
+      if (this.ws !== ws) return;
+      if (this.backlog) this.backlog.push(ev.data);
+      else this.receive(ev.data, ws);
     };
 
     ws.onclose = () => {
@@ -198,6 +176,100 @@ export class Conn {
 
     // onerror is always followed by onclose; handling it in one place is enough.
     ws.onerror = () => {};
+  }
+
+  /// One frame from the daemon, in the order they came.
+  receive(data, ws) {
+    if (typeof data !== 'string') {
+      const view = new DataView(data);
+      const id = view.getUint32(0, true);
+      const bytes = new Uint8Array(data, 4);
+      if (this.packedFor !== id) {
+        this.emit('onOutput', id, bytes);
+        return;
+      }
+      // A packed replay. Everything behind it waits until it is on screen.
+      this.packedFor = null;
+      this.backlog = [];
+      inflate(bytes)
+        .then(
+          (out) => {
+            if (this.ws === ws) this.emit('onOutput', id, out);
+          },
+          () => {
+            // Never asked again on this connection; the screen is put right
+            // by an unpacked replay instead.
+            this.inflate = false;
+            if (this.ws === ws) this.emit('onResync', {});
+          },
+        )
+        .finally(() => {
+          if (this.ws !== ws) return;
+          const held = this.backlog;
+          this.backlog = null;
+          while (held.length) {
+            // Another packed replay among them holds the rest back again.
+            if (this.backlog) {
+              this.backlog.push(...held);
+              return;
+            }
+            this.receive(held.shift(), ws);
+          }
+        });
+      return;
+    }
+    let msg;
+    try {
+      msg = JSON.parse(data);
+    } catch {
+      return;
+    }
+    if (msg.t === 'pong') {
+      // Arriving is the whole message; what it proves is that this peer
+      // answers at all, which is what lets the timeout below arm.
+      this.answers = true;
+      // And how long the round trip took — the network's share of a slow
+      // echo, for the typing telemetry.
+      if (this.pingAt) this.rtt = Math.round(performance.now() - this.pingAt);
+      this.pingAt = 0;
+      return;
+    }
+    const map = {
+      state: 'onState',
+      terminals: 'onTerminals',
+      attached: 'onAttached',
+      size: 'onSize',
+      exit: 'onExit',
+      error: 'onError',
+      mem: 'onMem',
+      load: 'onLoad',
+      config: 'onConfig',
+      agent_version: 'onAgentVersion',
+      dropped: 'onDropped',
+      dir: 'onDir',
+      tree: 'onTree',
+      changes: 'onChanges',
+      change_diff: 'onChangeDiff',
+      change_record: 'onChangeRecord',
+      show: 'onShow',
+      shortcuts: 'onShortcuts',
+      made: 'onMade',
+      file: 'onFile',
+      saved: 'onSaved',
+      last_command: 'onLastCommand',
+      remotes: 'onRemotes',
+      token_rotated: 'onTokenRotated',
+      cloudflare: 'onCloudflare',
+      local_https: 'onLocalHttps',
+      update: 'onUpdate',
+      resync: 'onResync',
+      replay: 'onReplay',
+    };
+    // The bytes right behind a packed replay are DEFLATE; noted before the
+    // handler runs, so the frame is recognised whatever the handler does.
+    if (msg.t === 'replay' && msg.deflate) this.packedFor = msg.id;
+    const fn = map[msg.t];
+    if (fn) this.emit(fn, msg);
   }
 
   /// Send a ping on a timer, and give up on a link that has gone quiet.

@@ -12,8 +12,8 @@ use tracing::{info, warn};
 
 use crate::config::Config;
 use crate::proto::{
-    encode_frame, AgentBrief, AgentInfo, ClientMsg, MemInfo, ProjectInfo, SavedInfo, ServerMsg,
-    SessionInfo, TerminalInfo,
+    encode_frame, pack, AgentBrief, AgentInfo, ClientMsg, MemInfo, ProjectInfo, SavedInfo, ServerMsg,
+    SessionInfo, TerminalInfo, DEFLATE_MIN,
 };
 use crate::pty::{Pty, PtyEvent};
 use crate::registry;
@@ -521,7 +521,7 @@ pub fn run(cfg: Config, rx: Receiver<Cmd>, tx: Sender<Cmd>, registry_cfg: Sender
                     }
                 }
 
-                ClientMsg::Attach { id: tid, cols, rows, since, tail } => {
+                ClientMsg::Attach { id: tid, cols, rows, since, tail, deflate } => {
                     let (cols, rows) = sane_size(cols, rows);
                     match terminals.get_mut(&tid) {
                         Some(t) => {
@@ -544,15 +544,25 @@ pub fn run(cfg: Config, rx: Receiver<Cmd>, tx: Sender<Cmd>, registry_cfg: Sender
                                 Some(rest) => (rest, since.unwrap_or(0)),
                                 None => (t.ring.snapshot(), t.ring.end() - t.ring.len() as u64),
                             };
-                            send_to(&clients, id, json(&ServerMsg::Replay { id: tid, from }));
+                            // Packed when the page can inflate it and it is worth
+                            // it: terminal output shrinks about tenfold, and a
+                            // full ring was 2 MB through the tunnel on every open.
+                            let sent = bytes.len();
+                            let packed = if deflate && sent >= DEFLATE_MIN { pack(&bytes) } else { None };
+                            send_to(
+                                &clients,
+                                id,
+                                json(&ServerMsg::Replay { id: tid, from, deflate: packed.is_some() }),
+                            );
 
                             // The order is binding: the ring buffer first, then
                             // `attached`, then the live stream. Without it, opening
                             // from another device shows a blank screen until new
                             // output arrives — which is the main use case.
-                            let sent = bytes.len();
-                            if !bytes.is_empty() {
-                                send_to(&clients, id, Out::Binary(encode_frame(tid, &bytes)));
+                            let payload = packed.as_deref().unwrap_or(&bytes);
+                            let wire = payload.len();
+                            if !payload.is_empty() {
+                                send_to(&clients, id, Out::Binary(encode_frame(tid, payload)));
                             }
                             send_to(
                                 &clients,
@@ -568,6 +578,7 @@ pub fn run(cfg: Config, rx: Receiver<Cmd>, tx: Sender<Cmd>, registry_cfg: Sender
                                 terminal = tid,
                                 client = id,
                                 replay = sent,
+                                wire,
                                 resumed = since.is_some() && from == since.unwrap_or(0),
                                 "client attached"
                             );
@@ -2516,7 +2527,7 @@ pub fn run(cfg: Config, rx: Receiver<Cmd>, tx: Sender<Cmd>, registry_cfg: Sender
                             t.viewers.insert(id, (cols, rows));
                             let resized = renegotiate(t, &clients);
                             let from = t.ring.end() - t.ring.len() as u64;
-                            send_to(&clients, id, json(&ServerMsg::Replay { id: tid, from }));
+                            send_to(&clients, id, json(&ServerMsg::Replay { id: tid, from, deflate: false }));
                             if !t.ring.is_empty() {
                                 let snap = t.ring.snapshot();
                                 send_to(&clients, id, Out::Binary(encode_frame(tid, &snap)));
