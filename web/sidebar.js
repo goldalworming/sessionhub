@@ -70,6 +70,15 @@ export function displayTitle(s) {
   return alias.get(s.session_id) || s.title;
 }
 
+/// Name a session from outside the sidebar — its tab. Empty goes back to the
+/// original title.
+export function setAlias(sid, name) {
+  const v = name.trim();
+  if (v) alias.set(sid, v);
+  else alias.delete(sid);
+  saveAlias();
+}
+
 function el(tag, cls, text) {
   const n = document.createElement(tag);
   if (cls) n.className = cls;
@@ -872,12 +881,7 @@ function startRename(ctx, item, title, s) {
   const finish = (save) => {
     if (done) return;
     done = true;
-    if (save) {
-      const v = input.value.trim();
-      if (v) alias.set(s.session_id, v);
-      else alias.delete(s.session_id);
-      saveAlias();
-    }
+    if (save) setAlias(s.session_id, input.value);
     ctx.rerender();
   };
   input.onclick = (e) => e.stopPropagation();

@@ -13,7 +13,7 @@ import { Picker } from './picker.js';
 import { MachineBar } from './machines.js';
 import { SidePanel } from './sidepanel.js';
 import { FileBrowser } from './filebrowser.js';
-import { renderTree as renderSidebar, agentIcon, agentSlot } from './sidebar.js';
+import { renderTree as renderSidebar, agentIcon, agentSlot, displayTitle, setAlias } from './sidebar.js';
 import { KeyBar } from './keybar.js';
 import { LinksSheet, bufferLines, scanLinks } from './links.js';
 import { TextSheet } from './textsheet.js';
@@ -1001,12 +1001,15 @@ function visibleTerminals() {
 /// `ordering` is the tab strip's alone: moving a tab left is meaningless from a
 /// sidebar row, which is not in that strip and does not move with it.
 function terminalMenu(t, { ordering = false } = {}) {
-  const items = TAB_COLORS.map((c) => ({
+  // First, because it is what a right-click on a tab is most often for. Only
+  // where there is a session to name — the name lives on the session.
+  const items = sessionOf(t) ? [{ label: 'Rename…', run: () => renameTab(t) }] : [];
+  items.push(...TAB_COLORS.map((c) => ({
     label: c,
     swatch: c,
     on: t.color === c,
     run: () => setColor(t.id, t.color === c ? '' : c),
-  }));
+  })));
   // Only offered when there is something to clear — a permanently greyed-out
   // row teaches nothing.
   if (t.color) items.push({ label: 'No colour', swatch: '', run: () => setColor(t.id, '') });
@@ -1110,11 +1113,55 @@ function terminalLabel(t) {
   // The agent itself is never spelled out here: the tab's icon says which one,
   // the same trade the sidebar already made.
   if (t.name) return `${basename(t.project)} · ${t.name}`;
-  const session = state.projects
+  const session = sessionOf(t);
+  // The sidebar's own name for it, when you gave one — the two used to disagree.
+  const title = session ? displayTitle(session) : '';
+  return `${basename(t.project)}${title ? ' · ' + title : ''}`;
+}
+
+function sessionOf(t) {
+  return state.projects
     .flatMap((p) => p.sessions)
     .find((s) => s.session_id && s.session_id === t.session_id);
-  const title = session ? session.title : '';
-  return `${basename(t.project)}${title ? ' · ' + title : ''}`;
+}
+
+/// Rename a terminal's session in place on its tab: Enter saves, Escape
+/// cancels, empty goes back to the original title. The same name the sidebar's
+/// pencil sets, so both places always agree.
+let renaming = false;
+
+function renameTab(t) {
+  const s = sessionOf(t);
+  const name = el.tabs.querySelector(`.tab[data-id="${t.id}"] .tname`);
+  if (!s || !name) return;
+  const input = document.createElement('input');
+  input.className = 'srename';
+  input.type = 'text';
+  input.spellcheck = false;
+  input.value = displayTitle(s) === s.title ? '' : displayTitle(s);
+  input.placeholder = s.title;
+  // A draggable tab would turn selecting text with the mouse into a drag.
+  name.closest('.tab').draggable = false;
+  name.replaceWith(input);
+  renaming = true;
+  input.focus();
+  input.select();
+  let done = false;
+  const finish = (save) => {
+    if (done) return;
+    done = true;
+    renaming = false;
+    if (save) setAlias(s.session_id, input.value);
+    renderTabs();
+    renderTree();
+  };
+  input.onclick = (e) => e.stopPropagation();
+  input.onkeydown = (e) => {
+    e.stopPropagation();
+    if (e.key === 'Enter') finish(true);
+    else if (e.key === 'Escape') finish(false);
+  };
+  input.onblur = () => finish(true);
 }
 
 /// Bring a tab into view inside its strip.
@@ -1169,7 +1216,8 @@ function renderTabs() {
   // terminals touch their session files constantly, each touch a registry scan
   // and a fresh state, so without this a drag rarely lives long enough to be
   // dropped. `dragend` draws whatever was missed.
-  if (dragging !== null) return;
+  // Nor while one is being renamed: the input would vanish under the typing.
+  if (dragging !== null || renaming) return;
   el.tabs.textContent = '';
   // Tabs scroll inside their own strip; the buttons on the right stay put. In one
   // container the buttons would be pushed off screen as soon as there are many
