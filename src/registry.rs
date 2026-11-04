@@ -113,6 +113,10 @@ pub fn spawn(cfg: Config, tx: Sender<Cmd>) -> Sender<Config> {
         // How long an idle registry waits before sweeping again on its own —
         // grows while sweeps keep finding nothing, resets the moment one does.
         let mut sweep = SWEEP_MIN;
+        // When that sweep is due. Kept apart from the wait itself: the opencode
+        // clock wakes this loop every minute, and that wake used to be taken for
+        // the sweep — a full walk of every session file, every minute, forever.
+        let mut sweep_at = Instant::now() + sweep;
         loop {
             // Settings can change while the daemon is alive; a disabled agent
             // stops being scanned from the next round.
@@ -178,7 +182,7 @@ pub fn spawn(cfg: Config, tx: Sender<Cmd>) -> Sender<Config> {
                     return;
                 }
             } else {
-                debug!(ms, "registry scanned, unchanged");
+                debug!(ms, full = matches!(scan, Scan::Full), "registry scanned, unchanged");
             }
 
             // Wait for the next trigger. A config change wakes us too: adding a
@@ -192,7 +196,8 @@ pub fn spawn(cfg: Config, tx: Sender<Cmd>) -> Sender<Config> {
                 .as_ref()
                 .filter(|_| cfg.agents.get("opencode").is_some_and(|a| a.enabled))
                 .map(|o| o.due.saturating_duration_since(Instant::now()))
-                .map_or(sweep, |left| left.min(sweep));
+                .map_or(sweep_at, |left| (Instant::now() + left).min(sweep_at))
+                .saturating_duration_since(Instant::now());
             let mut from_cfg = false;
             let mut from_file = false;
             crossbeam_channel::select! {
@@ -222,18 +227,25 @@ pub fn spawn(cfg: Config, tx: Sender<Cmd>) -> Sender<Config> {
             // settings change, a watcher that lost track — walks the lot.
             scan = if from_cfg {
                 sweep = SWEEP_MIN;
+                sweep_at = Instant::now() + sweep;
                 Scan::Full
             } else if from_file {
                 sweep = SWEEP_MIN;
+                sweep_at = Instant::now() + sweep;
                 let mut p = pending.lock().unwrap_or_else(|e| e.into_inner());
                 let taken = std::mem::take(&mut *p);
                 if taken.full { Scan::Full } else { Scan::Only(taken.paths) }
+            } else if Instant::now() < sweep_at {
+                // The opencode clock, not the sweep: opencode is looked at at
+                // the top of the loop, and the session files have not moved.
+                Scan::Only(HashSet::new())
             } else {
                 // Nothing else woke us: the sweep that just ran was this
                 // safety net firing on its own. Found nothing, wait longer
                 // next time; found something, a watcher likely missed an
                 // event and the tree is worth checking again sooner.
                 sweep = if scan_changed { SWEEP_MIN } else { (sweep * 2).min(SWEEP_MAX) };
+                sweep_at = Instant::now() + sweep;
                 Scan::Full
             };
         }
