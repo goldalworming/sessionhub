@@ -37,8 +37,13 @@ const LS = {
   /// have it, and reopening the picker there landed on a red error above
   /// another machine's folder list.
   pickerPath: 'sh.picker.path.',
+  /// Per machine, `sh.layout.<machine id>`: grid on the desktop at home says
+  /// nothing about how a laptop's terminals should be laid out. The bare key is
+  /// what this machine used before, read once as its default.
   layout: 'sh.layout',
-  filesOpen: 'sh.files.open',
+  /// Per machine, `sh.files.for.<machine id>`: the terminals the file panel
+  /// was open beside.
+  filesFor: 'sh.files.for.',
   filesWidth: 'sh.files.width',
   tabOrder: 'sh.taborder',
   installOffered: 'sh.install.offered',
@@ -257,7 +262,13 @@ let terms = new Map(); // id -> { term, fit, host, awaitingReplay, lastSize }
 const isClosed = (t) => (state.dismissed_terminals || []).includes(t.id);
 let activeId = null;
 /// 'tabs' = one terminal fills the stage; 'grid' = all of them at once.
-let layout = localStorage.getItem(LS.layout) === 'grid' ? 'grid' : 'tabs';
+const layoutKey = (m) => `${LS.layout}.${m?.id || 'local'}`;
+function storedLayout(m) {
+  const own = localStorage.getItem(layoutKey(m));
+  const v = own ?? ((m?.id || 'local') === 'local' ? localStorage.getItem(LS.layout) : null);
+  return v === 'grid' ? 'grid' : 'tabs';
+}
+let layout = storedLayout(null);
 // A phone never gets the grid: nine panels on a 390 px screen is nine
 // unreadable postage stamps. The stored choice is left alone — it belongs to
 // the desktop this browser profile may also be — only the view is overruled.
@@ -271,6 +282,9 @@ let memById = new Map();
 /// Created later, but declared here so `applyTheme`, which runs earlier, can
 /// check it without tripping over the TDZ.
 let sidePanel = null;
+/// `sidePane` is defined far below; a terminal shown before then leaves the
+/// panel as it is.
+let filesPaneReady = false;
 let picker = null;
 let fileBrowser = null;
 /// The project chosen by hand, through a project name in the sidebar or the
@@ -551,7 +565,9 @@ function makeTerminal(id) {
   // the app shortcuts go.
   view.addEventListener('mousedown', () => {
     if (activeId !== id) {
+      const before = activeId;
       activeId = id;
+      syncFilesPane(before);
       paintGrid();
       renderTabs();
       renderTree();
@@ -605,7 +621,7 @@ function makeTerminal(id) {
     // took it — that this side cannot see — but a person who has to wait
     // presses later, and that shows.
     e.firstIn = true;
-    tele.track('first_input', { ms: Math.round(performance.now() - e.openedAt), machine: mname(current) });
+    if (awake(e.openedAt)) tele.track('first_input', { ms: Math.round(performance.now() - e.openedAt), machine: mname(current) });
   });
 
   const entry = { term, fit, host, view, capName, awaitingReplay: false, lastSize: null };
@@ -664,7 +680,9 @@ function show(id) {
   if (id !== activeId && activeId !== null) tele.track('switch', { how: showHow });
   showHow = 'other';
   const prev = activeId !== id ? terms.get(activeId) : null;
+  const before = activeId;
   activeId = id;
+  if (before !== id) syncFilesPane(before);
   clearDone(id);
   const grid = layout === 'grid';
   for (const [tid, e] of terms) e.host.hidden = grid ? false : tid !== id;
@@ -732,7 +750,7 @@ const GRID_MAX = 9;
 /// Switch layout, then let each terminal report its size again.
 function setLayout(next) {
   layout = next;
-  localStorage.setItem(LS.layout, next);
+  localStorage.setItem(layoutKey(current), next);
   const grid = next === 'grid';
 
   // The grid shows live terminals, not only the ones that happen to have been
@@ -890,6 +908,21 @@ async function forkSession(project, session) {
 /// When the last terminal was asked for, so its arrival — and the first
 /// output and keystroke after it — can be timed from the click.
 let spawnAskedAt = 0;
+
+/// The last moment the page was off screen, or the computer asleep. A timing
+/// that spans either measures the nap, not sessionhub: one `opened` came in at
+/// 8.5 hours. Such timings are dropped.
+let lastAway = 0;
+const awake = (since) => !document.hidden && lastAway < since;
+{
+  let tick = performance.now();
+  setInterval(() => {
+    const now = performance.now();
+    // A one-second timer that comes back five seconds late was frozen.
+    if (now - tick > 5000) lastAway = now;
+    tick = now;
+  }, 1000);
+}
 
 function spawn(project, agent, resume, pick = false) {
   // The starting size is taken from the terminal on show, or from the stage size
@@ -2691,11 +2724,11 @@ window.matchMedia('(max-width: 720px)').addEventListener('change', () => {
   // again. The stored preference itself never changes here — this is the window
   // changing shape, not the user changing their mind — so what `setLayout`
   // persists is put back.
-  const remembered = localStorage.getItem(LS.layout) === 'grid' ? 'grid' : 'tabs';
+  const remembered = storedLayout(current);
   const want = isNarrow() ? 'tabs' : remembered;
   if (want !== layout) {
     setLayout(want);
-    localStorage.setItem(LS.layout, remembered);
+    localStorage.setItem(layoutKey(current), remembered);
   } else {
     // Even with nothing to switch, the layout button appears and disappears
     // with the width.
@@ -2842,6 +2875,40 @@ sidePanel = new SidePanel(el.side, {
   layout: () => relayout(),
 });
 
+/// The terminals on this machine the file panel was open beside. Opening it
+/// for one session says nothing about the next one.
+// ponytail: keyed by terminal id, which a daemon restart reuses; key by session
+// if a stale id ever reopens the panel somewhere it should not.
+function filesFor(m) {
+  if (!m.filesFor) {
+    try {
+      m.filesFor = new Set(JSON.parse(localStorage.getItem(LS.filesFor + m.id) || '[]'));
+    } catch {
+      m.filesFor = new Set();
+    }
+  }
+  return m.filesFor;
+}
+
+function rememberFiles(open) {
+  if (activeId === null || !current) return;
+  const set = filesFor(current);
+  set.delete(activeId);
+  if (open) set.add(activeId);
+  localStorage.setItem(LS.filesFor + current.id, JSON.stringify([...set].slice(-50)));
+}
+
+/// Show or hide the panel for the terminal now on screen. Opened with nothing
+/// on screen, it belongs to the first terminal picked after.
+function syncFilesPane(before) {
+  if (!filesPaneReady || activeId === null) return;
+  if (before === null && sidePane.open) return rememberFiles(true);
+  const want = filesFor(current).has(activeId);
+  if (want === sidePane.open) return;
+  if (want) sidePane.show();
+  else sidePane.hide();
+}
+
 const sidePane = {
   get open() {
     return !el.side.hidden;
@@ -2849,7 +2916,7 @@ const sidePane = {
   show() {
     el.side.hidden = false;
     el.fsplit.hidden = false;
-    localStorage.setItem(LS.filesOpen, '1');
+    rememberFiles(true);
     // Tabs remembered from last time have been sitting there without contents,
     // deliberately: fetching one loads Monaco, and a closed panel has no use
     // for it.
@@ -2860,7 +2927,7 @@ const sidePane = {
   hide() {
     el.side.hidden = true;
     el.fsplit.hidden = true;
-    localStorage.setItem(LS.filesOpen, '0');
+    rememberFiles(false);
     relayout();
     renderTabs();
   },
@@ -2971,7 +3038,7 @@ el.fsplit.addEventListener('pointerdown', (e) => {
   el.fsplit.addEventListener('pointercancel', up);
 });
 
-if (localStorage.getItem(LS.filesOpen) === '1') sidePane.show();
+filesPaneReady = true;
 
 // ------------------------------------------------------------- new project
 
@@ -3168,7 +3235,9 @@ conn.on.onStatus = (kind, m) => {
     tele.track('conn_lost', { remote: !!m.via, machine: mname(m), why: m.conn.lostWhy || '', hidden: document.hidden });
   }
   if (m && kind === 'open' && m.lostAt) {
-    tele.track('conn_back', { remote: !!m.via, machine: mname(m), ms: Math.round(performance.now() - m.lostAt) });
+    if (awake(m.lostAt)) {
+      tele.track('conn_back', { remote: !!m.via, machine: mname(m), ms: Math.round(performance.now() - m.lostAt) });
+    }
     m.lostAt = 0;
   }
   if (kind === 'connecting') {
@@ -3500,7 +3569,7 @@ conn.on.onAttached = (msg, m) => {
   if (asked) {
     // The clock the first output and the first keystroke are read against.
     entry.openedAt = performance.now();
-    tele.track('opened', { ms: Math.round(entry.openedAt - spawnAskedAt), machine: mname(m) });
+    if (awake(spawnAskedAt)) tele.track('opened', { ms: Math.round(entry.openedAt - spawnAskedAt), machine: mname(m) });
   }
   entry.term.resize(msg.cols, msg.rows);
   if (asked) showHow = 'spawn';
@@ -3543,7 +3612,7 @@ conn.on.onOutput = (id, data, m) => {
       if (entry.keyAt && !entry.awaitingReplay) endEchoProbe(m, entry);
       if (entry.openedAt && !entry.firstOut) {
         entry.firstOut = true;
-        tele.track('first_output', { ms: Math.round(performance.now() - entry.openedAt), machine: mname(m) });
+        if (awake(entry.openedAt)) tele.track('first_output', { ms: Math.round(performance.now() - entry.openedAt), machine: mname(m) });
       }
     }
     // Activity bookkeeping — but never for the attach replay: the whole ring
@@ -3774,6 +3843,15 @@ function switchMachine(m) {
   if (m === current) return;
   tele.track('machine', { remote: !!m.via, machine: mname(m) });
   useMachine(m);
+  // Each machine keeps its own layout; a phone stays on tabs whatever it is.
+  const want = isNarrow() ? 'tabs' : storedLayout(m);
+  if (want !== layout) {
+    const keep = storedLayout(m);
+    setLayout(want);
+    localStorage.setItem(layoutKey(m), keep);
+  }
+  // And the file panel goes with the terminal on screen there.
+  syncFilesPane(undefined);
   // Settings follows the active machine; otherwise an open panel would quietly
   // be editing the wrong machine's config.
   settings.setMachine(m);
@@ -3928,6 +4006,7 @@ document.addEventListener('visibilitychange', () => {
   // Off screen the daemons send only the terminal list (`onTerminals`), and the
   // whole state again on return.
   const visible = document.visibilityState === 'visible';
+  lastAway = performance.now();
   for (const m of machines) if (m.started) m.conn.send({ t: 'visibility', visible });
   if (visible) probeLinks();
 });
