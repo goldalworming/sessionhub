@@ -13,7 +13,9 @@ import { Picker } from './picker.js';
 import { MachineBar } from './machines.js';
 import { SidePanel } from './sidepanel.js';
 import { FileBrowser } from './filebrowser.js';
-import { renderTree as renderSidebar, agentIcon, agentSlot, displayTitle, setAlias } from './sidebar.js';
+import {
+  renderTree as renderSidebar, agentIcon, agentSlot, displayTitle, setAlias, useNames, handOverNames,
+} from './sidebar.js';
 import { KeyBar } from './keybar.js';
 import { LinksSheet, bufferLines, scanLinks } from './links.js';
 import { TextSheet } from './textsheet.js';
@@ -243,6 +245,7 @@ let state = {
   saved: [],
   scanning: true,
   hidden_sessions: [],
+  session_names: null,
   dismissed_terminals: [],
 };
 const collapsed = new Set(JSON.parse(localStorage.getItem(LS.collapsed) || '[]'));
@@ -429,6 +432,7 @@ function makeMachine({ id, label, via }) {
       saved: [],
       scanning: true,
       hidden_sessions: [],
+      session_names: null,
       dismissed_terminals: [],
     },
     terms: new Map(),
@@ -473,6 +477,13 @@ function useMachine(m) {
   m.host.hidden = false;
   // After the swap, not before: the scope is read from the machine now showing.
   syncScope();
+  syncNames();
+}
+
+/// Session names come from the machine on show.
+function syncNames() {
+  useNames(state.session_names, (sid, name) =>
+    current.conn.send({ t: 'set_session_name', session_id: sid, name }));
 }
 
 // ----------------------------------------------------------------- terminal
@@ -3457,6 +3468,14 @@ conn.on.onState = (msg, m) => {
   st.scanning = msg.scanning === true;
   st.hidden_sessions = msg.hidden_sessions || [];
   st.dismissed_terminals = msg.dismissed_terminals || [];
+  // `null` from a daemon too old to keep names; this browser keeps them then.
+  st.session_names = msg.session_names || null;
+  if (st.session_names) {
+    const ids = st.projects.flatMap((p) => p.sessions.map((s) => s.session_id));
+    handOverNames(st.session_names, ids, (sid, name) =>
+      m.conn.send({ t: 'set_session_name', session_id: sid, name }));
+  }
+  if (m === current) syncNames();
   // Before anything is drawn, and for background machines too — a machine whose
   // daemon restarted while it sat in another tab must not come back holding
   // stale tabs.

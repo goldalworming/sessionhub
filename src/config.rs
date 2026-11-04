@@ -58,6 +58,11 @@ pub struct Config {
     /// convenience, so hiding one never touches its history.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub hidden_sessions: Vec<String>,
+    /// Names given to sessions by hand, by session id. Kept here for the same
+    /// reason: in one browser's storage a name was gone the moment the page
+    /// opened from another address, another browser or another device.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub session_names: BTreeMap<String, String>,
     /// Giving a local port a hostname of its own through the Cloudflare tunnel
     /// this machine is already reached by.
     #[serde(default)]
@@ -834,6 +839,7 @@ impl Default for Config {
             remotes: Vec::new(),
             saved: Vec::new(),
             hidden_sessions: Vec::new(),
+            session_names: BTreeMap::new(),
             cloudflare: Cloudflare::default(),
             applied: Vec::new(),
             remote_commands: true,

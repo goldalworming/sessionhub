@@ -170,6 +170,12 @@ pub enum ClientMsg {
         session_id: String,
         hidden: bool,
     },
+    /// Give a session a name of your own; empty takes it away. Kept on the
+    /// daemon for the same reason as `SetHiddenSession`.
+    SetSessionName {
+        session_id: String,
+        name: String,
+    },
     /// Close (or reopen) a terminal's tab without touching the terminal
     /// itself — the daemon's record of which tabs are put away, shared by
     /// every device, and gone on its own the moment the daemon restarts and
@@ -391,6 +397,10 @@ pub enum ServerMsg {
         /// the same list on every device.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         hidden_sessions: Vec<String>,
+        /// Names given to sessions by hand, by session id. Always sent, even
+        /// empty: its absence is how a page tells a daemon too old to keep
+        /// names, and keeps them in its own storage instead.
+        session_names: std::collections::BTreeMap<String, String>,
         /// Terminal ids whose tab was closed by hand this run. Never written to
         /// disk; see `SetDismissed`.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]

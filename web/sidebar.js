@@ -67,16 +67,51 @@ const bucketOpen = (path, key) =>
 /// This is the only thing that solves duplicate titles at the root — everything
 /// else only makes the duplicates easier to tell apart, not fewer.
 export function displayTitle(s) {
-  return alias.get(s.session_id) || s.title;
+  return nameOf(s.session_id) || s.title;
 }
 
-/// Name a session from outside the sidebar — its tab. Empty goes back to the
-/// original title.
+/// The names the daemon on show keeps (`session_names` in its state), and how
+/// to send it one. `null` for a daemon too old to keep names: this browser's
+/// own storage stands in, as it did before.
+let served = null;
+let sendName = null;
+export function useNames(names, send) {
+  served = names || null;
+  sendName = send;
+}
+const nameOf = (sid) => (served ? served[sid] : alias.get(sid));
+
+/// Name a session, from its row or its tab. Empty goes back to the original
+/// title.
 export function setAlias(sid, name) {
   const v = name.trim();
+  if (served) {
+    if (v) served[sid] = v;
+    else delete served[sid];
+    sendName(sid, v);
+    return;
+  }
   if (v) alias.set(sid, v);
   else alias.delete(sid);
   saveAlias();
+}
+
+/// Names this browser kept for sessions on a daemon that now keeps them
+/// itself: each is handed over once, then forgotten here. Only the ones the
+/// daemon has no name for — one set since, from anywhere, wins.
+export function handOverNames(names, sessionIds, send) {
+  let moved = false;
+  for (const sid of sessionIds) {
+    const mine = alias.get(sid);
+    if (!mine) continue;
+    if (!names[sid]) {
+      names[sid] = mine;
+      send(sid, mine);
+    }
+    alias.delete(sid);
+    moved = true;
+  }
+  if (moved) saveAlias();
 }
 
 function el(tag, cls, text) {
@@ -416,7 +451,7 @@ function recentRows(ctx, liveSession) {
         zoneRow(ctx, {
           when: absoluteDate(hit.s.updated_at),
           title: displayTitle(hit.s),
-          named: alias.has(hit.s.session_id),
+          named: !!nameOf(hit.s.session_id),
           project: hit.p.name,
           agent: hit.s.agent,
           live: true,
@@ -471,7 +506,7 @@ function recentRows(ctx, liveSession) {
       zoneRow(ctx, {
         when: absoluteDate(s.updated_at),
         title: displayTitle(s),
-        named: alias.has(s.session_id),
+        named: !!nameOf(s.session_id),
         project: p.name,
         agent: s.agent,
         live: false,
@@ -512,7 +547,7 @@ function bindRowMenu(ctx, node, id, session) {
 function sessionMenu(ctx, { p, s, inZone }) {
   const items = [
     {
-      label: alias.has(s.session_id) ? 'Rename…' : 'Give it a name…',
+      label: nameOf(s.session_id) ? 'Rename…' : 'Give it a name…',
       run: () => {
         // Looked up rather than captured: the menu is built once and may be
         // acted on after a state broadcast has replaced the tree, and a
@@ -812,7 +847,7 @@ function sessionRow(ctx, p, s, liveSession, positions) {
     agentIcon(s.agent, agentSlot(ctx.state.agents, s.agent), { live: live !== null, dim: true }),
   );
 
-  const custom = alias.get(s.session_id);
+  const custom = nameOf(s.session_id);
   const title = el('span', 'stitle' + (custom ? ' alias' : ''));
   // What gets marked is the original title; an alias is never matched against,
   // so marking it would highlight the wrong letters.
@@ -871,7 +906,7 @@ function startRename(ctx, item, title, s) {
   const input = el('input', 'srename');
   input.type = 'text';
   input.spellcheck = false;
-  input.value = alias.get(s.session_id) || '';
+  input.value = nameOf(s.session_id) || '';
   input.placeholder = s.title;
   title.replaceWith(input);
   input.focus();

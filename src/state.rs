@@ -34,6 +34,8 @@ pub const RING_CAP: usize = 2 * 1024 * 1024;
 /// cannot hand the PTY an unbounded environment block.
 const MAX_ENV_VARS: usize = 32;
 const MAX_ENV_VALUE_LEN: usize = 4096;
+/// A session name longer than this is cut: it has to fit a tab and a sidebar row.
+const NAME_MAX: usize = 120;
 
 pub enum Cmd {
     /// `page`: which open page this socket belongs to (`page_id`), when it said.
@@ -1841,6 +1843,34 @@ pub fn run(cfg: Config, rx: Receiver<Cmd>, tx: Sender<Cmd>, registry_cfg: Sender
                         continue;
                     }
                     info!(%session_id, hidden, "hidden session changed");
+                    send_state(&cfg, &projects, &agent_names, scanned, &clients, &terminals, &dismissed, None);
+                }
+
+                ClientMsg::SetSessionName { session_id, name } => {
+                    let name: String = name.trim().chars().take(NAME_MAX).collect();
+                    if session_id.is_empty() || cfg.session_names.get(&session_id).map_or(name.is_empty(), |n| *n == name) {
+                        continue;
+                    }
+                    let before = cfg.session_names.clone();
+                    if name.is_empty() {
+                        cfg.session_names.remove(&session_id);
+                    } else {
+                        cfg.session_names.insert(session_id.clone(), name);
+                    }
+                    if let Err(e) = crate::config::save(&cfg) {
+                        cfg.session_names = before;
+                        warn!(error = %e, "could not save config");
+                        send_to(
+                            &clients,
+                            id,
+                            json(&ServerMsg::Error {
+                                code: "config_write_failed".into(),
+                                message: format!("Could not write config.toml: {e}"),
+                            }),
+                        );
+                        continue;
+                    }
+                    info!(%session_id, "session name changed");
                     send_state(&cfg, &projects, &agent_names, scanned, &clients, &terminals, &dismissed, None);
                 }
 
@@ -3661,6 +3691,7 @@ fn send_state(
         saved,
         scanning: !scanned,
         hidden_sessions: cfg.hidden_sessions.clone(),
+        session_names: cfg.session_names.clone(),
         dismissed_terminals,
     });
     match only {

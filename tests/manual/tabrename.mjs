@@ -3,12 +3,10 @@
 // scratch daemon with a fake Claude session file; `claude` is stood in for by
 // cmd.exe so nothing real starts. Needs headless Chrome on :9222.
 
-import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { spawn, spawnSync } from 'node:child_process';
 
-const SP =
-  'C:/Users/user/AppData/Local/Temp/claude/C--data-code-terminal-editor2-sessionhubd/' +
-  'dc3f7268-dd21-4fc4-b388-8afd498cd912/scratchpad';
+const SP = process.env.SP || 'C:/Users/user/AppData/Local/Temp/sessionhub-tabrename';
 const BIN = process.env.SH_BIN || 'C:/data/code/terminal-editor2/sessionhubd/target/debug/sessionhubd.exe';
 const win = (p) => p.replaceAll('/', '\\');
 const PORT = 7812, TOKEN = 'uji-rename', HOME = `${SP}/renhome`, PROJ = `${SP}/renproj`;
@@ -30,11 +28,11 @@ writeFileSync(`${HOME}/.sessionhub/config.toml`,
   `port = ${PORT}\nlan_access = false\ntoken = "${TOKEN}"\nprojects = ['${win(PROJ)}']\n\n` +
   `[agents.claude]\ncommand = "cmd.exe"\nargs = ["/k"]\nresume_args = ["echo", "{session_id}"]\n`);
 
-const daemon = spawn(BIN, ['start', '--foreground', '--no-open', '--no-tray', '--home', HOME], { stdio: 'ignore' });
+let daemon = spawn(BIN, ['start', '--foreground', '--no-open', '--no-tray', '--home', HOME], { stdio: 'ignore' });
 await sleep(3500);
 const { SESSIONHUB_TERMINAL: _own, ...bare } = process.env;
 const cli = (args) => spawnSync(BIN, [...args, '--home', HOME], { encoding: 'utf8', env: bare });
-const tid = cli(['spawn', '--agent', 'claude', '--project', win(PROJ), '--resume', SID]).stdout.trim();
+let tid = cli(['spawn', '--agent', 'claude', '--project', win(PROJ), '--resume', SID]).stdout.trim();
 check(/^\d+$/.test(tid), `a terminal on the fake session (${tid})`);
 
 const targets = await (await fetch('http://127.0.0.1:9222/json')).json();
@@ -96,6 +94,41 @@ await ev(`document.activeElement.value = ''`);
 await key('Enter', 'Enter', '\r');
 await sleep(300);
 check(await ev(`(${tabName} || '').includes(${JSON.stringify(TITLE)}) && ${rowTitle} === ${JSON.stringify(TITLE)}`), 'emptying it goes back to the original title, in both');
+
+// The name lives on the daemon now: in its config, and seen from another
+// address — another origin, so none of this page's storage — after a restart.
+await openMenu();
+await ev(`[...document.querySelectorAll('#menu *')].find(n => n.textContent.trim() === 'Rename…' && n.children.length === 0).click()`);
+await sleep(200);
+await cmd('Input.insertText', { text: 'upwork' });
+await key('Enter', 'Enter', '\r');
+await sleep(800);
+const conf = () => readFileSync(`${HOME}/.sessionhub/config.toml`, 'utf8');
+check(conf().includes('[session_names]') && conf().includes('upwork'), 'config.toml keeps the name');
+cli(['stop']);
+daemon.kill();
+await sleep(1500);
+daemon = spawn(BIN, ['start', '--foreground', '--no-open', '--no-tray', '--home', HOME], { stdio: 'ignore' });
+await sleep(3500);
+tid = cli(['spawn', '--agent', 'claude', '--project', win(PROJ), '--resume', SID]).stdout.trim();
+await cmd('Page.navigate', { url: `http://localhost:${PORT}/?token=${TOKEN}&t=${tid}` });
+check(await waitFor(`(${tabName.replace(/data-id="\d+"/, `data-id="${tid}"`)} || '').endsWith('· upwork')`, 15000),
+  'after a daemon restart, from another address, the tab still reads it');
+
+// A name this browser kept before the daemon could: handed over, once.
+await ev(`localStorage.setItem('sh.alias', JSON.stringify({ ${JSON.stringify(SID)}: 'lokal lama' }))`);
+cli(['stop']);
+daemon.kill();
+await sleep(1500);
+writeFileSync(`${HOME}/.sessionhub/config.toml`, conf().replace(/\[session_names\][^\[]*/, ''));
+daemon = spawn(BIN, ['start', '--foreground', '--no-open', '--no-tray', '--home', HOME], { stdio: 'ignore' });
+await sleep(3500);
+await cmd('Page.reload');
+check(await waitFor(`document.querySelector('[data-sid="${SID}"] .stitle')?.textContent === 'lokal lama'`, 15000),
+  'a name kept in this browser shows');
+await sleep(800);
+check(conf().includes('lokal lama') && await ev(`!JSON.parse(localStorage.getItem('sh.alias') || '{}')[${JSON.stringify(SID)}]`),
+  'and is handed to the daemon, then forgotten here');
 
 cli(['stop']);
 daemon.kill();
