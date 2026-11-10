@@ -3254,6 +3254,13 @@ html, body {
   background-position: 0 0, 0 8px, 8px -8px, -8px 0;
 }
 .eimg[hidden] { display: none; }
+.eaudio { flex: 1 1 auto; display: grid; place-items: center; padding: 12px; }
+.eaudio[hidden] { display: none; }
+.eaudio { align-content: center; gap: 10px; }
+.eaudio audio { width: min(480px, 100%); }
+.espeed { display: flex; gap: 6px; justify-content: center; }
+.espeed button { font: inherit; font-size: 12px; padding: 3px 10px; border: 1px solid var(--border); border-radius: 999px; background: transparent; color: var(--muted); cursor: pointer; }
+.espeed button.on { color: var(--text); border-color: var(--text); }
 .eimg img {
   max-width: 100%;
   max-height: 100%;

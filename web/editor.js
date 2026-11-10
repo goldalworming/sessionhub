@@ -15,9 +15,13 @@ const LS_THEME = 'sh.editor.theme';
 /// fold is a question about the window you are reading it in, and a phone and a
 /// laptop do not want the same answer.
 const LS_WRAP = 'sh.editor.wrap';
-/// Dark by default, kept apart from the app theme: code is read for long
-/// stretches, and that is a different preference from the rest of the interface.
+/// Kept apart from the app theme, since code is read for long stretches and
+/// that can be a different preference; but it follows the app until set.
 const THEMES = ['dark', 'light', 'auto'];
+/// Sound a browser plays in an <audio> as it is.
+const AUDIO = /.(mp3|wav|ogg|oga|opus|m4a|aac|flac)$/i;
+const SPEEDS = [1, 1.25, 1.5, 2];
+const LS_SPEED = 'sh.audio.speed';
 
 let loading = null;
 
@@ -43,8 +47,13 @@ export class Editor {
   /// `onSave(path, text)` saves a file. `appTheme()` returns the app theme, used
   /// when the editor mode is "auto". `onDirty()` is called when the saved/dirty
   /// state changes, so the tab bar can mark it.
-  constructor(root, { save, theme, dirty, projectRoot, via, menu }) {
+  constructor(root, { save, theme, dirty, projectRoot, via, menu, reload }) {
     this.onSave = save;
+    /// Asks the daemon for the file again; its answer comes back via `load`.
+    this.onReload = reload;
+    /// The file a reload was asked for: its answer replaces the copy here
+    /// even when that copy has edits, which an ordinary reopen keeps.
+    this.forceReload = null;
     this.appTheme = theme;
     this.onDirty = dirty;
     this.projectRoot = projectRoot;
@@ -66,7 +75,7 @@ export class Editor {
     this.dirty = new Set();
     this.mode = THEMES.includes(localStorage.getItem(LS_THEME))
       ? localStorage.getItem(LS_THEME)
-      : 'dark';
+      : 'auto';
     this.wrap = localStorage.getItem(LS_WRAP) === 'on';
 
     this.el = document.createElement('div');
@@ -82,6 +91,8 @@ export class Editor {
       '<div class="ebody"></div>' +
       '<div class="ediff" hidden></div>' +
       '<div class="eimg"><img alt="" /></div>' +
+      '<div class="eaudio" hidden><audio controls preload="metadata"></audio>' +
+      `<div class="espeed">${SPEEDS.map((s) => `<button data-speed="${s}">${s}×</button>`).join('')}</div></div>` +
       '<div class="eplace">Loading the editor…</div>';
     root.appendChild(this.el);
 
@@ -97,6 +108,26 @@ export class Editor {
     this.imgWrap = this.el.querySelector('.eimg');
     this.imgEl = this.imgWrap.querySelector('img');
     this.placeEl = this.el.querySelector('.eplace');
+    this.audioWrap = this.el.querySelector('.eaudio');
+    this.audioEl = this.audioWrap.querySelector('audio');
+    // Faster without the chipmunk voice: the pitch is kept as the speed
+    // changes. `default…` too, because a new `src` resets the rate to it.
+    this.audioEl.preservesPitch = true;
+    this.audioEl.webkitPreservesPitch = true;
+    const setSpeed = (s) => {
+      this.audioEl.defaultPlaybackRate = this.audioEl.playbackRate = s;
+      for (const b of this.audioWrap.querySelectorAll('[data-speed]')) {
+        b.classList.toggle('on', Number(b.dataset.speed) === s);
+      }
+    };
+    const kept = Number(localStorage.getItem(LS_SPEED));
+    setSpeed(SPEEDS.includes(kept) ? kept : 1);
+    this.audioWrap.querySelector('.espeed').onclick = (e) => {
+      const s = Number(e.target.dataset?.speed);
+      if (!s) return;
+      setSpeed(s);
+      localStorage.setItem(LS_SPEED, String(s));
+    };
 
     // The real dimensions are only known once the image has loaded; that is the
     // detail most often wanted when opening an asset.
@@ -106,6 +137,13 @@ export class Editor {
         meta.dims = `${this.imgEl.naturalWidth}×${this.imgEl.naturalHeight}`;
         this.paintHead();
       }
+    };
+    // Too large for /api/file (25 MB), or a format this browser cannot play.
+    this.audioEl.onerror = () => {
+      if (this.audioWrap.hidden || !this.audioEl.getAttribute('src')) return;
+      this.audioWrap.hidden = true;
+      this.placeEl.hidden = false;
+      this.placeEl.textContent = 'This sound could not be played here — download it from ⋯ instead.';
     };
     this.imgEl.onerror = () => {
       this.imgWrap.hidden = true;
@@ -124,10 +162,10 @@ export class Editor {
 
   /// The URL `/api/file` answers this path on, carrying `via` when it belongs
   /// to a paired machine rather than this one.
-  fileUrl() {
+  fileUrl(path = this.current) {
     const via = this.machineVia();
     return (
-      `/api/file?path=${encodeURIComponent(this.current)}` +
+      `/api/file?path=${encodeURIComponent(path)}` +
       (via ? `&via=${encodeURIComponent(via)}` : '')
     );
   }
@@ -157,6 +195,18 @@ export class Editor {
           this.mode = THEMES[(THEMES.indexOf(this.mode) + 1) % THEMES.length];
           localStorage.setItem(LS_THEME, this.mode);
           this.applyTheme();
+        },
+      });
+    }
+    // An agent rewriting a file you are reading is the usual reason: the
+    // tab still shows the copy from when it was opened.
+    if (this.current && !meta?.diff && !meta?.binary && !meta?.image) {
+      const key = this.key(this.current);
+      items.push({
+        label: this.dirty.has(key) ? 'Reload from disk, dropping edits' : 'Reload from disk',
+        run: () => {
+          this.forceReload = key;
+          this.onReload(this.current);
         },
       });
     }
@@ -229,6 +279,7 @@ export class Editor {
       truncated: file.truncated,
       binary: file.binary,
       image: file.image,
+      audio: file.binary && AUDIO.test(file.name),
     });
     this.current = file.path;
     this.el.hidden = false;
@@ -236,6 +287,10 @@ export class Editor {
 
     if (file.image) {
       this.showImage(file.path);
+      return;
+    }
+    if (this.meta.get(key).audio) {
+      this.showAudio(file.path, true);
       return;
     }
     if (file.binary) {
@@ -275,10 +330,21 @@ export class Editor {
         if (this.current === file.path) this.paintHead();
       });
       this.models.set(key, model);
-    } else if (model.getValue() !== file.text && !this.dirty.has(key)) {
-      // The file changed on disk while our copy was still unedited.
-      model.setValue(file.text);
+    } else if (this.forceReload === key || !this.dirty.has(key)) {
+      // The file changed on disk while our copy was still unedited, or a
+      // reload was asked for. Where you were reading stays where it was.
+      if (model.getValue() !== file.text) {
+        const view = this.editor.getModel() === model ? this.editor.saveViewState() : null;
+        model.setValue(file.text);
+        if (view) this.editor.restoreViewState(view);
+      }
+      // `setValue` counts as an edit; what is showing is what is on disk.
+      if (this.dirty.delete(key)) {
+        this.onDirty();
+        this.paintHead();
+      }
     }
+    if (this.forceReload === key) this.forceReload = null;
     this.attach(file.path);
   }
 
@@ -353,6 +419,10 @@ export class Editor {
       this.showImage(path);
       return;
     }
+    if (meta?.audio) {
+      this.showAudio(path);
+      return;
+    }
     if (meta?.binary) {
       this.hideAll();
       this.placeEl.hidden = false;
@@ -370,6 +440,7 @@ export class Editor {
     this.bodyEl.hidden = true;
     this.diffEl.hidden = true;
     this.imgWrap.hidden = true;
+    this.audioWrap.hidden = true;
     this.placeEl.hidden = true;
   }
 
@@ -395,6 +466,19 @@ export class Editor {
       (via ? `&via=${encodeURIComponent(via)}` : '');
     if (this.imgEl.getAttribute('src') !== url) this.imgEl.src = url;
     this.imgEl.alt = this.meta.get(this.key(path))?.name || '';
+  }
+
+  /// Played straight from `/api/file`, like an image. Going to another tab
+  /// leaves it playing; closing its tab or opening other sound stops it.
+  /// `fresh` is a reopen, which may be a new version of the file.
+  showAudio(path, fresh = false) {
+    this.hideAll();
+    this.audioWrap.hidden = false;
+    const url = this.fileUrl(path);
+    if (fresh || this.audioEl.dataset.path !== path) {
+      this.audioEl.dataset.path = path;
+      this.audioEl.src = fresh ? `${url}&r=${Date.now()}` : url;
+    }
   }
 
   attach(path) {
@@ -437,6 +521,11 @@ export class Editor {
       pair.original.dispose();
       pair.modified.dispose();
       this.diffs.delete(key);
+    }
+    if (this.audioEl.dataset.path === path) {
+      this.audioEl.pause();
+      this.audioEl.removeAttribute('src');
+      delete this.audioEl.dataset.path;
     }
     this.meta.delete(key);
     this.dirty.delete(key);

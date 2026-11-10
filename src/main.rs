@@ -1799,6 +1799,12 @@ pub fn run_daemon(home: Option<PathBuf>) {
         windows_sys::Win32::System::Console::SetConsoleCtrlHandler(None, 0);
     }
 
+    // A build with every core busy must not make typing lag: the daemon carries
+    // each keystroke in and its echo back (see `pty::raise_priority`).
+    if cfg.raise_priority && cfg!(windows) && !pty::raise_own_priority() {
+        tracing::warn!("could not raise the daemon's priority");
+    }
+
     // Did the last update actually go in? An update that fails leaves a note
     // beside the binary, because the alternative is what happened on one
     // machine here: three updates in a row that downloaded, restarted, and came

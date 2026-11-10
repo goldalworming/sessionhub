@@ -825,6 +825,7 @@ pub fn dial_ws(r: &Remote, page: Option<&str>) -> Result<TcpStream, String> {
     let req = format!(
         "GET /ws?token={}{} HTTP/1.1\r\n\
          Host: {}\r\n\
+         User-Agent: sessionhubd\r\n\
          Upgrade: websocket\r\n\
          Connection: Upgrade\r\n\
          Sec-WebSocket-Key: {key}\r\n\

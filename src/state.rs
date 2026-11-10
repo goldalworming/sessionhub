@@ -39,10 +39,14 @@ const NAME_MAX: usize = 120;
 
 pub enum Cmd {
     /// `page`: which open page this socket belongs to (`page_id`), when it said.
-    ClientUp { id: ClientId, tx: Sender<Out>, rx: Receiver<Out>, page: Option<String> },
-    ClientDown { id: ClientId },
+    /// `kind`: what opened it, coarsely (`http::client_kind`), for telemetry.
+    ClientUp { id: ClientId, tx: Sender<Out>, rx: Receiver<Out>, page: Option<String>, kind: Option<&'static str> },
+    /// `why`: how the connection ended, as its reader saw it (`http::read_loop`).
+    ClientDown { id: ClientId, why: &'static str },
     ClientMsg { id: ClientId, msg: ClientMsg },
-    ClientInput { term: u32, data: Vec<u8> },
+    /// `at`: when a browser's keystroke arrived, for `Lags`; `None` for
+    /// input the daemon makes up itself.
+    ClientInput { term: u32, data: Vec<u8>, at: Option<Instant> },
     /// A file dragged from the browser. `term` only decides which terminal the
     /// path is later offered back to.
     ClientDrop { id: ClientId, term: u32, name: String, data: Vec<u8> },
@@ -52,7 +56,8 @@ pub enum Cmd {
     /// so for a moment the old process and the new one both answer to it. The
     /// old one's dying EOF would otherwise mark the new terminal dead the
     /// instant it started.
-    Pty { term: u32, run: u64, event: PtyEvent },
+    /// `at`: when it was read from the PTY, for `Lags`.
+    Pty { term: u32, run: u64, event: PtyEvent, at: Instant },
     /// The latest registry scan from the registry thread.
     Registry(Vec<ProjectInfo>),
     /// The latest reading from the machine sampler.
@@ -228,6 +233,66 @@ struct Client {
     hidden: std::cell::Cell<bool>,
     /// The open page this socket belongs to (`Cmd::ClientUp`).
     page: Option<String>,
+    /// Only for `client_close`, which is what tells a flaky link from a page
+    /// that closed on purpose.
+    since: Instant,
+    kind: Option<&'static str>,
+}
+
+/// How often `daemon_lag` is written, while there is anything to say.
+const LAG_EVERY: Duration = Duration::from_secs(60);
+
+/// The daemon's own part of a keystroke's echo, in microseconds, between two
+/// `daemon_lag` reports: summed up, never one event per keystroke. Mostly the
+/// wait for the actor thread, which is what a machine with every core busy
+/// stretches. The web's `typing` event times the whole round trip.
+#[derive(Default)]
+struct Lags {
+    n: u32,
+    max: u32,
+    /// The first `LAG_KEEP` of the interval, for the percentiles.
+    some: Vec<u32>,
+}
+
+const LAG_KEEP: usize = 4096;
+
+impl Lags {
+    fn add(&mut self, d: Duration) {
+        let us = d.as_micros().min(u32::MAX as u128) as u32;
+        self.n += 1;
+        self.max = self.max.max(us);
+        if self.some.len() < LAG_KEEP {
+            self.some.push(us);
+        }
+    }
+
+    /// `{n, p50, p90, max}` in microseconds, and start over.
+    fn take(&mut self) -> serde_json::Value {
+        let mut v = std::mem::take(&mut self.some);
+        v.sort_unstable();
+        let at = |q: usize| v.get(v.len().saturating_sub(1) * q / 100).copied().unwrap_or(0);
+        let out = serde_json::json!({ "n": self.n, "p50": at(50), "p90": at(90), "max": self.max });
+        *self = Lags::default();
+        out
+    }
+}
+
+/// Record a client going away, with what is needed to tell why connections
+/// end — how long it lived, what it was, and whether it was out of sight.
+fn track_close(id: ClientId, c: &Client, why: &str, left: usize) {
+    info!(client = id, why, "client disconnected");
+    crate::telemetry::track(
+        "client_close",
+        serde_json::json!({
+            "client": id,
+            "clients": left,
+            "why": why,
+            "ms": c.since.elapsed().as_millis() as u64,
+            "hidden": c.hidden.get(),
+            "via": c.kind == Some("relay"),
+            "kind": c.kind,
+        }),
+    );
 }
 
 /// Forget a client: no longer a viewer of anything, and the terminals it held
@@ -248,7 +313,15 @@ fn drop_client(id: ClientId, clients: &mut HashMap<ClientId, Client>, terminals:
 
 impl Client {
     fn new(tx: Sender<Out>, rx: Receiver<Out>) -> Self {
-        Client { tx, rx, lost: std::cell::Cell::new(false), hidden: std::cell::Cell::new(false), page: None }
+        Client {
+            tx,
+            rx,
+            lost: std::cell::Cell::new(false),
+            hidden: std::cell::Cell::new(false),
+            page: None,
+            since: Instant::now(),
+            kind: None,
+        }
     }
 }
 
@@ -325,6 +398,8 @@ pub fn run(cfg: Config, rx: Receiver<Cmd>, tx: Sender<Cmd>, registry_cfg: Sender
     // anything by the time it would matter.
     let mut dismissed: HashSet<u32> = HashSet::new();
     let mut next_term: u32 = 1;
+    // Keystroke in → written to the PTY, and PTY read → queued for a socket.
+    let (mut lag_in, mut lag_out, mut lag_since) = (Lags::default(), Lags::default(), Instant::now());
     // Never reused, so a message from a replaced process can always be told
     // apart from one belonging to the terminal that replaced it.
     let mut next_run: u64 = 1;
@@ -399,7 +474,7 @@ pub fn run(cfg: Config, rx: Receiver<Cmd>, tx: Sender<Cmd>, registry_cfg: Sender
             },
         };
         match cmd {
-            Cmd::ClientUp { id, tx, rx, page } => {
+            Cmd::ClientUp { id, tx, rx, page, kind } => {
                 // The same page connecting again means its earlier socket is
                 // dead, whether or not that has reached us yet: through a tunnel
                 // a phone's dropped connection can take minutes to be noticed,
@@ -409,12 +484,17 @@ pub fn run(cfg: Config, rx: Receiver<Cmd>, tx: Sender<Cmd>, registry_cfg: Sender
                     let stale: Vec<ClientId> =
                         clients.iter().filter(|(_, c)| c.page.as_deref() == Some(p)).map(|(cid, _)| *cid).collect();
                     for old in stale {
+                        // Its own `ClientDown` will find nothing, so this is its close.
+                        if let Some(c) = clients.get(&old) {
+                            track_close(old, c, "replaced", clients.len() - 1);
+                        }
                         drop_client(old, &mut clients, &mut terminals);
                         info!(client = old, replaced_by = id, "client replaced by its page reconnecting");
                     }
                 }
                 let mut client = Client::new(tx, rx);
                 client.page = page;
+                client.kind = kind;
                 clients.insert(id, client);
                 info!(client = id, "client connected");
                 crate::telemetry::track("client_open", serde_json::json!({ "client": id, "clients": clients.len() }));
@@ -424,14 +504,11 @@ pub fn run(cfg: Config, rx: Receiver<Cmd>, tx: Sender<Cmd>, registry_cfg: Sender
                 }
             }
 
-            Cmd::ClientDown { id } => {
+            Cmd::ClientDown { id, why } => {
                 // Already gone when its page reconnected first (`ClientUp`).
-                if !clients.contains_key(&id) {
-                    continue;
-                }
+                let Some(c) = clients.get(&id) else { continue };
+                track_close(id, c, why, clients.len() - 1);
                 drop_client(id, &mut clients, &mut terminals);
-                info!(client = id, "client disconnected");
-                crate::telemetry::track("client_close", serde_json::json!({ "client": id, "clients": clients.len() }));
             }
 
             Cmd::ClientMsg { id, msg } => match msg {
@@ -2610,9 +2687,12 @@ pub fn run(cfg: Config, rx: Receiver<Cmd>, tx: Sender<Cmd>, registry_cfg: Sender
                 }
             },
 
-            Cmd::ClientInput { term, data } => {
+            Cmd::ClientInput { term, data, at } => {
                 if let Some(t) = terminals.get_mut(&term) {
                     deliver_input(t, &data);
+                    if let Some(at) = at {
+                        lag_in.add(at.elapsed());
+                    }
                 }
             }
 
@@ -2644,13 +2724,16 @@ pub fn run(cfg: Config, rx: Receiver<Cmd>, tx: Sender<Cmd>, registry_cfg: Sender
                 });
             }
 
-            Cmd::Pty { term, run, event } => match event {
+            Cmd::Pty { term, run, event, at } => match event {
                 PtyEvent::Output(data) => {
                     if let Some(t) = terminals.get_mut(&term).filter(|t| t.run == run) {
                         t.ring.push(&data);
                         let frame = encode_frame(term, &data);
                         for cid in t.viewers.keys() {
                             send_to(&clients, *cid, Out::Binary(frame.clone()));
+                        }
+                        if !t.viewers.is_empty() {
+                            lag_out.add(at.elapsed());
                         }
                         // The shell has spoken, so it is running and reading.
                         // This is the signal a fixed delay could only guess at:
@@ -2665,7 +2748,7 @@ pub fn run(cfg: Config, rx: Receiver<Cmd>, tx: Sender<Cmd>, registry_cfg: Sender
                                 std::thread::sleep(std::time::Duration::from_millis(400));
                                 let mut data = cmd.into_bytes();
                                 data.push(b'\r');
-                                let _ = tx.send(Cmd::ClientInput { term, data });
+                                let _ = tx.send(Cmd::ClientInput { term, data, at: None });
                             });
                         }
                     }
@@ -2740,6 +2823,18 @@ pub fn run(cfg: Config, rx: Receiver<Cmd>, tx: Sender<Cmd>, registry_cfg: Sender
 
             Cmd::Load { cpu_percent, ram_used, ram_total } => {
                 start_background_sample(&terminals, &tx);
+                if lag_since.elapsed() >= LAG_EVERY {
+                    if lag_in.n + lag_out.n > 0 {
+                        crate::telemetry::track(
+                            "daemon_lag",
+                            serde_json::json!({
+                                "input": lag_in.take(), "output": lag_out.take(),
+                                "cpu": cpu_percent.round(), "raised": cfg.raise_priority,
+                            }),
+                        );
+                    }
+                    lag_since = Instant::now();
+                }
                 // This reading every couple of seconds is also the clock that
                 // lets a terminal grow back once a viewer has stayed away.
                 let now = Instant::now();
@@ -2895,6 +2990,10 @@ pub fn run(cfg: Config, rx: Receiver<Cmd>, tx: Sender<Cmd>, registry_cfg: Sender
 
             Cmd::Shutdown => {
                 info!(terminals = terminals.len(), "shutdown requested");
+                // Their `ClientDown` would arrive after the actor is gone.
+                for (id, c) in &clients {
+                    track_close(*id, c, "shutdown", 0);
+                }
                 for t in terminals.values_mut() {
                     if let Some(p) = t.pty.as_mut() {
                         p.kill();
@@ -3110,10 +3209,15 @@ fn build_terminal(
         rows,
         &env,
         Arc::new(move |event| {
-            let _ = sink_tx.send(Cmd::Pty { term: id, run, event });
+            let _ = sink_tx.send(Cmd::Pty { term: id, run, event, at: Instant::now() });
         }),
     )
     .map_err(|e| (e.code().to_string(), e.to_string()))?;
+    if cfg.raise_priority {
+        if let Some(pid) = pty.pid() {
+            crate::pty::raise_priority(pid);
+        }
+    }
 
     Ok(Terminal {
         id,

@@ -86,6 +86,11 @@ pub struct Config {
     /// switch, and every command that runs is written to the log.
     #[serde(default = "yes")]
     pub remote_commands: bool,
+    /// Run the daemon and each terminal's own process above normal priority
+    /// (Windows only), so typing still echoes while a build has every core.
+    /// What a terminal starts — the build itself — stays at normal.
+    #[serde(default = "yes")]
+    pub raise_priority: bool,
     /// A local record of what is done with sessionhub — see `telemetry.rs`.
     #[serde(default)]
     pub telemetry: Telemetry,
@@ -843,6 +848,7 @@ impl Default for Config {
             cloudflare: Cloudflare::default(),
             applied: Vec::new(),
             remote_commands: true,
+            raise_priority: true,
             telemetry: Telemetry::default(),
         }
     }

@@ -12,6 +12,16 @@ import { mark } from './mark.js';
 /// How long after the last keystroke the typed path is looked up.
 const TYPE_MS = 500;
 
+/// The folder above `path`, by its spelling alone; `null` at the top (`C:\`,
+/// `/`) or for nothing at all.
+export function parentOf(path) {
+  const p = path.replace(/[\\/]+$/, '');
+  const cut = Math.max(p.lastIndexOf('/'), p.lastIndexOf('\\'));
+  if (cut < 0) return null;
+  // `C:\x` → `C:\`, `/x` → `/`: the root keeps its separator.
+  return cut === 0 || p[cut - 1] === ':' ? p.slice(0, cut + 1) : p.slice(0, cut);
+}
+
 /// Do two spellings name the same folder? Trailing separators and slash
 /// direction never matter; case only on a drive-letter path, where the
 /// filesystem does not care either. Good enough to decide whether the box
@@ -204,7 +214,7 @@ export class Picker {
     const at = this.startAt;
     this.startAt = null;
     // Empty means "start from home" — the daemon decides where that is.
-    this.on.browse(at || this.dir?.path || this.on.recall() || '');
+    this.ask(at || this.dir?.path || this.on.recall() || '');
   }
 
   /// Open already aimed at `path` — the folder is known (picked in the file
@@ -223,6 +233,12 @@ export class Picker {
     this.note.textContent = 'Loading…';
     this.retried = false;
     this.disarmMkdir();
+    this.ask(path);
+  }
+
+  /// Every folder lookup goes through here, so `fail` knows which one failed.
+  ask(path) {
+    this.asked = path;
     this.on.browse(path);
   }
 
@@ -341,10 +357,17 @@ export class Picker {
     this.typed = false;
     // Nothing on screen and the folder asked for is gone — a remembered one
     // since deleted. An error above an empty panel leaves nowhere to click, so
-    // home is tried once; that one always exists.
-    if (!this.dir && !this.retried) {
-      this.retried = true;
-      this.on.browse('');
+    // the folder above is tried, and so on up to the nearest one that exists:
+    // that is where the next project usually goes, and once it answers it is
+    // what is remembered instead. Each step is shorter, so this ends; past the
+    // top, home is tried once.
+    if (!this.dir) {
+      const up = parentOf(this.asked || '');
+      if (up) this.ask(up);
+      else if (!this.retried) {
+        this.retried = true;
+        this.ask('');
+      }
     }
   }
 

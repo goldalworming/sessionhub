@@ -1274,12 +1274,16 @@ fn upgrade(
     // The actor holds the sending end; the copy of the receiving end exists only
     // to drop the oldest chunk when the queue is full.
     if tx
-        .send(Cmd::ClientUp { id, tx: out_tx.clone(), rx: out_rx.clone(), page: page_id(&req) })
+        .send(Cmd::ClientUp { id, tx: out_tx.clone(), rx: out_rx.clone(), page: page_id(&req), kind: client_kind(&req) })
         .is_err()
     {
         return Ok(());
     }
 
+    // The writer gives up first when the peer stops taking bytes; the reader
+    // then only sees its own socket shut down, and needs telling why.
+    let write_failed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let write_failed_w = write_failed.clone();
     let writer = thread::spawn(move || {
         let mut ws = WebSocket::from_raw_socket(sock, Role::Server, None);
         for out in out_rx.iter() {
@@ -1289,6 +1293,7 @@ fn upgrade(
                 Out::Pong(p) => Message::Pong(p.into()),
             };
             if ws.write(msg).is_err() || ws.flush().is_err() {
+                write_failed_w.store(true, std::sync::atomic::Ordering::Relaxed);
                 break;
             }
         }
@@ -1298,12 +1303,15 @@ fn upgrade(
         let _ = shutdown_sock.shutdown(Shutdown::Both);
     });
 
-    read_loop(read_sock, &tx, &out_tx, id, limit);
+    let mut why = read_loop(read_sock, &tx, &out_tx, id, limit);
+    if write_failed.load(std::sync::atomic::Ordering::Relaxed) {
+        why = "write_failed";
+    }
 
     // The reader's Sender is released here; once the actor releases its own on
     // ClientDown, the writer thread leaves by itself without any flag.
     drop(out_tx);
-    let _ = tx.send(Cmd::ClientDown { id });
+    let _ = tx.send(Cmd::ClientDown { id, why });
     let _ = writer.join();
     Ok(())
 }
@@ -1331,7 +1339,22 @@ fn drop_limit(cfg: &Config) -> usize {
 /// thaws it reconnects on its own, exactly as after any dropped link.
 const IDLE_LIMIT: Duration = Duration::from_secs(150);
 
-fn read_loop(sock: TcpStream, tx: &Sender<Cmd>, out: &Sender<Out>, id: u64, limit: usize) {
+/// What sort of thing opened a socket, from its User-Agent — coarse on purpose,
+/// so telemetry can tell a phone from a desktop without keeping the string.
+/// Another machine's daemon relaying a tab names itself (`remote::dial_ws`).
+fn client_kind(req: &Request) -> Option<&'static str> {
+    let ua = req.header("user-agent")?;
+    Some(if ua.starts_with("sessionhubd") {
+        "relay"
+    } else if ["Mobi", "Android", "iPhone", "iPad"].iter().any(|m| ua.contains(m)) {
+        "mobile"
+    } else {
+        "desktop"
+    })
+}
+
+/// Reads until the connection ends, and says why it did, as the daemon saw it.
+fn read_loop(sock: TcpStream, tx: &Sender<Cmd>, out: &Sender<Out>, id: u64, limit: usize) -> &'static str {
     // A read that waits past this fails, and the loop below ends on any error.
     let _ = sock.set_read_timeout(Some(IDLE_LIMIT));
     let conf = tungstenite::protocol::WebSocketConfig::default()
@@ -1343,7 +1366,7 @@ fn read_loop(sock: TcpStream, tx: &Sender<Cmd>, out: &Sender<Out>, id: u64, limi
             Ok(Message::Text(t)) => match serde_json::from_str::<ClientMsg>(t.as_str()) {
                 Ok(msg) => {
                     if tx.send(Cmd::ClientMsg { id, msg }).is_err() {
-                        break;
+                        return "shutdown";
                     }
                 }
                 Err(e) => warn!(client = id, error = %e, "unrecognised control JSON"),
@@ -1359,27 +1382,42 @@ fn read_loop(sock: TcpStream, tx: &Sender<Cmd>, out: &Sender<Out>, id: u64, limi
                         data: d.data.to_vec(),
                     };
                     if tx.send(cmd).is_err() {
-                        break;
+                        return "shutdown";
                     }
                 } else if let Some((term, data)) = decode_frame(&b) {
                     if tx
-                        .send(Cmd::ClientInput { term, data: data.to_vec() })
+                        .send(Cmd::ClientInput { term, data: data.to_vec(), at: Some(std::time::Instant::now()) })
                         .is_err()
                     {
-                        break;
+                        return "shutdown";
                     }
                 }
             }
             Ok(Message::Ping(p)) => {
                 // Pongs go out through the writer thread; the reading side must
                 if out.send(Out::Pong(p.to_vec())).is_err() {
-                    break;
+                    return "write_failed";
                 }
             }
-            Ok(Message::Close(_)) => break,
+            Ok(Message::Close(_)) => return "peer_closed",
             Ok(_) => {}
-            Err(_) => break,
+            Err(e) => return read_failure(&e),
         }
+    }
+}
+
+fn read_failure(e: &tungstenite::Error) -> &'static str {
+    use tungstenite::error::{Error, ProtocolError};
+    match e {
+        // The set_read_timeout in `read_loop`: `IDLE_LIMIT` with not a byte.
+        Error::Io(io) if matches!(io.kind(), io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock) => "idle_timeout",
+        Error::Io(io) if matches!(io.kind(), io::ErrorKind::ConnectionReset | io::ErrorKind::ConnectionAborted) => "reset",
+        Error::Io(io) if io.kind() == io::ErrorKind::UnexpectedEof => "eof",
+        Error::ConnectionClosed | Error::AlreadyClosed => "eof",
+        Error::Protocol(ProtocolError::ResetWithoutClosingHandshake) => "eof",
+        // Bigger than `drop_limit`.
+        Error::Capacity(_) => "too_big",
+        _ => "read_error",
     }
 }
 
@@ -1761,7 +1799,7 @@ function go(e) {{
 }
 
 fn mime_of(path: &str) -> &'static str {
-    match path.rsplit('.').next().unwrap_or("") {
+    match path.rsplit('.').next().unwrap_or("").to_ascii_lowercase().as_str() {
         "html" => "text/html; charset=utf-8",
         "css" => "text/css; charset=utf-8",
         "js" | "mjs" => "text/javascript; charset=utf-8",
@@ -1779,6 +1817,14 @@ fn mime_of(path: &str) -> &'static str {
         // load them and every editor icon turns into an empty box.
         "ttf" => "font/ttf",
         "map" => "application/json",
+        // Played in the file panel's <audio>.
+        "mp3" => "audio/mpeg",
+        "wav" => "audio/wav",
+        "ogg" | "oga" => "audio/ogg",
+        "opus" => "audio/opus",
+        "m4a" => "audio/mp4",
+        "aac" => "audio/aac",
+        "flac" => "audio/flac",
         _ => "application/octet-stream",
     }
 }

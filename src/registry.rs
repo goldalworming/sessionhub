@@ -1077,30 +1077,56 @@ pub fn project_icon(project: &str) -> Option<ProjectIcon> {
     })
 }
 
-/// How long a project's folder and icon, once found, are taken as read.
+/// How long a project's folder, once found, is taken as still there.
 const LOOK_TTL: Duration = Duration::from_secs(60);
+/// How long its icon is. Looking costs one `stat` per icon candidate, ~30 for
+/// a project without one, and measured 95–270 ms for 69 projects — against
+/// 5 ms for the rest of a scan. An icon changes about never, and a new one
+/// showing up ten minutes late costs nothing.
+const ICON_TTL: Duration = Duration::from_secs(600);
 
-/// Whether a project's folder is there, and its icon — remembered for
-/// `LOOK_TTL`. Looking costs one `stat` per icon candidate, ~30 for a project
-/// without one; with 49 projects that was ~1,200 per scan, and an agent at
+struct Look {
+    dir_due: Instant,
+    icon_due: Instant,
+    icon: Option<ProjectIcon>,
+}
+
+/// Somewhere between half of `ttl` and all of it, at random. Every project is
+/// first looked at in the same scan; without this they would all expire
+/// together too, and every so often one scan would pay for all of them.
+fn spread(ttl: Duration) -> Duration {
+    use std::hash::BuildHasher;
+    let r = std::collections::hash_map::RandomState::new().hash_one(0u8);
+    ttl / 2 + Duration::from_millis(r % (ttl.as_millis() as u64 / 2).max(1))
+}
+
+/// Whether a project's folder is there, and its icon — the folder remembered
+/// for `LOOK_TTL`, the icon for `ICON_TTL`, each per project. An agent at
 /// work sets off a scan every few seconds. A folder that is missing is asked
 /// again every time, so one just cloned shows up at once.
 fn project_look(path: &str) -> (bool, Option<ProjectIcon>) {
-    static SEEN: Mutex<Option<HashMap<String, (Instant, Option<ProjectIcon>)>>> = Mutex::new(None);
+    static SEEN: Mutex<Option<HashMap<String, Look>>> = Mutex::new(None);
     let mut seen = SEEN.lock().unwrap_or_else(|e| e.into_inner());
-    let seen = seen.get_or_insert_with(HashMap::new);
-    if let Some((at, icon)) = seen.get(path) {
-        if at.elapsed() < LOOK_TTL {
-            return (true, icon.clone());
+    project_look_at(seen.get_or_insert_with(HashMap::new), path, Instant::now())
+}
+
+fn project_look_at(seen: &mut HashMap<String, Look>, path: &str, now: Instant) -> (bool, Option<ProjectIcon>) {
+    if let Some(look) = seen.get(path) {
+        if now < look.dir_due {
+            return (true, look.icon.clone());
         }
     }
     if !Path::new(path).is_dir() {
         seen.remove(path);
         return (false, None);
     }
-    let icon = project_icon(path);
-    seen.insert(path.to_string(), (Instant::now(), icon.clone()));
-    (true, icon)
+    let look = seen.entry(path.to_string()).or_insert_with(|| Look { dir_due: now, icon_due: now, icon: None });
+    look.dir_due = now + spread(LOOK_TTL);
+    if now >= look.icon_due {
+        look.icon = project_icon(path);
+        look.icon_due = now + spread(ICON_TTL);
+    }
+    (true, look.icon.clone())
 }
 
 /// The project list = the manual list in the config merged with every unique cwd
@@ -1284,6 +1310,32 @@ mod tests {
         assert!(project_icon(&project).unwrap().path.ends_with("favicon.ico"), "an oversized icon is passed over");
 
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_folder_is_rechecked_far_more_often_than_its_icon() {
+        let root = std::env::temp_dir().join(format!("sh-look-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("icon.png"), b"png").unwrap();
+        let project = root.to_string_lossy().into_owned();
+        let mut seen = HashMap::new();
+        let t0 = Instant::now();
+
+        assert!(matches!(project_look_at(&mut seen, &project, t0), (true, Some(_))));
+
+        // Past the folder's TTL, not the icon's: the folder is asked again, the
+        // icon is not — still the one remembered, though it is gone.
+        std::fs::remove_file(root.join("icon.png")).unwrap();
+        assert!(matches!(project_look_at(&mut seen, &project, t0 + LOOK_TTL), (true, Some(_))));
+
+        // Past the icon's too: looked for again.
+        assert_eq!(project_look_at(&mut seen, &project, t0 + ICON_TTL), (true, None));
+
+        // A folder taken away is noticed at its own TTL, not the icon's.
+        std::fs::remove_dir_all(&root).unwrap();
+        assert_eq!(project_look_at(&mut seen, &project, t0 + ICON_TTL + LOOK_TTL), (false, None));
+        assert!(seen.is_empty());
     }
 
     // ---------------------------------------------------------- time
@@ -1621,3 +1673,4 @@ mod tests {
         assert_eq!(pick_adoption(&p, "/lain", "claude", 0, &HashSet::new()), None);
     }
 }
+

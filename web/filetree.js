@@ -219,12 +219,13 @@ export class FileTree {
   /// one that cannot be read made the same error over and over (868 in one
   /// hour, once). Never asking again was worse — a folder caught mid-rewrite,
   /// or a machine mid-restart, said "Could not read" until opened by hand.
+  /// One that is gone is not asked again here at all (see `fail`).
   refreshQuietly() {
     for (const path of this.expanded) {
       const state = this.dirs.get(path);
       if (!state || state.loading) continue;
       if (!state.failed) this.onList(path);
-      else if (Date.now() - state.failedAt > RETRY_MS) this.request(path);
+      else if (!state.gone && Date.now() - state.failedAt > RETRY_MS) this.request(path);
     }
   }
 
@@ -345,11 +346,14 @@ export class FileTree {
     const key = this.dirs.has(path) ? path : [...this.dirs.keys()].find((k) => same(k) === same(path));
     const state = key !== undefined && this.dirs.get(key);
     // A folder that is gone is folded away, not retried: an agent deleting
-    // one it had made would otherwise cost an error every `RETRY_MS`.
-    if (state && /os error [23]\)|No such file/i.test(reason)) {
-      this.expanded.delete(key);
-      this.dirs.delete(key);
-    } else if (state) this.dirs.set(key, { ...state, loading: false, failed: true, failedAt: Date.now(), reason });
+    // one it had made would otherwise cost an error every `RETRY_MS`. It stays
+    // known as failed rather than forgotten — `rebuild` asks for a root it
+    // knows nothing about, so a deleted root was asked for again on every
+    // answer, thousands of times in ten seconds. The root stays unfolded, so
+    // its row says why it is empty.
+    const gone = /os error [23]\)|No such file/i.test(reason);
+    if (state) this.dirs.set(key, { ...state, loading: false, failed: true, failedAt: Date.now(), reason, gone });
+    if (state && gone && key !== this.getRoot()?.path) this.expanded.delete(key);
     this.rebuild();
   }
 

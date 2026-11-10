@@ -713,7 +713,8 @@ export class Settings {
         ? `A different version is at ${this.skillPath} — updating overwrites it.`
         : `Written to ${this.skillPath}. It tells the agent about \`sessionhubd run\`, ` +
           '`push` and `pull`, and is only read when a task actually sounds like ' +
-          'another machine is needed.';
+          'another machine is needed. Beside it, `sessionhub-show` lets the agent ' +
+          'open a file here in the file panel.';
     wrap.appendChild(where);
     return wrap;
   }

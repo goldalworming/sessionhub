@@ -2729,6 +2729,10 @@ const savedHidden = localStorage.getItem(LS.hidden);
 setSidebar(savedHidden === null ? isNarrow() : savedHidden === '1');
 
 el.backdrop.onclick = () => setSidebar(true);
+// The OS switching between light and dark moves an editor that follows the app.
+window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => {
+  if (sidePanel) sidePanel.editor.appThemeChanged();
+});
 window.matchMedia('(max-width: 720px)').addEventListener('change', () => {
   el.backdrop.hidden = el.sidebar.hidden || !isNarrow();
   // At phone width the view is always tabs; past it, the stored choice applies
@@ -2855,7 +2859,12 @@ sidePanel = new SidePanel(el.side, {
     sidePanel.syncRoots();
     syncScope();
   },
-  theme: () => (document.documentElement.dataset.theme === 'dark' ? 'dark' : 'light'),
+  // "system" sets no attribute, so the OS answers then.
+  theme: () => {
+    const t = document.documentElement.dataset.theme;
+    if (t) return t === 'dark' ? 'dark' : 'light';
+    return window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+  },
   // The same context menu as the sidebar and the folder picker, so the explorer
   // does not grow a third one that drifts.
   menu: (x, y, items) => openMenu(x, y, items),

@@ -168,6 +168,49 @@ impl Pty {
     }
 }
 
+/// Put a terminal's own process (the shell or the agent) above normal
+/// priority, so a keystroke is still echoed while something else has every
+/// core. Done after the fact because portable-pty takes no creation flags. What
+/// it starts later stays at normal: Windows gives a child of an above-normal
+/// process the normal class, so the heavy work does not inherit this.
+#[cfg(windows)]
+pub fn raise_priority(pid: u32) -> bool {
+    use windows_sys::Win32::Foundation::CloseHandle;
+    use windows_sys::Win32::System::Threading::{
+        OpenProcess, SetPriorityClass, ABOVE_NORMAL_PRIORITY_CLASS, PROCESS_SET_INFORMATION,
+    };
+    // SAFETY: a handle opened here and closed here; nothing else holds it.
+    unsafe {
+        let h = OpenProcess(PROCESS_SET_INFORMATION, 0, pid);
+        if h.is_null() {
+            return false;
+        }
+        let ok = SetPriorityClass(h, ABOVE_NORMAL_PRIORITY_CLASS) != 0;
+        CloseHandle(h);
+        ok
+    }
+}
+
+/// The daemon's own share of the same: its threads carry every keystroke in
+/// and every byte of output back.
+#[cfg(windows)]
+pub fn raise_own_priority() -> bool {
+    use windows_sys::Win32::System::Threading::{GetCurrentProcess, SetPriorityClass, ABOVE_NORMAL_PRIORITY_CLASS};
+    // SAFETY: the pseudo-handle of this process needs no closing.
+    unsafe { SetPriorityClass(GetCurrentProcess(), ABOVE_NORMAL_PRIORITY_CLASS) != 0 }
+}
+
+// macOS and Linux only let root raise a priority, so there is nothing to do.
+#[cfg(not(windows))]
+pub fn raise_priority(_pid: u32) -> bool {
+    false
+}
+
+#[cfg(not(windows))]
+pub fn raise_own_priority() -> bool {
+    false
+}
+
 /// What `<command> --version` prints, on one line.
 ///
 /// Shown in the agent settings so the panel says which build is installed, not

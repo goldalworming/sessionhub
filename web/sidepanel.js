@@ -114,6 +114,7 @@ export class SidePanel {
       projectRoot: on.root,
       via: on.via,
       menu: on.menu,
+      reload: (path) => this.ask(path, true),
     });
     this.tree.show();
 

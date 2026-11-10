@@ -17,9 +17,23 @@ use std::path::PathBuf;
 /// The folder name under `~/.claude/skills/`, and the skill's own name.
 pub const NAME: &str = "sessionhub-machines";
 
+/// The second skill the same button writes: opening a file in front of the
+/// person, which is wanted far more often than another machine and so is not
+/// buried inside that one's description.
+pub const SHOW: &str = "sessionhub-show";
+
+fn skill_path(name: &str) -> PathBuf {
+    crate::config::home().join(".claude").join("skills").join(name).join("SKILL.md")
+}
+
 /// Where it goes. Claude Code reads user-level skills from `~/.claude/skills`.
 pub fn path() -> PathBuf {
-    crate::config::home().join(".claude").join("skills").join(NAME).join("SKILL.md")
+    skill_path(NAME)
+}
+
+/// Every file the button writes, with what goes in it.
+fn files() -> [(PathBuf, String); 2] {
+    [(path(), text()), (skill_path(SHOW), show_text().to_string())]
 }
 
 /// What is on disk, against what this version would write.
@@ -32,22 +46,91 @@ pub enum State {
     Stale,
 }
 
+/// Current only when every skill is; missing when none is there at all.
 pub fn state() -> State {
-    match std::fs::read_to_string(path()) {
-        Ok(found) if found == text() => State::Current,
-        Ok(_) => State::Stale,
-        Err(_) => State::Missing,
+    let found: Vec<Option<bool>> = files()
+        .iter()
+        .map(|(p, want)| std::fs::read_to_string(p).ok().map(|f| &f == want))
+        .collect();
+    if found.iter().all(|f| *f == Some(true)) {
+        State::Current
+    } else if found.iter().all(Option::is_none) {
+        State::Missing
+    } else {
+        State::Stale
     }
 }
 
 /// Write it, making the folders on the way. Returns where it landed.
 pub fn install() -> io::Result<PathBuf> {
-    let file = path();
-    if let Some(parent) = file.parent() {
-        std::fs::create_dir_all(parent)?;
+    for (file, body) in files() {
+        if let Some(parent) = file.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(&file, body)?;
     }
-    std::fs::write(&file, text())?;
-    Ok(file)
+    Ok(path())
+}
+
+/// Opening a file in the browser's file panel, for the person to look at.
+pub fn show_text() -> &'static str {
+    r#"---
+name: sessionhub-show
+description: >-
+  Open a file or folder for the user in sessionhub's file panel in the
+  browser — text and code in the editor, images shown, audio (mp3, wav, ogg,
+  m4a, flac) playable with a download option. Use whenever the user asks to
+  open, show, view, play or listen to a file ("buka file X", "buka X",
+  "tampilkan", "tunjukkan", "putar mp3-nya", "open X", "show me the file",
+  "di mana filenya"), and after creating or generating a file the user will
+  want to look at — an image, a report, audio, a config, a new folder. Only
+  works inside a sessionhub terminal (SESSIONHUB_TERMINAL is set).
+---
+
+# Opening a file in the sessionhub file panel
+
+Inside a terminal started by sessionhub, `SESSIONHUB_TERMINAL` is set and
+`sessionhubd` is on PATH. One command puts a path in front of the user:
+
+```
+sessionhubd show PATH
+```
+
+- A **file** opens in a tab beside the Explorer, with the folders down to it
+  unfolded and its row selected. Text and code open in the editor, images
+  show as images, audio gets a player. Any file can be downloaded from the
+  editor's ⋯ menu.
+- A **folder** is unfolded and selected in the tree. A folder outside the
+  current project becomes what the tree shows.
+- Relative paths are resolved from the current directory. The path must exist —
+  run it after the file is written, not before.
+- Only the browser that is showing this terminal moves; other tabs and other
+  people's screens stay where they are.
+
+It prints `Shown <path>` when a browser was told. `No browser has sessionhub
+open` means nobody is looking right now. That is not an error, so just mention
+the path in your reply. A message saying the command is not understood means
+that machine's sessionhub is too old; tell the user to update it.
+
+## Finding the file the user means
+
+The user often names a file loosely ("buka laporan kemarin", "the mp3 you just
+made"). Find it first — in the conversation, or with a quick search of the
+project or the folder being discussed — then show that one path. When several
+files match and the choice matters, ask; when one is clearly meant, open it.
+
+## When to use it
+
+- Whenever the user asks to open, show, view or play a file.
+- After you create or generate something the user asked for, show the main
+  result: one file, or the folder if you made several. Don't show every file
+  you touched.
+- When the user asks where something is.
+- Don't use it for files you only read to do the work.
+
+If `SESSIONHUB_TERMINAL` is not set, you are not in a sessionhub terminal. Skip
+this, and give the path in your reply instead.
+"#
 }
 
 /// The skill itself.
@@ -182,6 +265,20 @@ mod tests {
         {
             assert!(t.contains(c), "the skill never mentions `{c}`");
         }
+    }
+
+    #[test]
+    fn the_show_skill_is_a_skill_too() {
+        let t = show_text();
+        assert!(t.starts_with("---
+"));
+        assert!(t.contains(&format!("name: {SHOW}
+")));
+        assert!(t.strip_prefix("---
+").unwrap().contains("
+---
+"));
+        assert!(t.contains("sessionhubd show"));
     }
 
     #[test]
