@@ -22,8 +22,24 @@ pub const NAME: &str = "sessionhub-machines";
 /// buried inside that one's description.
 pub const SHOW: &str = "sessionhub-show";
 
+/// The third: starting other agents in other folders and talking to them, so
+/// one conversation can run several projects.
+pub const TERMINALS: &str = "sessionhub-terminals";
+
 fn skill_path(name: &str) -> PathBuf {
     crate::config::home().join(".claude").join("skills").join(name).join("SKILL.md")
+}
+
+/// Where skills are read from: Claude Code's folder always, and pi's when pi
+/// has been set up on this machine (its folder is not made for it).
+fn roots() -> Vec<PathBuf> {
+    let home = crate::config::home();
+    let mut roots = vec![home.join(".claude").join("skills")];
+    let pi = home.join(".pi").join("agent");
+    if pi.is_dir() {
+        roots.push(pi.join("skills"));
+    }
+    roots
 }
 
 /// Where it goes. Claude Code reads user-level skills from `~/.claude/skills`.
@@ -32,8 +48,12 @@ pub fn path() -> PathBuf {
 }
 
 /// Every file the button writes, with what goes in it.
-fn files() -> [(PathBuf, String); 2] {
-    [(path(), text()), (skill_path(SHOW), show_text().to_string())]
+fn files() -> Vec<(PathBuf, String)> {
+    let skills = [(NAME, text()), (SHOW, show_text().to_string()), (TERMINALS, terminals_text().to_string())];
+    roots()
+        .iter()
+        .flat_map(|root| skills.iter().map(move |(name, body)| (root.join(name).join("SKILL.md"), body.clone())))
+        .collect()
 }
 
 /// What is on disk, against what this version would write.
@@ -70,6 +90,97 @@ pub fn install() -> io::Result<PathBuf> {
         std::fs::write(&file, body)?;
     }
     Ok(path())
+}
+
+/// Starting and driving other terminals: the orchestrator's skill.
+pub fn terminals_text() -> &'static str {
+    r#"---
+name: sessionhub-terminals
+description: >-
+  Start another agent (claude, pi, or a plain shell) in a new sessionhub
+  terminal — in this folder or any other project folder — give it a task, wait
+  for it, and read its answer. Use when the user wants work done in another
+  project or several projects at once from this one conversation, asks you to
+  delegate, orchestrate or run something in parallel ("kerjakan di project X",
+  "buat terminal baru", "buka sesi baru di folder Y", "suruh agent lain",
+  "jalankan paralel", "start a session in", "spawn an agent"), or asks what
+  the other terminals are doing. Only works where sessionhub runs.
+---
+
+# Running other agents from this conversation
+
+`sessionhubd` is on PATH. Each terminal it starts shows up in the user's
+sessionhub sidebar like one they opened by hand, and keeps running after you
+are done — the user can open it, watch it, and type into it.
+
+## The five commands
+
+```
+sessionhubd ls
+sessionhubd spawn --agent AGENT --project DIR [--name NAME]
+sessionhubd send ID TEXT --enter
+sessionhubd wait ID --idle 10 --timeout 540
+sessionhubd capture ID --lines 80
+```
+
+- **ls** lists live terminals: id, name, agent, `busy`/`idle`/`exited`, folder.
+  Look here first — if a terminal for that project is already open and idle,
+  use it instead of starting another.
+- **spawn** starts one and prints its id on stdout (`id=$(sessionhubd spawn …)`).
+  `AGENT` is `claude`, `pi`, another agent set up in sessionhub's Settings, or
+  `terminal` for a plain shell. `DIR` must be an existing folder; use an
+  absolute path. For the same folder as yours, pass your current directory.
+  Give it a short `--name` saying what it is for; the name works anywhere an
+  id does.
+- **send** types text into it; `--enter` submits. Long or multi-line
+  instructions: write them to a file and use `--file PATH --enter`. Keys go
+  with `--key`: `enter`, `esc`, `up`, `down`, `tab`, `ctrl-c`.
+- **wait** returns when the screen has been still for `--idle` seconds
+  (prints `idle`), or the process ended (prints `exited`). Exit code 1 means
+  the timeout passed and it is still working — run wait again. Keep
+  `--timeout` under your own shell tool's limit.
+- **capture** prints what is on its screen as plain text.
+
+## The usual round
+
+```
+id=$(sessionhubd spawn --agent claude --project C:/work/shop --name shop-fix)
+sessionhubd wait $id --idle 3 --timeout 60        # let the agent start up
+sessionhubd capture $id --lines 30                # a trust or login prompt?
+sessionhubd send $id --file task.txt --enter
+sessionhubd wait $id --idle 10 --timeout 540
+sessionhubd capture $id --lines 80
+```
+
+- An agent takes a few seconds to start, and a folder it has not seen may ask
+  whether to trust it. Capture before the first send, and answer what is
+  there (`sessionhubd send $id --key enter`) rather than typing over it.
+- Write the task so it stands alone: the other agent knows nothing of this
+  conversation. Say what to do, where, and what to report back — ask it to
+  end with a short summary, or to write its result to a file you then read.
+- Still for ten seconds is not always finished: the agent may be waiting on a
+  permission prompt or a question. Read the capture; answer it if it is
+  within what the user asked for, otherwise ask the user.
+- Several projects: spawn them all, send each its task, then wait on each in
+  turn. They work at the same time.
+- A follow-up goes to the same terminal with another `send`; it remembers.
+
+## Another machine
+
+Every command takes `--on NAME` to do the same on a paired machine
+(`sessionhubd machines` lists them). `DIR` is then a path on that machine.
+
+## Afterwards
+
+Tell the user which terminals you started, by name, and what each one did.
+Leave them open unless the user asked otherwise — there is no command that
+closes one; `/exit` sent to an agent, or `exit` to a shell, ends it.
+Do not start an agent inside the terminal you are running in, and do not send
+to your own terminal (`SESSIONHUB_TERMINAL` is your own id).
+
+`sessionhub is not running here` means the daemon is down — say so instead
+of retrying.
+"#
 }
 
 /// Opening a file in the browser's file panel, for the person to look at.
@@ -279,6 +390,17 @@ mod tests {
 ---
 "));
         assert!(t.contains("sessionhubd show"));
+    }
+
+    #[test]
+    fn the_terminals_skill_names_every_command_it_teaches() {
+        let t = terminals_text();
+        assert!(t.starts_with("---\n"));
+        assert!(t.contains(&format!("name: {TERMINALS}\n")));
+        assert!(t.strip_prefix("---\n").unwrap().contains("\n---\n"));
+        for c in ["sessionhubd ls", "sessionhubd spawn", "sessionhubd send", "sessionhubd wait", "sessionhubd capture"] {
+            assert!(t.contains(c), "the skill never mentions `{c}`");
+        }
     }
 
     #[test]

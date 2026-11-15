@@ -69,6 +69,14 @@ const OPENCODE_KILL: Duration = Duration::from_secs(10);
 /// without this, one active conversation triggers rescans many times a second.
 const DEBOUNCE: Duration = Duration::from_millis(600);
 
+/// While the processor is busy (`memory::cpu_busy`) no session file or folder
+/// is looked at: the scan waits, checking back this often...
+const BUSY_POLL: Duration = Duration::from_secs(2);
+
+/// ...but not for ever. A render can hold every core for hours, and a session
+/// started meanwhile would never get its title; past this the scan goes ahead.
+const BUSY_HOLD: Duration = Duration::from_secs(300);
+
 /// A safety net for events that never arrive (a watcher can miss changes on
 /// some filesystems) — the floor of how often it fires.
 const SWEEP_MIN: Duration = Duration::from_secs(60);
@@ -118,6 +126,33 @@ pub fn spawn(cfg: Config, tx: Sender<Cmd>) -> Sender<Config> {
         // the sweep — a full walk of every session file, every minute, forever.
         let mut sweep_at = Instant::now() + sweep;
         loop {
+            // A busy processor is left alone: reading one session file was
+            // measured at 1–15 s under load, and it takes that time from
+            // whatever has the cores. Not the first scan, and not one a
+            // settings change asked for (`last` is `None` for both) — someone
+            // is waiting for those.
+            let held = Instant::now();
+            while last.is_some()
+                && crate::memory::cpu_busy()
+                && held.elapsed() < BUSY_HOLD
+                && cfg_rx.is_empty()
+            {
+                std::thread::sleep(BUSY_POLL);
+            }
+            if held.elapsed() >= BUSY_POLL {
+                // What the watcher named meanwhile joins what was waiting.
+                while trig_rx.try_recv().is_ok() {}
+                let taken = std::mem::take(&mut *pending.lock().unwrap_or_else(|e| e.into_inner()));
+                if taken.full {
+                    scan = Scan::Full;
+                } else if let Scan::Only(paths) = &mut scan {
+                    paths.extend(taken.paths);
+                }
+                let ms = held.elapsed().as_millis() as u64;
+                info!(ms, "scan waited out a busy processor");
+                crate::telemetry::track("scan_held", serde_json::json!({ "ms": ms }));
+            }
+
             // Settings can change while the daemon is alive; a disabled agent
             // stops being scanned from the next round.
             let mut changed = false;

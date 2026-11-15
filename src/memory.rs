@@ -137,6 +137,19 @@ mod tests {
 /// How often the machine's own load is sampled.
 const EVERY: std::time::Duration = std::time::Duration::from_secs(2);
 
+/// The last CPU reading from `watch`, as `f32` bits, for the threads that
+/// would rather wait than add to a full processor (the registry's scans).
+static CPU: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+/// At or past this the machine counts as busy. Scans of one session file were
+/// seen taking 1–15 s from about 70% up; below that they take milliseconds.
+pub const BUSY_CPU: f32 = 80.0;
+
+/// Whether every core is more or less taken, as of the last reading.
+pub fn cpu_busy() -> bool {
+    f32::from_bits(CPU.load(std::sync::atomic::Ordering::Relaxed)) >= BUSY_CPU
+}
+
 /// Watch the machine's CPU and memory, and push each reading to the actor.
 ///
 /// This is a different kind of measurement from `sample` above, and a far
@@ -160,6 +173,7 @@ pub fn watch(tx: Sender<Cmd>) {
             std::thread::sleep(EVERY);
             sys.refresh_cpu_usage();
             sys.refresh_memory();
+            CPU.store(sys.global_cpu_usage().to_bits(), std::sync::atomic::Ordering::Relaxed);
             let sending = Cmd::Load {
                 cpu_percent: sys.global_cpu_usage(),
                 ram_used: sys.used_memory(),

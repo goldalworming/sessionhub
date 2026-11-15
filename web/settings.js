@@ -714,7 +714,9 @@ export class Settings {
         : `Written to ${this.skillPath}. It tells the agent about \`sessionhubd run\`, ` +
           '`push` and `pull`, and is only read when a task actually sounds like ' +
           'another machine is needed. Beside it, `sessionhub-show` lets the agent ' +
-          'open a file here in the file panel.';
+          'open a file here in the file panel, and `sessionhub-terminals` lets it ' +
+          'start other agents in other folders and talk to them. pi gets the ' +
+          'same three when it is set up here.';
     wrap.appendChild(where);
     return wrap;
   }

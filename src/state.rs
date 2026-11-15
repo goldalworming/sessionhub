@@ -242,6 +242,11 @@ struct Client {
 /// How often `daemon_lag` is written, while there is anything to say.
 const LAG_EVERY: Duration = Duration::from_secs(60);
 
+/// ...and what counts as something to say: a worst wait of this many
+/// microseconds. Written every minute it was 69% of the whole telemetry file,
+/// and 96% of those lines had a worst wait under 5 ms.
+const LAG_WORTH: u32 = 5000;
+
 /// The daemon's own part of a keystroke's echo, in microseconds, between two
 /// `daemon_lag` reports: summed up, never one event per keystroke. Mostly the
 /// wait for the actor thread, which is what a machine with every core busy
@@ -2824,11 +2829,14 @@ pub fn run(cfg: Config, rx: Receiver<Cmd>, tx: Sender<Cmd>, registry_cfg: Sender
             Cmd::Load { cpu_percent, ram_used, ram_total } => {
                 start_background_sample(&terminals, &tx);
                 if lag_since.elapsed() >= LAG_EVERY {
-                    if lag_in.n + lag_out.n > 0 {
+                    let worth = lag_in.max.max(lag_out.max) >= LAG_WORTH;
+                    // Taken either way: the next minute starts from nothing.
+                    let (input, output) = (lag_in.take(), lag_out.take());
+                    if worth {
                         crate::telemetry::track(
                             "daemon_lag",
                             serde_json::json!({
-                                "input": lag_in.take(), "output": lag_out.take(),
+                                "input": input, "output": output,
                                 "cpu": cpu_percent.round(), "raised": cfg.raise_priority,
                             }),
                         );

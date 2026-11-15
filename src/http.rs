@@ -643,7 +643,7 @@ fn relay_file(sock: &mut TcpStream, req: &Request, r: &crate::config::Remote) ->
         crate::remote::percent_encode(&path),
     );
     match crate::remote::http_get(&crate::remote::Peer::of(r), &url) {
-        Ok(body) => serve_file_bytes(sock, &path, &body, ""),
+        Ok(body) => serve_file_bytes(sock, req, &path, &body, ""),
         Err(e) => respond(sock, 502, "text/plain; charset=utf-8", e.as_bytes()),
     }
 }
@@ -710,7 +710,11 @@ fn relay_put(
 /// files, so that is a real path from "generated a report" to "drove the
 /// terminal". `sandbox` without `allow-same-origin` puts the document in an
 /// opaque origin instead: its scripts run, its cookies do not exist.
-fn serve_file_bytes(sock: &mut TcpStream, path: &str, body: &[u8], cache: &str) -> io::Result<()> {
+///
+/// A `Range` header is answered with that part alone. Safari on a phone asks
+/// for the first two bytes of a sound before anything else and plays nothing
+/// unless a 206 comes back; every browser needs it to seek.
+fn serve_file_bytes(sock: &mut TcpStream, req: &Request, path: &str, body: &[u8], cache: &str) -> io::Result<()> {
     let ctype = mime_of(path);
     let csp = if ctype.starts_with("text/html") {
         "Content-Security-Policy: sandbox allow-scripts allow-modals allow-popups
@@ -718,7 +722,37 @@ fn serve_file_bytes(sock: &mut TcpStream, path: &str, body: &[u8], cache: &str) 
     } else {
         ""
     };
-    respond_with(sock, 200, ctype, body, &format!("{csp}{cache}"))
+    let ranges = "Accept-Ranges: bytes\r\n";
+    match req.header("range").map(|h| byte_range(h, body.len())) {
+        None => respond_with(sock, 200, ctype, body, &format!("{csp}{cache}{ranges}")),
+        Some(Some((from, to))) => respond_with(
+            sock,
+            206,
+            ctype,
+            &body[from..=to],
+            &format!("{csp}{cache}{ranges}Content-Range: bytes {from}-{to}/{}\r\n", body.len()),
+        ),
+        Some(None) => respond_with(
+            sock,
+            416,
+            "text/plain; charset=utf-8",
+            b"416 range not satisfiable\n",
+            &format!("Content-Range: bytes */{}\r\n", body.len()),
+        ),
+    }
+}
+
+/// The first and last byte a `Range` header asks for, of `len` bytes:
+/// `bytes=a-b`, `bytes=a-` or `bytes=-n` (the last n). One range only.
+fn byte_range(header: &str, len: usize) -> Option<(usize, usize)> {
+    let (from, to) = header.trim().strip_prefix("bytes=")?.split_once('-')?;
+    let last = len.checked_sub(1)?;
+    let (from, to) = match (from.trim(), to.trim()) {
+        ("", n) => (len.saturating_sub(n.parse().ok().filter(|n| *n > 0)?), last),
+        (a, "") => (a.parse().ok()?, last),
+        (a, b) => (a.parse().ok()?, b.parse::<usize>().ok()?.min(last)),
+    };
+    (from <= to).then_some((from, to))
 }
 
 /// Re-read the config from disk and adopt its token. Called by `token rotate`
@@ -773,7 +807,7 @@ fn api_file(sock: &mut TcpStream, req: &Request) -> io::Result<()> {
     } else {
         ""
     };
-    serve_file_bytes(sock, &path.to_string_lossy(), &body, cache)
+    serve_file_bytes(sock, req, &path.to_string_lossy(), &body, cache)
 }
 
 /// Run a command here and answer with everything it said.
@@ -1842,6 +1876,8 @@ fn respond_with(
 ) -> io::Result<()> {
     let reason = match status {
         200 => "OK",
+        206 => "Partial Content",
+        416 => "Range Not Satisfiable",
         400 => "Bad Request",
         401 => "Unauthorized",
         404 => "Not Found",
@@ -2194,6 +2230,13 @@ mod tests {
     fn ws_and_api_never_get_a_page() {
         // Clients here are waiting for an upgrade or JSON; an HTML page landing
         // there only becomes a misleading parse error.
+        assert_eq!(byte_range("bytes=0-1", 10), Some((0, 1)));
+        assert_eq!(byte_range("bytes=4-", 10), Some((4, 9)));
+        assert_eq!(byte_range("bytes=-3", 10), Some((7, 9)));
+        assert_eq!(byte_range("bytes=2-99", 10), Some((2, 9)));
+        assert_eq!(byte_range("bytes=10-", 10), None);
+        assert_eq!(byte_range("bytes=5-2", 10), None);
+        assert_eq!(byte_range("bytes=0-", 0), None);
         for path in ["/ws", "/api/status", "/api/file"] {
             let head = format!(
                 "GET {path} HTTP/1.1\r\nSec-Fetch-Mode: navigate\r\nAccept: text/html\r\n\r\n"

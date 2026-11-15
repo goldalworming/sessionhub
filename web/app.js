@@ -2194,6 +2194,10 @@ function endEchoProbe(m, entry) {
   // After xterm has parsed what arrived, and the next frame has drawn it.
   entry.term.write('', () =>
     requestAnimationFrame(() => {
+      // A frame is not drawn while the page is hidden or the machine asleep:
+      // this then runs on the return, and would time the nap (one came in at
+      // 70 minutes).
+      if (!awake(key)) return;
       const echo = arrive - key;
       const paint = performance.now() - arrive;
       const rtt = m.conn.rtt ?? -1;
@@ -2255,10 +2259,17 @@ setInterval(() => {
 /// everything is quiet, the panel is closed, or the page is not on screen; and
 /// a look that finds the same files redraws nothing (`FileTree.update`).
 const TREE_BUSY_MS = 10000;
+/// The daemon's own line for "busy" (`memory::BUSY_CPU`).
+const BUSY_CPU = 80;
 let treeLookedAt = 0;
 let treeTimer = null;
 function nudgeTree(m, id, wait = 1500) {
   if (m !== current || !sidePanel || treeTimer) return;
+  // Not while that machine's processor is full: listing folders — or, for the
+  // changes, walking the project — takes from whatever has the cores, and the
+  // next nudge after it calms down shows the same files. Asking by hand (the
+  // refresh button, opening a folder) still goes through.
+  if ((m.load?.cpu_percent ?? 0) >= BUSY_CPU) return;
   // The list of changes, when it is what the Explorer column is showing, is
   // looked at again on the same occasions as the tree.
   const changes = sidePanel.changes.open;

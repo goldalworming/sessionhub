@@ -169,6 +169,15 @@ export class Conn {
       if (this.closedByUs) return;
       this.lostWhy ||= 'closed';
       this.emit('onStatus', 'lost');
+      // A phone with the page out of sight: the system ends the socket, and a
+      // reconnect from there lives a few seconds, fetches a replay nobody
+      // sees, and is ended again — some 80 times a day. It waits for the page
+      // to be looked at (`probe`, which the page calls on its return). A
+      // desktop tab keeps reconnecting: it is what rings when an agent is done.
+      if (document.hidden && !window.matchMedia('(any-pointer: fine)').matches) {
+        this.parked = true;
+        return;
+      }
       // Backoff from 0.5 s to 8 s. The user has to do nothing.
       this.timer = setTimeout(() => this.connect(), this.delay);
       this.delay = Math.min(this.delay * 2, RECONNECT_MAX);
@@ -314,7 +323,7 @@ export class Conn {
   probe() {
     if (this.closedByUs) return;
     if (!this.ready) {
-      if (this.timer) this.retry();
+      if (this.timer || this.parked) this.retry();
       return;
     }
     if (!this.answers || this.probing) return;
@@ -340,6 +349,7 @@ export class Conn {
   /// would otherwise start a second reconnect of its own.
   retry() {
     if (this.closedByUs) return;
+    this.parked = false;
     clearTimeout(this.timer);
     this.timer = null;
     clearTimeout(this.dial);
