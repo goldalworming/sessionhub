@@ -1042,7 +1042,8 @@ export class Settings {
         live ? 'bad' : 'muted',
         live
           ? `Updating restarts the daemon, and ${live} live terminal${live > 1 ? 's' : ''} will be `
-            + 'killed with it. Agent sessions can be resumed afterwards; a plain shell cannot.'
+            + 'killed with it. Agent sessions are started again, resumed, by the new daemon '
+            + '(when the one updating is 0.0.63 or newer); a plain shell is not.'
           : 'Updating restarts the daemon. Nothing is running right now, so nothing is lost.',
       ),
     );

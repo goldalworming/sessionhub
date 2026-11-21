@@ -397,6 +397,76 @@ struct Terminal {
     pending_run: Option<String>,
 }
 
+/// One agent session that was live when an update ended the daemon, as much
+/// of it as the next daemon needs to start it again. Only what has a session
+/// to resume: a plain shell's state died with its process, and an agent that
+/// had not written its session yet has nothing to come back to. The
+/// environment a script gave with `--env` is not kept — it may be a secret.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct Revive {
+    id: u32,
+    project: String,
+    agent: String,
+    session_id: String,
+    name: Option<String>,
+    color: Option<String>,
+    parent: Option<u32>,
+}
+
+fn revive_path() -> PathBuf {
+    crate::config::dir().join("revive.json")
+}
+
+/// A list older than this was left by an update that never came back up; the
+/// daemon started by hand a day later should not open last week's sessions.
+const REVIVE_FRESH: Duration = Duration::from_secs(600);
+
+/// Written just before an update ends the daemon (`ClientMsg::Update`).
+fn save_revive(terminals: &HashMap<u32, Terminal>, path: &std::path::Path) {
+    let mut list: Vec<Revive> = terminals
+        .values()
+        .filter(|t| t.alive && t.agent != crate::config::TERMINAL_AGENT)
+        .filter_map(|t| {
+            Some(Revive {
+                id: t.id,
+                project: t.project.clone(),
+                agent: t.agent.clone(),
+                session_id: t.session_id.clone()?,
+                name: t.name.clone(),
+                color: t.color.clone(),
+                parent: t.parent,
+            })
+        })
+        .collect();
+    // Parents first: ids only ever go up, so a child's is the larger.
+    list.sort_by_key(|r| r.id);
+    if list.is_empty() {
+        return;
+    }
+    match serde_json::to_vec(&list) {
+        Ok(bytes) => {
+            if let Err(e) = std::fs::write(path, bytes) {
+                warn!(error = %e, "could not note the sessions to bring back");
+            }
+        }
+        Err(e) => warn!(error = %e, "could not note the sessions to bring back"),
+    }
+}
+
+/// What `save_revive` left, read once and removed — before anything is
+/// started, so a session that brings the daemon down cannot do it twice.
+fn take_revive(path: &std::path::Path) -> Vec<Revive> {
+    let fresh = std::fs::metadata(path)
+        .and_then(|m| m.modified())
+        .is_ok_and(|at| at.elapsed().is_ok_and(|age| age < REVIVE_FRESH));
+    let bytes = std::fs::read(path);
+    let _ = std::fs::remove_file(path);
+    match bytes {
+        Ok(bytes) if fresh => serde_json::from_slice(&bytes).unwrap_or_default(),
+        _ => Vec::new(),
+    }
+}
+
 pub fn run(cfg: Config, rx: Receiver<Cmd>, tx: Sender<Cmd>, registry_cfg: Sender<Config>) {
     let mut cfg = cfg;
     let mut clients: HashMap<ClientId, Client> = HashMap::new();
@@ -413,6 +483,32 @@ pub fn run(cfg: Config, rx: Receiver<Cmd>, tx: Sender<Cmd>, registry_cfg: Sender
     // Never reused, so a message from a replaced process can always be told
     // apart from one belonging to the terminal that replaced it.
     let mut next_run: u64 = 1;
+    // The agent sessions an update cut off come back resumed, under the names,
+    // colours and parents they had. They wait for their next message: what an
+    // agent was in the middle of is not picked up again by itself.
+    let mut new_ids: HashMap<u32, u32> = HashMap::new();
+    for r in take_revive(&revive_path()) {
+        let (cols, rows) = sane_size(80, 24);
+        match spawn_terminal(
+            &cfg, next_term, next_run, &r.project, &r.agent, Some(r.session_id.clone()), false,
+            cols, rows, &BTreeMap::new(), &tx,
+        ) {
+            Ok(mut term) => {
+                term.name = r.name;
+                term.color = r.color;
+                term.parent = r.parent.and_then(|p| new_ids.get(&p).copied());
+                new_ids.insert(r.id, term.id);
+                info!(terminal = term.id, session = %r.session_id, "session brought back after the update");
+                terminals.insert(term.id, term);
+                next_term += 1;
+                next_run += 1;
+            }
+            Err((_, why)) => warn!(session = %r.session_id, %why, "could not bring a session back"),
+        }
+    }
+    if !new_ids.is_empty() {
+        crate::telemetry::track("revive", serde_json::json!({ "sessions": new_ids.len() }));
+    }
     // The last registry snapshot; `live_terminal_id` is deliberately not stored
     // here but filled in at send time, so "changed or not" is only about the
     // registry's own contents.
@@ -2066,6 +2162,7 @@ pub fn run(cfg: Config, rx: Receiver<Cmd>, tx: Sender<Cmd>, registry_cfg: Sender
                     // port, so the swapped-in binary came back and died on
                     // "address already in use" while the old one kept running.
                     // The swapper is waiting on this pid to disappear.
+                    save_revive(&terminals, &revive_path());
                     info!("restarting into the new build");
                     let tx = tx.clone();
                     std::thread::spawn(move || {
@@ -4026,6 +4123,38 @@ mod tests {
         // `Kill`/`Attach` already leave a bad id today.
         let terminals: HashMap<u32, Terminal> = HashMap::new();
         assert_eq!(resolve_target(&terminals, &TermTarget::Id(42)), Ok(42));
+    }
+
+    #[test]
+    fn only_agent_sessions_are_noted_for_coming_back() {
+        let path = std::env::temp_dir().join(format!("sessionhub-revive-test-{}.json", std::process::id()));
+        let mut terminals = HashMap::new();
+        let mut parent = terminal_with(&[], 80, 24);
+        parent.id = 2;
+        parent.agent = "claude".into();
+        parent.session_id = Some("s-induk".into());
+        parent.name = Some("orkestrator".into());
+        let mut child = terminal_with(&[], 80, 24);
+        child.id = 5;
+        child.agent = "claude".into();
+        child.session_id = Some("s-anak".into());
+        child.parent = Some(2);
+        let mut fresh = terminal_with(&[], 80, 24); // no session written yet
+        fresh.id = 6;
+        fresh.agent = "claude".into();
+        let mut shell = terminal_with(&[], 80, 24);
+        shell.id = 7;
+        shell.agent = crate::config::TERMINAL_AGENT.into();
+        shell.session_id = Some("bukan".into());
+        for t in [child, parent, fresh, shell] {
+            terminals.insert(t.id, t);
+        }
+        save_revive(&terminals, &path);
+        let got = take_revive(&path);
+        assert_eq!(got.iter().map(|r| r.session_id.as_str()).collect::<Vec<_>>(), ["s-induk", "s-anak"]);
+        assert_eq!(got[0].name.as_deref(), Some("orkestrator"));
+        assert_eq!(got[1].parent, Some(2));
+        assert!(take_revive(&path).is_empty(), "read once, then gone");
     }
 
     #[test]
