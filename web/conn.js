@@ -122,7 +122,7 @@ export class Conn {
     const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
     const via = this.via ? `&via=${encodeURIComponent(this.via)}` : '';
     const ws = new WebSocket(
-      `${proto}//${location.host}/ws?token=${encodeURIComponent(this.token)}${via}&page=${PAGE}`,
+      `${proto}//${location.host}/ws?token=${encodeURIComponent(this.token)}${via}&page=${PAGE}${document.hidden ? '&hidden=1' : ''}`,
     );
     ws.binaryType = 'arraybuffer';
     this.ws = ws;
@@ -323,6 +323,10 @@ export class Conn {
   probe() {
     if (this.closedByUs) return;
     if (!this.ready) {
+      // Parked stays parked while the page is still out of sight: the network
+      // coming back, or a focus event, on a phone in a pocket is not someone
+      // looking.
+      if (this.parked && document.hidden) return;
       if (this.timer || this.parked) this.retry();
       return;
     }

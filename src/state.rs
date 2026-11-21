@@ -40,7 +40,7 @@ const NAME_MAX: usize = 120;
 pub enum Cmd {
     /// `page`: which open page this socket belongs to (`page_id`), when it said.
     /// `kind`: what opened it, coarsely (`http::client_kind`), for telemetry.
-    ClientUp { id: ClientId, tx: Sender<Out>, rx: Receiver<Out>, page: Option<String>, kind: Option<&'static str> },
+    ClientUp { id: ClientId, tx: Sender<Out>, rx: Receiver<Out>, page: Option<String>, kind: Option<&'static str>, hidden: bool },
     /// `why`: how the connection ended, as its reader saw it (`http::read_loop`).
     ClientDown { id: ClientId, why: &'static str },
     ClientMsg { id: ClientId, msg: ClientMsg },
@@ -91,6 +91,8 @@ pub enum Cmd {
         agent: String,
         resume: Option<String>,
         name: Option<String>,
+        /// The terminal the caller itself runs in, when it runs in one.
+        parent: Option<u32>,
         /// Extra environment for this terminal alone, layered on top of
         /// `[agents.<name>.env]` — see `validate_env` for what is allowed in
         /// here. Empty for every caller except a script that asked for it.
@@ -194,6 +196,7 @@ fn terminal_info(t: &Terminal) -> TerminalInfo {
         rows: t.rows,
         session_id: t.session_id.clone(),
         name: t.name.clone(),
+        parent: t.parent,
         color: t.color.clone(),
         working: t.working(),
         jobs: t.jobs.clone(),
@@ -370,6 +373,8 @@ struct Terminal {
     run: u64,
     /// The saved name this terminal runs under, when it has one.
     name: Option<String>,
+    /// The terminal that started this one from a script, if one did.
+    parent: Option<u32>,
     /// The colour its tab is tagged with, one of `config::TAB_COLORS`.
     color: Option<String>,
     /// Processes in this terminal's tree at the last sample, and the fewest ever
@@ -479,7 +484,7 @@ pub fn run(cfg: Config, rx: Receiver<Cmd>, tx: Sender<Cmd>, registry_cfg: Sender
             },
         };
         match cmd {
-            Cmd::ClientUp { id, tx, rx, page, kind } => {
+            Cmd::ClientUp { id, tx, rx, page, kind, hidden } => {
                 // The same page connecting again means its earlier socket is
                 // dead, whether or not that has reached us yet: through a tunnel
                 // a phone's dropped connection can take minutes to be noticed,
@@ -502,7 +507,13 @@ pub fn run(cfg: Config, rx: Receiver<Cmd>, tx: Sender<Cmd>, registry_cfg: Sender
                 client.kind = kind;
                 clients.insert(id, client);
                 info!(client = id, "client connected");
-                crate::telemetry::track("client_open", serde_json::json!({ "client": id, "clients": clients.len() }));
+                // `hidden`: the page said nobody was looking when it dialled —
+                // what tells a phone taken out of a pocket from one that
+                // reconnected inside it.
+                crate::telemetry::track(
+                    "client_open",
+                    serde_json::json!({ "client": id, "clients": clients.len(), "kind": kind, "hidden": hidden }),
+                );
                 send_state(&cfg, &projects, &agent_names, scanned, &clients, &terminals, &dismissed, Some(id));
                 if let Some(load) = &last_load {
                     send_to(&clients, id, json(load));
@@ -2876,6 +2887,7 @@ pub fn run(cfg: Config, rx: Receiver<Cmd>, tx: Sender<Cmd>, registry_cfg: Sender
                 // recognised once the agent has written it.
                 let mut claimed: HashSet<String> =
                     terminals.values().filter_map(|t| t.session_id.clone()).collect();
+                let mut named = false;
                 for t in terminals.values_mut().filter(|t| t.alive && t.session_id.is_none()) {
                     if let Some(sid) = registry::pick_adoption(
                         &projects,
@@ -2886,7 +2898,21 @@ pub fn run(cfg: Config, rx: Receiver<Cmd>, tx: Sender<Cmd>, registry_cfg: Sender
                     ) {
                         info!(terminal = t.id, session = %sid, "session matched to terminal");
                         claimed.insert(sid.clone());
+                        // The name it was started under becomes the session's
+                        // name, so the row still says what it was for once
+                        // the terminal is gone. Never over a name already there.
+                        if let Some(name) = &t.name {
+                            if !cfg.session_names.contains_key(&sid) {
+                                cfg.session_names.insert(sid.clone(), name.clone());
+                                named = true;
+                            }
+                        }
                         t.session_id = Some(sid);
+                    }
+                }
+                if named {
+                    if let Err(e) = crate::config::save(&cfg) {
+                        warn!(error = %e, "could not save config");
                     }
                 }
                 send_state(&cfg, &projects, &agent_names, scanned, &clients, &terminals, &dismissed, None);
@@ -2908,7 +2934,7 @@ pub fn run(cfg: Config, rx: Receiver<Cmd>, tx: Sender<Cmd>, registry_cfg: Sender
                 let _ = reply.send(list);
             }
 
-            Cmd::TermSpawn { project, agent, resume, name, env, reply } => {
+            Cmd::TermSpawn { project, agent, resume, name, parent, env, reply } => {
                 // Checked before anything else touches `terminals` or the
                 // PTY: a bad variable name must refuse the whole spawn, not
                 // start the terminal and then leave it running without the
@@ -2939,6 +2965,7 @@ pub fn run(cfg: Config, rx: Receiver<Cmd>, tx: Sender<Cmd>, registry_cfg: Sender
                     Ok(mut term) => {
                         let tid = term.id;
                         term.name = name;
+                        term.parent = parent.filter(|p| terminals.contains_key(p));
                         // No viewer: this caller is a script, not a browser
                         // tab, and has no size of its own to negotiate. The
                         // first real `Attach` renegotiates it as normal.
@@ -3247,6 +3274,7 @@ fn build_terminal(
         // Both are set by the caller when this terminal is a saved one; an
         // ordinary spawn leaves them alone.
         name: None,
+        parent: None,
         color: None,
         typed: TypedLine::default(),
         pending_run: None,
@@ -3982,6 +4010,7 @@ mod tests {
             ring: Ring::new(RING_CAP),
             pty: None,
             name: None,
+            parent: None,
             color: None,
             typed: TypedLine::default(),
             pending_run: None,

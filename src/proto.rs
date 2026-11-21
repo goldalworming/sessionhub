@@ -979,6 +979,10 @@ pub struct TerminalInfo {
     /// as "terminal 7".
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
+    /// The terminal whose agent started this one with `sessionhubd spawn`, so
+    /// the sidebar can hang it under that one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parent: Option<u32>,
     /// The colour its tab is tagged with, one of `config::TAB_COLORS`. Absent
     /// when untagged.
     #[serde(skip_serializing_if = "Option::is_none")]

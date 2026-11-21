@@ -947,6 +947,7 @@ fn api_term_spawn(
     };
     let resume = req.query_param("resume");
     let name = req.query_param("name");
+    let parent = req.query_param("parent").and_then(|p| p.parse::<u32>().ok());
     // The only field this body ever carries. Never in the query string —
     // env values are the whole reason this route accepts a body at all; a
     // secret in a URL can end up in a log line or a proxy's own access log.
@@ -978,6 +979,7 @@ fn api_term_spawn(
             agent: agent.clone(),
             resume,
             name,
+            parent,
             env,
             reply,
         })
@@ -1308,7 +1310,7 @@ fn upgrade(
     // The actor holds the sending end; the copy of the receiving end exists only
     // to drop the oldest chunk when the queue is full.
     if tx
-        .send(Cmd::ClientUp { id, tx: out_tx.clone(), rx: out_rx.clone(), page: page_id(&req), kind: client_kind(&req) })
+        .send(Cmd::ClientUp { id, tx: out_tx.clone(), rx: out_rx.clone(), page: page_id(&req), kind: client_kind(&req), hidden: req.query_param("hidden").is_some() })
         .is_err()
     {
         return Ok(());

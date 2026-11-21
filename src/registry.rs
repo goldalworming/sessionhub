@@ -1005,9 +1005,19 @@ fn collapse_ws(s: &str) -> String {
 }
 
 pub fn title_or_fallback(title: Option<&str>, agent: &str, updated_ms: u64) -> String {
-    match title.map(collapse_ws) {
+    match title.map(collapse_ws).map(|t| strip_paste_tag(&t).to_string()) {
         Some(t) if !t.is_empty() => truncate_title(&t),
         _ => format!("{agent} · {}", &iso8601(updated_ms)[..10]),
+    }
+}
+
+/// Text pasted into Claude Code is recorded as `<pasted_content id="ab12">…`,
+/// and every session started by `sessionhubd send` opens with one — a row of
+/// titles all beginning with the same tag. The words after it are the title.
+fn strip_paste_tag(s: &str) -> &str {
+    match s.strip_prefix("<pasted_content").and_then(|rest| rest.split_once('>')) {
+        Some((_, after)) => after.trim_start(),
+        None => s,
     }
 }
 
@@ -1478,6 +1488,12 @@ mod tests {
         let t = truncate_title(&long);
         assert_eq!(t.chars().count(), TITLE_MAX + 1, "60 karakter plus elipsis");
         assert!(t.ends_with('…'));
+    }
+
+    #[test]
+    fn a_pasted_first_message_is_titled_by_its_words() {
+        assert_eq!(title_or_fallback(Some("<pasted_content id=\"ea02\"> Tulis 3 naskah"), "claude", 0), "Tulis 3 naskah");
+        assert_eq!(title_or_fallback(Some("<b>tebal</b>"), "claude", 0), "<b>tebal</b>");
     }
 
     #[test]

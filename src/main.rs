@@ -1280,6 +1280,11 @@ fn cmd_spawn(argv: &[String]) -> ExitCode {
     }
     if let Some(on) = &on {
         target.push_str(&format!("&via={}", remote::percent_encode(on)));
+    } else if let Some(own) = std::env::var("SESSIONHUB_TERMINAL").ok().and_then(|v| v.parse::<u32>().ok()) {
+        // Run from inside a terminal here: the new one is that one's child,
+        // and the sidebar hangs it underneath. Not over `--on` — the id
+        // would mean some other terminal on that machine.
+        target.push_str(&format!("&parent={own}"));
     }
     // Never in the query string above — env values are secrets, and a URL can
     // end up in a log line or a proxy's own access log. Empty when `--env`

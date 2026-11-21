@@ -598,6 +598,18 @@ html, body {
   user-select: none;
 }
 .zrow:hover { background: color-mix(in srgb, var(--text) 6%, transparent); }
+/* Started by the terminal above it: indented, with an elbow back up to it. */
+.zrow.ztree { position: relative; padding-left: calc(8px + var(--depth) * 16px); }
+.zrow.ztree::before {
+  content: '';
+  position: absolute;
+  left: calc(var(--depth) * 16px);
+  top: 0;
+  width: 6px;
+  height: 14px;
+  border-left: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+}
 .zrow.selected { background: color-mix(in srgb, var(--accent) 22%, transparent); }
 .zrow > .aicon { margin-top: 2px; }
 .zrow > .when { margin-top: 1px; }

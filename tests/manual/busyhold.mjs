@@ -87,7 +87,10 @@ const reconnectsWhileHidden = async (phone) => {
   // Counted from before the daemon is back: a desktop tab is in within 2 s.
   const at = opens();
   daemon = start();
-  await sleep(14000); // the backoff tops out at 8 s
+  await sleep(5000);
+  // The network coming back, or a stray focus, is not someone looking.
+  await ev("window.dispatchEvent(new Event('online')); window.dispatchEvent(new Event('focus'))");
+  await sleep(9000); // the backoff tops out at 8 s
   return [at, opens()];
 };
 let [at, after] = await reconnectsWhileHidden(true);

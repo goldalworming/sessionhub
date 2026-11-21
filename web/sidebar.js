@@ -435,9 +435,25 @@ function recentRows(ctx, liveSession) {
     }
   }
 
+  // A terminal an agent started from another one hangs under that one, so an
+  // orchestrator and what it is running read as one group.
+  const alive = ctx.state.terminals.filter((t) => t.alive);
+  const ids = new Set(alive.map((t) => t.id));
+  const under = (t) => (t.parent != null && t.parent !== t.id && ids.has(t.parent) ? t.parent : null);
+  const kids = new Map();
+  for (const t of alive) {
+    const up = under(t);
+    if (up !== null) kids.set(up, [...(kids.get(up) || []), t]);
+  }
+  const ordered = [];
+  const walk = (t, depth) => {
+    ordered.push([t, depth]);
+    for (const k of kids.get(t.id) || []) walk(k, depth + 1);
+  };
+  for (const t of alive) if (under(t) === null) walk(t, 0);
+
   const services = [];
-  for (const t of ctx.state.terminals) {
-    if (!t.alive) continue;
+  for (const [t, depth] of ordered) {
     // Set apart before anything else: a service is not what the zone is for.
     const svc = serviceOf(ctx, t);
     if (svc) {
@@ -450,8 +466,10 @@ function recentRows(ctx, liveSession) {
       out.push(
         zoneRow(ctx, {
           when: absoluteDate(hit.s.updated_at),
-          title: displayTitle(hit.s),
-          named: !!nameOf(hit.s.session_id),
+          // The name it was started under, until the session has its own.
+          title: nameOf(hit.s.session_id) || t.name || hit.s.title,
+          named: !!(nameOf(hit.s.session_id) || t.name),
+          depth,
           project: hit.p.name,
           agent: hit.s.agent,
           live: true,
@@ -469,6 +487,7 @@ function recentRows(ctx, liveSession) {
           when: t.name ? 'live' : 'new',
           title: t.name || `terminal ${t.id}`,
           named: !!t.name,
+          depth,
           loose: !t.name,
           project: p ? p.name : t.project,
           agent: t.agent,
@@ -582,6 +601,10 @@ function zoneRow(ctx, o) {
   // The terminal id, for the activity sweep in app.js: busy/done marks are
   // toggled on `[data-tid]` without rebuilding this tree.
   if (o.tid !== undefined) r.dataset.tid = String(o.tid);
+  if (o.depth) {
+    r.classList.add('ztree');
+    r.style.setProperty('--depth', String(o.depth));
+  }
   if (o.color) r.dataset.color = o.color;
 
   // The icon alone carries liveness now — full colour when running, grey

@@ -130,8 +130,10 @@ sessionhubd capture ID --lines 80
   `AGENT` is `claude`, `pi`, another agent set up in sessionhub's Settings, or
   `terminal` for a plain shell. `DIR` must be an existing folder; use an
   absolute path. For the same folder as yours, pass your current directory.
-  Give it a short `--name` saying what it is for; the name works anywhere an
-  id does.
+  Always give `--name`: it is the title the user reads in the sidebar, where
+  the new terminal hangs under yours. Make it say what this one is doing and
+  unlike its siblings (`naskah-short-tidur`, not `worker-2`). The name works
+  anywhere an id does, and two live terminals cannot share one.
 - **send** types text into it; `--enter` submits. Long or multi-line
   instructions: write them to a file and use `--file PATH --enter`. Keys go
   with `--key`: `enter`, `esc`, `up`, `down`, `tab`, `ctrl-c`.
