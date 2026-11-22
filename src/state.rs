@@ -3007,6 +3007,19 @@ pub fn run(cfg: Config, rx: Receiver<Cmd>, tx: Sender<Cmd>, registry_cfg: Sender
                         t.session_id = Some(sid);
                     }
                 }
+                // A session that carries on from a named one takes the
+                // name along: it is the same conversation under a new id.
+                for s in projects.iter().flat_map(|p| &p.sessions) {
+                    let Some(old) = &s.continues else { continue };
+                    if cfg.session_names.contains_key(&s.session_id) {
+                        continue;
+                    }
+                    if let Some(name) = cfg.session_names.get(old).cloned() {
+                        info!(session = %s.session_id, from = %old, "a continued session keeps its name");
+                        cfg.session_names.insert(s.session_id.clone(), name);
+                        named = true;
+                    }
+                }
                 if named {
                     if let Err(e) = crate::config::save(&cfg) {
                         warn!(error = %e, "could not save config");

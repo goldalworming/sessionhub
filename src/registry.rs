@@ -30,6 +30,15 @@ const HEAD_BYTES: usize = 64 * 1024;
 /// 50 MB of wasted I/O.
 const HEAD_FIRST_TRY: usize = 8 * 1024;
 
+/// How far into a file the opening of a continued session is looked for. Its
+/// first message is the summary of everything before it — 300 KB was seen —
+/// and the id of the session it continues is at that message's very end.
+/// Read once per file: what it says never changes (`parse_file`).
+const CONTINUED_BYTES: usize = 4 * 1024 * 1024;
+
+/// How a continued session's first message opens.
+const CONTINUED: &str = "This session is being continued";
+
 /// How long the opencode database is trusted without looking at it again.
 ///
 /// Its file stamps are checked on every wake, and the folder is watched, so a
@@ -97,6 +106,9 @@ pub struct SessionRow {
     pub cwd: String,
     pub title: String,
     pub updated_ms: u64,
+    /// The session this one carries on from, when its first message says so.
+    #[serde(default)]
+    pub continues: Option<String>,
 }
 
 // ------------------------------------------------------------------- thread
@@ -405,6 +417,27 @@ fn load_cache(cache: &mut Cache) {
     // Unreadable is the same as absent: the scan reads everything, as before.
     let Ok(kept) = serde_json::from_str::<Vec<Kept>>(&text) else { return };
     for k in kept {
+        // What a version that did not read a continued session to the end of
+        // its opening could have got wrong is read again: a large file it
+        // found nothing in, and a title that is the summary's first words or
+        // only the agent and a date.
+        let doubtful = match &k.row {
+            // Named like a session: a subagent's transcript (`agent-….jsonl`)
+            // is unlisted on purpose, and there are hundreds of those.
+            None => {
+                k.len > HEAD_BYTES as u64
+                    && k.path.file_stem().is_some_and(|s| {
+                        s.len() == 36 && s.to_string_lossy().bytes().all(|b| b.is_ascii_hexdigit() || b == b'-')
+                    })
+            }
+            Some(r) => {
+                r.continues.is_none()
+                    && (r.title.starts_with(CONTINUED) || r.title.starts_with(&format!("{} · ", r.agent)))
+            }
+        };
+        if doubtful {
+            continue;
+        }
         cache.files.insert(k.path, (k.mtime, k.len, k.row));
     }
 }
@@ -614,6 +647,7 @@ fn read_opencode_db(db: &Path) -> Option<Vec<SessionRow>> {
             session_id: id,
             cwd,
             updated_ms,
+            continues: None,
         });
     }
     Some(out)
@@ -753,11 +787,31 @@ fn parse_file(path: &Path, agent: &str, cache: &mut Cache) -> Option<SessionRow>
         }
     }
 
+    // A continued session was read to the end of its first message once, and
+    // nothing that was learnt there can change: only its time moves.
+    if let Some((_, _, Some(row))) = cache.files.get(path) {
+        if row.continues.is_some() {
+            let row = SessionRow { updated_ms: mtime, ..row.clone() };
+            cache.files.insert(path.to_path_buf(), (mtime, len, Some(row.clone())));
+            cache.dirty = true;
+            return Some(row);
+        }
+    }
+
     // Try a little first; read more only when it really was not there.
     let mut meta = read_head(path, HEAD_FIRST_TRY).map(|t| parse_jsonl_head(&t));
     if !meta.as_ref().is_some_and(|m| m.cwd.is_some() && m.title.is_some()) && len > HEAD_FIRST_TRY as u64
     {
         meta = read_head(path, HEAD_BYTES).map(|t| parse_jsonl_head(&t));
+    }
+    // The opening of a continued session did not fit: without it there is no
+    // folder, no title, and no word of which session this carries on from.
+    // Or it was not reached at all: a resumed session's file can open with
+    // more file-history snapshots than the head holds.
+    // ponytail: a large file with no folder anywhere in its first 4 MB is read
+    // this far on every change; cache the miss by path if one ever shows up.
+    if meta.as_ref().is_some_and(|m| m.continued_cut || (m.cwd.is_none() && len > HEAD_BYTES as u64)) {
+        meta = read_head(path, CONTINUED_BYTES).map(|t| parse_jsonl_head(&t));
     }
 
     let parsed = meta.and_then(|meta| {
@@ -773,9 +827,17 @@ fn parse_file(path: &Path, agent: &str, cache: &mut Cache) -> Option<SessionRow>
             return None;
         }
 
+        // A continuation's first message is a summary written for the agent;
+        // the title Claude Code keeps beside it is the one a person can read.
+        let title = if meta.continued { meta.own_title.or(meta.title) } else { meta.title };
         Some(SessionRow {
             agent: agent.to_string(),
-            title: title_or_fallback(meta.title.as_deref(), agent, mtime),
+            title: title_or_fallback(title.as_deref(), agent, mtime),
+            // Empty: a continuation that does not say of what. Still `Some`,
+            // which is what spares the long read next time.
+            continues: meta
+                .continued
+                .then(|| meta.continues.filter(|old| *old != session_id).unwrap_or_default()),
             session_id,
             cwd,
             updated_ms: mtime,
@@ -894,6 +956,7 @@ fn parse_opencode_item(v: &serde_json::Value) -> Option<SessionRow> {
         session_id: id,
         cwd,
         updated_ms,
+        continues: None,
     })
 }
 
@@ -906,6 +969,15 @@ pub struct JsonlMeta {
     /// The `sessionId` recorded inside the file. For a real session this equals
     /// its file name; when they differ, the file is not a session of its own.
     pub session_id: Option<String>,
+    /// The session this one carries on from (`continued_from`).
+    pub continues: Option<String>,
+    /// The first message opens as a continuation does.
+    pub continued: bool,
+    /// ...and was cut off by the cap on the head, so nothing in it was read.
+    pub continued_cut: bool,
+    /// The title Claude Code itself keeps at the head of a continued session:
+    /// the one the person gave, else the one it made up.
+    pub own_title: Option<String>,
 }
 
 /// Prompts injected by tooling rather than typed by the user. Used as a title
@@ -933,8 +1005,21 @@ pub fn parse_jsonl_head(text: &str) -> JsonlMeta {
             continue;
         }
         let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else {
-            continue; // the last line can be cut short because the head is capped
+            // The last line can be cut short because the head is capped.
+            meta.continued_cut |= meta.title.is_none() && line.contains(CONTINUED);
+            continue;
         };
+        match v.get("type").and_then(|t| t.as_str()) {
+            Some("custom-title") => {
+                if let Some(t) = v.get("customTitle").and_then(|t| t.as_str()) {
+                    meta.own_title = Some(t.to_string());
+                }
+            }
+            Some("ai-title") if meta.own_title.is_none() => {
+                meta.own_title = v.get("aiTitle").and_then(|t| t.as_str()).map(str::to_string);
+            }
+            _ => {}
+        }
 
         if meta.cwd.is_none() {
             if let Some(c) = v.get("cwd").and_then(|c| c.as_str()) {
@@ -954,6 +1039,8 @@ pub fn parse_jsonl_head(text: &str) -> JsonlMeta {
             if let Some(text) = user_text(&v) {
                 let clean = collapse_ws(&text);
                 if !clean.is_empty() && !SYNTHETIC.iter().any(|p| clean.starts_with(p)) {
+                    meta.continued = clean.starts_with(CONTINUED);
+                    meta.continues = continued_from(&clean);
                     meta.title = Some(clean);
                 }
             }
@@ -998,6 +1085,22 @@ fn user_text(v: &serde_json::Value) -> Option<String> {
         }
     }
     None
+}
+
+/// The session a new one carries on from.
+///
+/// When Claude Code picks a conversation up again after its context was
+/// summarised, it writes a new session — a new id, a new file — whose first
+/// message opens with these words and ends by naming the old transcript,
+/// `…/<old id>.jsonl`. That is the only link between the two, and without it
+/// a name given to the old one is left behind on a row nobody opens again.
+fn continued_from(first_message: &str) -> Option<String> {
+    if !first_message.starts_with(CONTINUED) {
+        return None;
+    }
+    let before = &first_message[..first_message.find(".jsonl")?];
+    let id = before.get(before.len().checked_sub(36)?..)?;
+    (id.bytes().all(|b| b.is_ascii_hexdigit() || b == b'-')).then(|| id.to_string())
 }
 
 fn collapse_ws(s: &str) -> String {
@@ -1218,6 +1321,7 @@ pub fn build_projects(config_projects: &[String], sessions: Vec<SessionRow>) -> 
                         title: r.title,
                         updated_at: iso8601(r.updated_ms),
                         live_terminal_id: None,
+                        continues: r.continues.filter(|old| !old.is_empty()),
                     })
                     .collect(),
                 path,
@@ -1328,6 +1432,7 @@ mod tests {
             cwd: cwd.into(),
             title: title.into(),
             updated_ms: ms,
+            continues: None,
         }
     }
 
@@ -1488,6 +1593,41 @@ mod tests {
         let t = truncate_title(&long);
         assert_eq!(t.chars().count(), TITLE_MAX + 1, "60 karakter plus elipsis");
         assert!(t.ends_with('…'));
+    }
+
+    #[test]
+    fn a_continued_session_names_the_one_it_continues() {
+        let old = "7f61a208-908f-4b20-9bad-da5d5e5c1574";
+        let msg = format!("This session is being continued from a previous conversation. Summary… read the full transcript at: C:\\Users\\u\\.claude\\projects\\p\\{old}.jsonl Continue.");
+        assert_eq!(continued_from(&msg).as_deref(), Some(old));
+        assert_eq!(continued_from("This session is being continued, no file named"), None);
+        assert_eq!(continued_from(&format!("lihat {old}.jsonl")), None, "only a continuation's own opening");
+        let line = serde_json::json!({ "type": "user", "cwd": "/p", "message": { "role": "user", "content": msg } }).to_string();
+        assert_eq!(parse_jsonl_head(&line).continues.as_deref(), Some(old));
+    }
+
+    #[test]
+    fn a_continued_session_is_read_past_the_head_and_titled_by_claude() {
+        let dir = std::env::temp_dir().join(format!("sessionhub-continued-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (old, new) = ("7f61a208-908f-4b20-9bad-da5d5e5c1574", "7f4a04cf-b580-4d45-a85d-65c307c627a1");
+        let path = dir.join(format!("{new}.jsonl"));
+        // The summary alone is longer than the head that is normally read.
+        let msg = format!("{CONTINUED} from a previous conversation. {} read the full transcript at: C:/p/{old}.jsonl", "ringkasan ".repeat(HEAD_BYTES / 8));
+        let lines = [
+            serde_json::json!({ "type": "ai-title", "aiTitle": "Video viral channel", "sessionId": new }),
+            serde_json::json!({ "type": "user", "cwd": "/p", "sessionId": new, "message": { "role": "user", "content": msg } }),
+        ];
+        std::fs::write(&path, lines.iter().map(|l| l.to_string() + "\n").collect::<String>()).unwrap();
+        let mut cache = Cache::default();
+        let row = parse_file(&path, "claude", &mut cache).expect("listed, though its opening is past the head");
+        assert_eq!(row.title, "Video viral channel");
+        assert_eq!(row.continues.as_deref(), Some(old));
+        // Grown since: known from the cache, not read to the end again.
+        std::fs::write(&path, "tidak terbaca lagi").unwrap();
+        let again = parse_file(&path, "claude", &mut cache).unwrap();
+        assert_eq!((again.title.as_str(), again.continues.as_deref()), ("Video viral channel", Some(old)));
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

@@ -963,6 +963,9 @@ pub struct SessionInfo {
     /// difference between a filled dot (attach instantly) and a hollow one
     /// (spawn again).
     pub live_terminal_id: Option<u32>,
+    /// The session this one carries on from (`registry::continued_from`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub continues: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
