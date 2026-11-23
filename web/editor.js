@@ -9,6 +9,7 @@
 // service workers that spin up background processes of their own.
 
 import { languageFor } from './fileicons.js';
+import { touchOnlyDevice } from './touchscroll.js';
 
 const LS_THEME = 'sh.editor.theme';
 /// Kept in this browser rather than on the daemon: whether a long line should
@@ -22,6 +23,22 @@ const THEMES = ['dark', 'light', 'auto'];
 const AUDIO = /.(mp3|wav|ogg|oga|opus|m4a|aac|flac)$/i;
 const SPEEDS = [1, 1.25, 1.5, 2];
 const LS_SPEED = 'sh.audio.speed';
+
+/// The keys a phone's keyboard cannot press, for the text editor: there is no
+/// Ctrl to find with, no Esc to close the search, no arrows. Each is the id of
+/// a Monaco command, run on the editor as its own key would.
+const KEYS = [
+  ['Esc', 'esc', 'Close the search, or drop the selection'],
+  ['Tab', 'tab', 'Indent'],
+  ['Find', 'actions.find', 'Find (Ctrl+F)'],
+  ['Undo', 'undo', 'Undo (Ctrl+Z)'],
+  ['Redo', 'redo', 'Redo (Ctrl+Y)'],
+  ['All', 'all', 'Select all (Ctrl+A)'],
+  ['←', 'cursorLeft', 'Left'],
+  ['↑', 'cursorUp', 'Up'],
+  ['↓', 'cursorDown', 'Down'],
+  ['→', 'cursorRight', 'Right'],
+];
 
 let loading = null;
 
@@ -92,9 +109,23 @@ export class Editor {
       '<div class="ediff" hidden></div>' +
       '<div class="eimg"><img alt="" /></div>' +
       '<div class="eaudio" hidden><audio controls preload="metadata"></audio>' +
+      '<div class="eastate"></div>' +
       `<div class="espeed">${SPEEDS.map((s) => `<button data-speed="${s}">${s}×</button>`).join('')}</div></div>` +
-      '<div class="eplace">Loading the editor…</div>';
+      '<div class="eplace">Loading the editor…</div>' +
+      // Last, and shown only beside the text editor (`.ebody[hidden] ~ .ekeys`).
+      `<div class="ekeys krow" hidden>${KEYS.map(([label, cmd, title]) => `<button type="button" class="kkey" data-cmd="${cmd}" title="${title}">${label}</button>`).join('')}</div>`;
     root.appendChild(this.el);
+
+    const keys = this.el.querySelector('.ekeys');
+    keys.hidden = !touchOnlyDevice();
+    // `pointerdown`, and prevented: a tap that took the focus would close the
+    // phone's keyboard on every key.
+    keys.addEventListener('pointerdown', (e) => {
+      const cmd = e.target.closest('button')?.dataset.cmd;
+      if (!cmd || !this.editor) return;
+      e.preventDefault();
+      this.pressKey(cmd);
+    });
 
     this.noteEl = this.el.querySelector('.enote');
     this.crumbEl = this.el.querySelector('.ecrumb');
@@ -138,12 +169,25 @@ export class Editor {
         this.paintHead();
       }
     };
+    // A sound that is still on its way says so: over a phone's connection the
+    // player otherwise sits there looking broken. `suspend` clears it too —
+    // a phone that will not fetch before the first tap is not loading.
+    const state = this.audioWrap.querySelector('.eastate');
+    for (const ev of ['loadstart', 'waiting']) {
+      this.audioEl.addEventListener(ev, () => (state.textContent = 'Loading the sound…'));
+    }
+    for (const ev of ['loadedmetadata', 'canplay', 'playing', 'suspend', 'emptied']) {
+      this.audioEl.addEventListener(ev, () => (state.textContent = ''));
+    }
     // Too large for /api/file (25 MB), or a format this browser cannot play.
+    // The browser's own reason is shown: it is the only clue from a phone.
     this.audioEl.onerror = () => {
       if (this.audioWrap.hidden || !this.audioEl.getAttribute('src')) return;
+      const err = this.audioEl.error;
+      const why = err ? ` (${['', 'stopped', 'network', 'decode', 'not supported'][err.code] || err.code}${err.message ? ': ' + err.message : ''})` : '';
       this.audioWrap.hidden = true;
       this.placeEl.hidden = false;
-      this.placeEl.textContent = 'This sound could not be played here — download it from ⋯ instead.';
+      this.placeEl.textContent = `This sound could not be played here${why} — download it from ⋯ instead.`;
     };
     this.imgEl.onerror = () => {
       this.imgWrap.hidden = true;
@@ -506,6 +550,21 @@ export class Editor {
       occurrencesHighlight: 'off',
     });
     this.editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS, () => this.save());
+  }
+
+  /// One key of the touch bar (`KEYS`).
+  pressKey(cmd) {
+    const ed = this.editor;
+    if (cmd === 'esc') {
+      // What Esc does on a keyboard: the search first, the selection after.
+      const find = ed.getContribution('editor.contrib.findController');
+      cmd = find?.getState().isRevealed ? 'closeFindWidget' : 'cancelSelection';
+    }
+    // Asked of the model, not as commands: Monaco's own undo and select-all
+    // go to whatever has the focus, and with the keyboard down nothing has.
+    if (cmd === 'undo' || cmd === 'redo') ed.getModel()?.[cmd]();
+    else if (cmd === 'all') ed.setSelection(ed.getModel().getFullModelRange());
+    else ed.trigger('keys', cmd, null);
   }
 
   /// Drop a file along with its model.
