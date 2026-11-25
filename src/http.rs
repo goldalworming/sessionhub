@@ -53,6 +53,12 @@ static CTX: OnceLock<ServeCtx> = OnceLock::new();
 static REMOTE_COMMANDS: AtomicBool = AtomicBool::new(true);
 
 static LAN: Mutex<Option<LanListener>> = Mutex::new(None);
+/// While network access is on: the address chosen for it, and the addresses
+/// that were there to open the last time it was opened. `follow_the_network`
+/// compares the second with what the machine has now.
+static LAN_WANT: Mutex<Option<(String, Vec<std::net::IpAddr>)>> = Mutex::new(None);
+/// How often the machine's addresses are looked at again.
+const LAN_CHECK: Duration = Duration::from_secs(15);
 static FORWARDS: Mutex<Option<HashMap<String, ForwardListener>>> = Mutex::new(None);
 
 /// One address made reachable: its own loopback socket, and the target it hands
@@ -137,8 +143,36 @@ pub fn serve(
         }
     }
 
+    thread::spawn(follow_the_network);
     accept_loop(listener, ctx, None);
     Ok(())
+}
+
+/// Keep network access on the addresses the machine has now.
+///
+/// The sockets are bound to the addresses found when access was opened. A
+/// daemon that starts with the computer is up before DHCP has answered, and a
+/// lease can move later: either way it went on listening to an address that
+/// was gone, until someone flipped the setting by hand. Nothing is reopened
+/// while the addresses stay as they were, so an address that cannot be bound
+/// is not tried again every round.
+fn follow_the_network() {
+    loop {
+        thread::sleep(LAN_CHECK);
+        let Some((only, opened)) = LAN_WANT.lock().ok().and_then(|w| w.clone()) else {
+            continue;
+        };
+        if !same_addrs(&chosen_addrs(crate::config::lan_ips(), &only), &opened) {
+            match set_lan_access(true, &only) {
+                Ok(addr) => info!(?addr, "the machine's addresses changed; network access followed"),
+                Err(e) => warn!(error = %e, "the machine's addresses changed, and none could be opened"),
+            }
+        }
+    }
+}
+
+fn same_addrs(a: &[std::net::IpAddr], b: &[std::net::IpAddr]) -> bool {
+    a.len() == b.len() && a.iter().all(|ip| b.contains(ip))
 }
 
 /// Open the socket that stands in front of one address.
@@ -358,6 +392,9 @@ pub fn set_lan_access(on: bool, only: &str) -> Result<Option<SocketAddr>, String
         info!(addrs = ?existing.addrs, "stopped listening on the local network");
     }
     if !on {
+        if let Ok(mut want) = LAN_WANT.lock() {
+            *want = None;
+        }
         return Ok(None);
     }
 
@@ -366,10 +403,20 @@ pub fn set_lan_access(on: bool, only: &str) -> Result<Option<SocketAddr>, String
     // the other side will try; binding a single guess is how "network access:
     // on" came to mean "refused" for everyone on the actual LAN.
     let all = crate::config::lan_ips();
-    if all.is_empty() {
-        return Ok(None);
+    if let Ok(want) = only.trim().parse::<std::net::IpAddr>() {
+        if !all.contains(&want) {
+            warn!(%want, "the chosen address is not on this machine; opening all of them");
+        }
     }
     let ips = chosen_addrs(all, only);
+    // Noted even when there is nothing to open yet: that is the machine that
+    // started before its network did.
+    if let Ok(mut want) = LAN_WANT.lock() {
+        *want = Some((only.to_string(), ips.clone()));
+    }
+    if ips.is_empty() {
+        return Ok(None);
+    }
 
     let stop = Arc::new(AtomicBool::new(false));
     let mut addrs = Vec::new();
@@ -409,11 +456,7 @@ pub fn set_lan_access(on: bool, only: &str) -> Result<Option<SocketAddr>, String
 fn chosen_addrs(all: Vec<std::net::IpAddr>, only: &str) -> Vec<std::net::IpAddr> {
     match only.trim().parse::<std::net::IpAddr>() {
         Ok(want) if all.contains(&want) => vec![want],
-        Ok(want) => {
-            warn!(%want, "the chosen address is not on this machine; opening all of them");
-            all
-        }
-        Err(_) => all,
+        _ => all,
     }
 }
 

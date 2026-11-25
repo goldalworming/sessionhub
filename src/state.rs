@@ -2346,7 +2346,10 @@ pub fn run(cfg: Config, rx: Receiver<Cmd>, tx: Sender<Cmd>, registry_cfg: Sender
                         Ok(None) if enabled => {
                             // No LAN address at all: the machine is off the network.
                             // The setting is not saved, so the panel does not show
-                            // a switch that is on while listening to nothing.
+                            // a switch that is on while listening to nothing —
+                            // and it is taken back, or it would open by itself
+                            // when an address turned up.
+                            let _ = crate::http::set_lan_access(false, "");
                             send_to(
                                 &clients,
                                 id,
