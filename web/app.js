@@ -4005,6 +4005,7 @@ function reorderRemotes(names) {
   local.conn.send({ t: 'set_remote_order', names });
 }
 settings.onReorderRemotes = reorderRemotes;
+settings.onAddMachine = () => machineBar.openDialog();
 
 /// Drop a machine along with everything it displays.
 function dropMachine(m) {

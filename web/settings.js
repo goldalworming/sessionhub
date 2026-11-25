@@ -1236,14 +1236,22 @@ export class Settings {
     );
     pane.appendChild(this.localHttpsRows());
 
+    // The same dialog as the ＋ above the terminal, which this window covers.
+    const add = document.createElement('button');
+    add.type = 'button';
+    add.className = 'addbtn';
+    add.textContent = '＋ Add a machine';
+    add.onclick = () => this.onAddMachine();
+
     if (!this.remotes.length) {
       pane.appendChild(
         Settings.stat(
           'muted',
-          'No machines paired yet. On the other computer, open Settings → Network, ' +
-            'copy its pairing link, then paste it into the ＋ box above the terminal.',
+          'No machines paired yet. On the other computer, open Settings → Network ' +
+            'and copy its pairing link, then add it here.',
         ),
       );
+      pane.appendChild(add);
       return pane;
     }
 
@@ -1309,6 +1317,7 @@ export class Settings {
       });
     }
     pane.appendChild(list);
+    pane.appendChild(add);
 
     pane.appendChild(
       Settings.stat(
