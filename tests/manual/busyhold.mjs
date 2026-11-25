@@ -72,9 +72,12 @@ await cmd('Page.addScriptToEvaluateOnNewDocument', { source: `
   window.__hidden = false;
   Object.defineProperty(document, 'hidden', { get: () => window.__hidden });
   Object.defineProperty(document, 'visibilityState', { get: () => (window.__hidden ? 'hidden' : 'visible') });
+  // A phone is told by its browser's name. This one also has a stylus —
+  // any-pointer: fine — which is what used to keep a real one from parking.
+  const ua = navigator.userAgent;
+  Object.defineProperty(navigator, 'userAgent', { get: () => (window.__phone ? 'Mozilla/5.0 (Linux; Android 14; K) Chrome/130 Mobile Safari/537.36' : ua) });
   const mm = window.matchMedia.bind(window);
-  // Headless Chrome has no pointer at all, so both answers are given here.
-  window.matchMedia = (q) => (q.includes('any-pointer: fine') ? { matches: !window.__phone, addEventListener() {}, removeEventListener() {} } : mm(q));
+  window.matchMedia = (q) => (q.includes('any-pointer: fine') ? { matches: true, addEventListener() {}, removeEventListener() {} } : mm(q));
   window.__phone = true;
 ` });
 const reconnectsWhileHidden = async (phone) => {

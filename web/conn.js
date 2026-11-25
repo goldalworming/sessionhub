@@ -60,6 +60,13 @@ const DIAL_MS = 15000;
 /// is one frame that takes seconds, and a false alarm reconnects for nothing.
 const PROBE_MS = 10000;
 
+/// A phone or tablet with the page out of sight — the case `onclose` parks.
+/// By the browser's name for itself, the same words the daemon reads to call
+/// a client `mobile`, and not by its pointers: `any-pointer: fine` was the
+/// rule, and a phone with a stylus or a once-paired mouse answers yes to it,
+/// so it never parked — 140 reconnects from a pocket in three days.
+const pocketed = () => document.hidden && /Mobi|Android|iPhone|iPad/.test(navigator.userAgent);
+
 /// This page, for as long as it is open: sent with every socket, so a daemon
 /// can tell this page reconnecting from a second viewer and drop the socket it
 /// replaces at once rather than minutes later (`Cmd::ClientUp`).
@@ -174,12 +181,17 @@ export class Conn {
       // sees, and is ended again — some 80 times a day. It waits for the page
       // to be looked at (`probe`, which the page calls on its return). A
       // desktop tab keeps reconnecting: it is what rings when an agent is done.
-      if (document.hidden && !window.matchMedia('(any-pointer: fine)').matches) {
+      if (pocketed()) {
         this.parked = true;
         return;
       }
-      // Backoff from 0.5 s to 8 s. The user has to do nothing.
-      this.timer = setTimeout(() => this.connect(), this.delay);
+      // Backoff from 0.5 s to 8 s. The user has to do nothing. A page that
+      // went out of sight while this waited parks instead, like the above.
+      this.timer = setTimeout(() => {
+        this.timer = null;
+        if (pocketed()) this.parked = true;
+        else this.connect();
+      }, this.delay);
       this.delay = Math.min(this.delay * 2, RECONNECT_MAX);
     };
 
